@@ -1,0 +1,24 @@
+{
+  "name": "jharness",
+  "productName": "JHarness",
+  "version": "0.1.0",
+  "private": true,
+  "main": "desktop/main.cjs",
+  "scripts": {
+    "build:ui": "vite build --base ./",
+    "start": "electron .",
+    "package:win": "npm run build:ui && node desktop/package-win.cjs",
+    "test": "node --test desktop/*.test.cjs"
+  },
+  "dependencies": {
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
+    "lucide-react": "0.562.0"
+  },
+  "devDependencies": {
+    "electron": "42.0.0",
+    "vite": "7.3.1"
+  }
+}

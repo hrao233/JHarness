@@ -1,17 +1,17 @@
 :root{color:#252724;background:#fcfcfb;font:14px/1.55 "Segoe UI","Microsoft YaHei",sans-serif;color-scheme:light;--line:#e8e8e3;--muted:#686d65;--green:#315b47;--focus:#638f77}
 *{box-sizing:border-box}
-body{margin:0}
+body{margin:0;overflow:hidden}
 button,input,textarea,select{font:inherit}
 button{color:inherit;cursor:pointer;border:0;background:none}
 button:disabled{cursor:default;opacity:.48}
 :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
-.app{display:grid;grid-template-columns:244px minmax(0,1fr);height:100vh}
+.app{display:grid;grid-template-columns:244px minmax(0,1fr);grid-template-rows:minmax(0,1fr);height:100vh}
 .sidebar{background:#f2f3ef;border-right:1px solid var(--line);padding:17px 12px 12px;display:flex;flex-direction:column;gap:3px;overflow:hidden}
 .brand{height:36px;display:flex;align-items:center;gap:9px;padding:0 8px;margin-bottom:12px;font-size:16px;letter-spacing:-.3px}
 .mark{height:23px;width:23px;display:grid;place-items:center;background:#3b5145;color:#fff;border-radius:6px;font-size:14px;font-weight:650}
 .side-action,.project-name,.session{display:flex;align-items:center;gap:9px;width:100%;text-align:left;border-radius:7px;min-height:34px;padding:6px 9px}
 .side-action:hover,.project-name:hover,.session:hover,.model:hover{background:#e8ebe4}
-.projects{overflow:auto;flex:1;margin-top:19px}
+.projects{min-height:0;overflow:auto;overscroll-behavior:contain;flex:1;margin-top:19px}
 .side-label{font-size:11px;color:var(--muted);letter-spacing:.08em;padding:3px 9px 7px}
 .project{margin-bottom:12px}
 .project-name{font-weight:650}
@@ -20,12 +20,12 @@ button:disabled{cursor:default;opacity:.48}
 .session.selected{color:#243f32;background:#e1e9e0}
 .sidebar svg,.crumb svg{flex:none}
 .settings{margin-top:auto}
-main{min-width:0;display:grid;grid-template-rows:54px minmax(0,1fr) auto}
+main{min-width:0;min-height:0;display:grid;grid-template-rows:54px minmax(0,1fr) auto}
 header{padding:0 23px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);gap:18px}
 .crumb{min-width:0;display:flex;align-items:center;gap:8px;color:var(--muted)}
 .crumb strong{color:#2f332f;font-weight:600}
 .model{border:1px solid var(--line);padding:4px 10px;border-radius:7px;max-width:210px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.scroll{overflow:auto}
+.scroll{min-height:0;overflow:auto;overscroll-behavior:contain}
 .thread,.composer-wrap{max-width:810px;margin:auto}
 .thread{min-height:100%;display:flex;flex-direction:column;gap:20px;padding:35px 25px 24px}
 .welcome{margin:auto 0;padding:26px 0;align-self:center;text-align:center}

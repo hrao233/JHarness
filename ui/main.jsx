@@ -21,7 +21,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const running = useRef(null);
   const selection = useRef(null);
-  const end = useRef(null);
+  const scroll = useRef(null);
   const project = data.projects.find(value => value.id === selected?.project);
   const session = project?.sessions.find(value => value.id === selected?.session);
 
@@ -89,7 +89,8 @@ function App() {
   }, []);
 
   useEffect(() => {
-    end.current?.scrollIntoView({ block: 'end' });
+    const pane = scroll.current;
+    if (pane) pane.scrollTop = pane.scrollHeight;
   }, [items]);
 
   async function openProject() {
@@ -165,12 +166,12 @@ function App() {
         <ChevronRight size={15}/><strong>{session?.title || '新会话'}</strong></div>
         <button className="model" onClick={() => setShowSettings(true)}>{data.model.hasKey ? data.model.model : '配置模型'}</button>
       </header>
-      <div className="scroll">
+      <div className="scroll" ref={scroll}>
         <div className="thread">
           {!items.length && !loading && <div className="welcome">
             <div className="welcome-icon"><MessageSquare size={24} strokeWidth={1.6}/></div>
             <h1>{project ? '想了解项目的什么？' : '打开一个项目'}</h1>
-            <p>{project ? '可以浏览目录、阅读文件，或梳理项目结构。' : '选择本机文件夹，开始一段项目会话。'}</p>
+            <p>{project ? '可以阅读代码、梳理项目结构，或修改项目文件。' : '选择本机文件夹，开始一段项目会话。'}</p>
             {project ? <div className="suggestions">{suggestions.map(text =>
               <button key={text} onClick={() => setDraft(text)}><FileText size={15}/>{text}</button>)}</div>
               : <button className="primary" onClick={openProject}><FolderOpen size={16}/>选择文件夹</button>}
@@ -184,7 +185,6 @@ function App() {
                   components={{ a: ({ children }) => <span>{children}</span>, img: () => null }}>{item.text}</Markdown>}
               </div>)}
           {run && !items.some(item => item.runId === run) && <p className="muted" role="status">正在处理…</p>}
-          <div ref={end}/>
         </div>
       </div>
       <div className="bottom"><div className="composer-wrap">
@@ -196,7 +196,7 @@ function App() {
             onKeyDown={event => {
               if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) void send(event);
             }}/>
-          <div className="compose-actions"><span>{project ? '只读项目' : '未选择项目'}</span>
+          <div className="compose-actions"><span>{project ? '可编辑项目' : '未选择项目'}</span>
             {run ? <button type="button" className="send" aria-label="停止"
               onClick={() => api.stop(run).catch(error => setNotice(errText(error)))}><Square size={15}/></button>
               : <button className="send" aria-label="发送" disabled={!project || !draft.trim() || loading}><ArrowUp size={19}/></button>}

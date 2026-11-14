@@ -24,6 +24,14 @@ Agent 可以浏览目录、按名称查找、读取、编辑和新建项目内�
 
 在会话里可以请 Agent 执行构建、测试或查看 Git 状态。命令在项目目录启动 Windows PowerShell，按当前 Windows 用户权限执行。每次执行前都显示完整命令和工作目录，需人工批准。工具记录显示退出码和合并输出，长输出会截断。命令最多运行两分钟，点击「停止」会取消任务和仍在运行的命令。
 
+### 项目工具与记忆
+
+- `search_text` 搜索项目文本并返回路径和行号。`todo_write` 使用 AgentScope Core 的任务状态记录待办。`load_skill_through_path` 读取项目 Skill 的说明和资源。
+- `web_fetch` 读取用户批准的 HTTP(S) 地址。若启动环境配置了 `TAVILY_API_KEY`，也可使用 `web_search`，每次会先显示并确认发送给 Tavily 的查询。
+- 原始会话继续保存在 AgentScope Session Log，`session_list`、`session_search` 和 `session_history` 可回查同项目的会话。会话变长时，Harness 压缩模型工作上下文，界面仍可读取原始对话。
+- `memory_save` 将项目事实保存到长期记忆和每日日志，`memory_search` 和 `memory_get` 可搜索并按行读取。左侧「项目记忆」可搜索长期记忆和每日日志、编辑长期记忆，以及阅读每日和归档日志。不同项目的记忆分别保存在 JHarness 用户数据中。
+- 「自动提取和整理记忆」按项目开启。Harness 用当前模型提取长期事实、合并每日日志，并归档超过 90 天的日报。自动步骤会产生额外 API 用量。清理长期记忆和清理原始会话是独立操作。
+
 ## 开发
 
 需要 Windows x64、JDK 21、Maven 和 Node.js。当前后端使用 AgentScope Java `2.1.0-SNAPSHOT` 的本地 Maven 构件。若本机尚未安装该版本，在对应 AgentScope Java 源码根目录构建：

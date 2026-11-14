@@ -4,6 +4,7 @@ import { ChevronDown, ChevronRight, CircleHelp, FolderOpen, FolderPlus, MessageS
 import { ApprovalCard, Composer, effortLabels } from './Composer.jsx';
 import { Conversation } from './Conversation.jsx';
 import { Navigation, NavigationPanel } from './Navigation.jsx';
+import { MemoryPanel } from './MemoryPanel.jsx';
 import './style.css';
 
 const api = window.jharness;
@@ -343,7 +344,10 @@ function App() {
           selectModel={id => { setModelId(id); setEffort(''); setFast(false); }} settings={() => setShowSettings(true)}/>
       </div></div>
     </main>
-    {panel && <NavigationPanel key={panel} panel={panel} close={() => setPanel(null)} projects={data.projects}
+    {panel === 'memory' && project && <MemoryPanel project={project} busy={!!run} errorText={errText}
+      api={api} close={() => setPanel(null)} onAuto={enabled => setData(previous => ({ ...previous,
+        projects: previous.projects.map(p => p.id === project.id ? { ...p, autoMemory: enabled } : p) }))}/>}
+    {panel && panel !== 'memory' && <NavigationPanel key={panel} panel={panel} close={() => setPanel(null)} projects={data.projects}
       project={project} bookmarks={bookmarks} openChat={openChat} removeBookmark={removeBookmark}
       copy={copy} addPart={part => appendParts([part])} busy={!!run} api={api} errorText={errText}/>}
     {showSettings && <ModelSettings models={data.models} defaultModelId={data.defaultModelId} selectedId={model?.id}

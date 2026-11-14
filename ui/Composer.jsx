@@ -219,13 +219,16 @@ function FullAccessDialog({ finish }) {
 
 export function ApprovalCard({ item, decide }) {
   const command = item.operation === 'run_command';
+  const web = item.operation === 'web_fetch' || item.operation === 'web_search';
   return <div className="approval-card" role="alert">
     <div className="approval-title"><ShieldAlert size={18}/><strong>{command ? '运行 PowerShell 命令'
+      : web ? (item.operation === 'web_search' ? '搜索网页' : '读取网页')
       : item.operation === 'create_file' ? '创建文件' : '编辑文件'}</strong>
-      <code>{item.path}</code></div>
-    {command ? <>
-      <div>命令以当前 Windows 用户权限运行，可以访问项目目录之外的资源。</div>
-      <pre className="approval-command" tabIndex={0} aria-label="待批准的 PowerShell 命令">{item.after}</pre>
+      {item.path && <code>{item.path}</code>}</div>
+    {command || web ? <>
+      <div>{command ? '命令以当前 Windows 用户权限运行，可以访问项目目录之外的资源。'
+        : '批准后，下面的地址或搜索内容将用于发起网络请求。'}</div>
+      <pre className="approval-command" tabIndex={0} aria-label={command ? '待批准的 PowerShell 命令' : '待批准的网络请求'}>{item.after}</pre>
     </> : <details><summary>查看变更内容</summary>
       {!!item.before && <pre className="before">{item.before}</pre>}
       <pre className="after">{item.after || '（移除选中的原文）'}</pre>

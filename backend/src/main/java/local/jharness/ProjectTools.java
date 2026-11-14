@@ -30,7 +30,7 @@ public final class ProjectTools {
         }
     }
 
-    @Tool(name = "list_files", description = "List entries in a directory inside the selected project.")
+    @Tool(name = "list_files", readOnly = true, description = "List entries in a directory inside the selected project.")
     public ToolResultBlock list(@ToolParam(name = "path", description = "Project-relative directory; use . for the root") String path) {
         try (Stream<Path> files = Files.list(resolve(path))) {
             return ToolResultBlock.success(String.join("\n", files.filter(this::visible)
@@ -41,7 +41,7 @@ public final class ProjectTools {
         }
     }
 
-    @Tool(name = "read_file", description = "Read a UTF-8 source or documentation file inside the project.")
+    @Tool(name = "read_file", readOnly = true, description = "Read a UTF-8 source or documentation file inside the project.")
     public ToolResultBlock read(@ToolParam(name = "path", description = "Project-relative file path") String path) {
         try {
             return ToolResultBlock.success(readText(resolve(path)));
@@ -141,7 +141,7 @@ public final class ProjectTools {
         return text.replace("\r\n", "\n").replace("\n", "\r\n");
     }
 
-    @Tool(name = "search_files", description = "Find filenames containing text inside the selected project.")
+    @Tool(name = "search_files", readOnly = true, description = "Find filenames containing text inside the selected project.")
     public ToolResultBlock search(@ToolParam(name = "query", description = "Case-insensitive filename substring") String query) {
         var matches = new java.util.ArrayList<String>();
         try {
@@ -177,6 +177,51 @@ public final class ProjectTools {
         Path real = projectPath(path).toRealPath();
         checkProjectPath(real);
         return real;
+    }
+
+    @Tool(name = "search_text", readOnly = true,
+            description = "Find literal text in UTF-8 project files and return relative paths and line numbers.")
+    public ToolResultBlock searchText(
+            @ToolParam(name = "query", description = "Case-insensitive literal text") String query,
+            @ToolParam(name = "path", description = "Project-relative directory or file; omit for root", required = false)
+            String path) {
+        if (query == null || query.isBlank()) return ToolResultBlock.error("请输入要查找的文字。");
+        String needle = query.toLowerCase(java.util.Locale.ROOT);
+        var matches = new java.util.ArrayList<String>();
+        try (Stream<Path> files = Files.find(resolve(path == null ? "." : path), 9,
+                (file, attributes) -> attributes.isRegularFile() && allowedFile(file))) {
+            var candidates = files.limit(3000).iterator();
+            while (candidates.hasNext() && matches.size() < 40) {
+                Path file = candidates.next();
+                String text;
+                try {
+                    text = readText(resolve(root.relativize(file).toString()));
+                } catch (IOException | IllegalArgumentException error) {
+                    continue;
+                }
+                String[] lines = text.split("\\R", -1);
+                for (int i = 0; i < lines.length && matches.size() < 40; i++) {
+                    int index = lines[i].toLowerCase(java.util.Locale.ROOT).indexOf(needle);
+                    if (index < 0) continue;
+                    int start = Math.min(lines[i].length(), Math.max(0, index - 40));
+                    String excerpt = lines[i].substring(start, Math.min(lines[i].length(), start + 180)).strip();
+                    matches.add(root.relativize(file) + ":" + (i + 1) + " " + excerpt);
+                }
+            }
+            return ToolResultBlock.success(matches.isEmpty() ? "未找到匹配。"
+                    : String.join("\n", matches) + (matches.size() == 40 ? "\n[最多显示 40 条]" : ""));
+        } catch (IOException | IllegalArgumentException | java.io.UncheckedIOException error) {
+            return ToolResultBlock.error("无法搜索此项目路径。");
+        }
+    }
+
+    private boolean allowedFile(Path file) {
+        try {
+            checkProjectPath(file);
+            return true;
+        } catch (IOException error) {
+            return false;
+        }
     }
 
     private Path projectPath(String path) throws IOException {

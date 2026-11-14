@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('jharness', {
   openProject: () => ipcRenderer.invoke('jh:project'),
   newSession: project => ipcRenderer.invoke('jh:session', project),
   history: (project, session) => ipcRenderer.invoke('jh:history', project, session),
+  memory: (project, operation, input) => ipcRenderer.invoke('jh:memory', project, operation, input),
   copy: text => ipcRenderer.invoke('jh:copy', text),
   bookmarks: () => ipcRenderer.invoke('jh:bookmarks'),
   bookmark: value => ipcRenderer.invoke('jh:bookmark-add', value),

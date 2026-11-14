@@ -1,11 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { BookOpen, GitPullRequest, House, Images, Puzzle, Search, Settings, X } from 'lucide-react';
+import { BookOpen, Brain, GitPullRequest, House, Images, Puzzle, Search, Settings, X } from 'lucide-react';
 
 export function Navigation({ showSidebar, home, attachImage, openPanel, openSettings, busy, project }) {
   const links = [
     { label: '首页', Icon: House, action: home, expanded: showSidebar },
     { label: '添加图片', Icon: Images, action: attachImage, disabled: !project || busy },
     { label: '资料库', Icon: BookOpen, action: () => openPanel('library') },
+    { label: '项目记忆', Icon: Brain, action: () => openPanel('memory'), disabled: !project },
     { label: 'Skills 与插件', Icon: Puzzle, action: () => openPanel('plugins') },
     { label: '搜索会话', Icon: Search, action: () => openPanel('search') },
     { label: '代码审查', Icon: GitPullRequest, action: () => openPanel('review'), disabled: !project }

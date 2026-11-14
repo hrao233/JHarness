@@ -14,6 +14,9 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
   const projectPath = path.join(root, 'project');
   const data = path.join(root, 'data');
   await mkdir(projectPath);
+  const skillFolder = path.join(projectPath, '.agents', 'skills', 'fixture');
+  await mkdir(skillFolder, { recursive: true });
+  await writeFile(path.join(skillFolder, 'SKILL.md'), '---\nname: fixture\ndescription: Fixture project procedure\n---\nSKILL-BODY-18');
   await writeFile(path.join(projectPath, 'README.md'), '# Fixture\r\nProject fact: ORCHID-27.\r\n');
   await writeFile(path.join(root, 'outside.txt'), 'untouched');
   let steps = [
@@ -26,20 +29,29 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     ['edit_file', { path: 'README.md', old_text: 'ORCHID-27', new_text: 'changed' }, '原文必须'],
   ];
   const requests = [];
+  let websiteReads = 0;
   let reviewResponses = [];
   const server = createServer(async (request, response) => {
+    if (request.url === '/fixture-page') {
+      websiteReads++;
+      return response.end('TEST-WEB-PAGE');
+    }
     let raw = '';
     for await (const chunk of request) raw += chunk;
     const body = JSON.parse(raw);
     requests.push({ path: request.url, auth: request.headers.authorization, body });
     const reviewing = body.messages.some(message => JSON.stringify(message.content).includes('review one proposed project file write'));
+    const extracting = body.messages.some(message => JSON.stringify(message.content).includes('memory extraction assistant'));
+    const consolidating = body.messages.some(message => JSON.stringify(message.content).includes('New daily ledger entries to merge'));
     const results = body.messages.filter(message => message.role === 'tool');
     const toolAvailable = body.tools?.some(tool => tool.function?.name === 'read_file');
     const step = steps[results.length];
     const delta = toolAvailable && step
       ? { role: 'assistant', tool_calls: [{ index: 0, id: 'call_' + results.length, type: 'function',
           function: { name: step[0], arguments: JSON.stringify(step[1]) } }] }
-      : { role: 'assistant', content: reviewing ? reviewResponses.shift() : toolAvailable ? '**ORCHID-28**' : 'OK' };
+      : { role: 'assistant', content: reviewing ? reviewResponses.shift()
+        : extracting ? '- AUTO-FACT-198' : consolidating ? '- AUTO-FACT-198（已整理）'
+        : toolAvailable ? '**ORCHID-28**' : 'OK' };
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.end('data: ' + JSON.stringify({ id: 'chatcmpl-test', object: 'chat.completion.chunk',
       created: 1, model: 'fixture', choices: [{ index: 0, delta,
@@ -117,8 +129,13 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     assert.equal(await readFile(path.join(root, 'outside.txt'), 'utf8'), 'untouched');
     assert.ok(requests.every(request => request.path === '/v1/chat/completions' && request.auth === 'Bearer fixture-key'));
     assert.ok(requests.filter(request => request.body.tools?.length).every(request =>
-      request.body.tools.every(tool => ['read_file', 'list_files', 'search_files', 'edit_file', 'create_file', 'run_command']
-        .includes(tool.function.name))));
+      request.body.tools.every(tool => ['read_file', 'list_files', 'search_files', 'search_text', 'edit_file',
+        'create_file', 'run_command', 'todo_write', 'memory_save', 'memory_get', 'memory_search',
+        'session_search', 'session_list', 'session_history', 'load_skill_through_path', 'web_fetch',
+        'web_search'].includes(tool.function.name))));
+    assert.ok(['todo_write', 'memory_save', 'memory_search', 'memory_get', 'session_search',
+      'session_list', 'session_history', 'search_text', 'load_skill_through_path'].every(name =>
+      firstChat.tools.some(tool => tool.function.name === name)), JSON.stringify(firstChat.tools.map(tool => tool.function.name)));
     const exited = once(child, 'exit');
     child.stdin.end();
     await exited;
@@ -229,6 +246,80 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     assert.match(commandResults, /命令未获批准/);
     assert.match(commandResults, /退出码 7/);
     assert.match(commandResults, /完成/);
+
+    const memory = randomUUID();
+    await writeFile(path.join(projectPath, 'MEMORY.md'), 'UNTRUSTED-PROJECT-MEMORY');
+    steps = [
+      ['memory_save', { content: '- Prefer build profile LOCAL-ORCHID.' }],
+      ['search_text', { query: 'ORCHID-29' }],
+      ['todo_write', { todos: [{ content: 'Check the fixture', status: 'in_progress', priority: 'medium' }] }],
+      ['load_skill_through_path', { skillId: 'fixture_agents', path: 'SKILL.md' }],
+    ];
+    await call('chat', { ...context, sessionId: randomUUID(), ...model, runId: memory,
+      permission: 'full', message: '记住构建约定并搜索项目' });
+    await waitEvent(memory, 'done');
+    assert.match(JSON.stringify(requests.at(-1).body.messages), /README\.md:2/);
+    assert.match(JSON.stringify(requests.at(-1).body.messages.filter(message => message.role === 'tool')), /SKILL-BODY-18/);
+    assert.doesNotMatch(JSON.stringify(requests.at(-1).body.messages), /UNTRUSTED-PROJECT-MEMORY/);
+    const savedMemory = await call('memoryList', context);
+    assert.match(savedMemory.summary, /LOCAL-ORCHID/);
+    assert.match(await call('memorySearch', { ...context, query: 'local-orchid' }), /MEMORY\.md/);
+    assert.equal(savedMemory.daily.length, 1);
+    assert.match(await call('memoryRead', { ...context, name: savedMemory.daily[0] }), /LOCAL-ORCHID/);
+    await assert.rejects(call('memoryRead', { ...context, name: '../README.md' }));
+    assert.equal((await call('memoryList', { projectId: randomUUID() })).summary, '');
+    await assert.rejects(call('memoryUpdate', { ...context, expected: 'stale', text: 'overwrite' }));
+    assert.equal(await call('memoryUpdate', { ...context, expected: savedMemory.summary, text: '- LOCAL-ORCHID reviewed.' }), true);
+    const memoryExit = once(child, 'exit');
+    child.stdin.end();
+    await memoryExit;
+    call = launch();
+    assert.match((await call('memoryList', context)).summary, /LOCAL-ORCHID reviewed/);
+
+    const recall = randomUUID();
+    steps = [['memory_search', { query: 'LOCAL-ORCHID' }],
+      ['memory_get', { path: 'MEMORY.md', startLine: 1, endLine: 10 }],
+      ['session_search', { query: 'ORCHID-28', maxResults: 1 }]];
+    const recallStart = requests.length;
+    await call('chat', { ...context, sessionId: randomUUID(), ...model, runId: recall,
+      permission: 'full', message: '回顾以前的构建约定' });
+    await waitEvent(recall, 'done');
+    assert.match(JSON.stringify(requests[recallStart].body.messages), /LOCAL-ORCHID reviewed/);
+    const recallResults = requests.at(-1).body.messages.filter(message => message.role === 'tool');
+    assert.equal(recallResults.length, 3);
+    assert.match(JSON.stringify(recallResults[0]), /MEMORY\.md/);
+    assert.match(JSON.stringify(recallResults[1]), /LOCAL-ORCHID reviewed/);
+    assert.match(JSON.stringify(recallResults[2]), /ORCHID-28/);
+
+    const automatic = randomUUID();
+    steps = [];
+    const ledgers = path.join(data, context.projectId, 'memory');
+    await writeFile(path.join(ledgers, '2000-01-01.md'), 'OLD-LEDGER-18');
+    await call('chat', { ...context, sessionId: randomUUID(), ...model, runId: automatic,
+      permission: 'full', autoMemory: true, message: '记下新的项目约定' });
+    await waitEvent(automatic, 'done');
+    for (let i = 0; i < 60; i++) {
+      if ((await call('memoryList', context)).summary.includes('AUTO-FACT-198（已整理）')) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    const maintained = await call('memoryList', context);
+    assert.match(await call('memoryRead', { ...context, name: maintained.daily[0] }), /AUTO-FACT-198/);
+    assert.match(maintained.summary, /已整理/);
+    assert.deepEqual(maintained.archive, ['2000-01-01.md']);
+    assert.match(await call('memoryRead', { ...context, name: '2000-01-01.md', archive: true }), /OLD-LEDGER-18/);
+    const web = randomUUID();
+    const url = 'http://127.0.0.1:' + server.address().port + '/fixture-page';
+    steps = [['web_fetch', { url }]];
+    await call('chat', { ...context, sessionId: randomUUID(), ...model, runId: web,
+      permission: 'full', message: '读取测试网页' });
+    const approval = await waitEvent(web, 'approval');
+    assert.equal(approval.data.operation, 'web_fetch');
+    assert.equal(approval.data.after, url);
+    assert.equal(websiteReads, 0);
+    await call('approve', { runId: web, approvalId: approval.data.id, allow: true });
+    await waitEvent(web, 'done');
+    assert.equal(websiteReads, 1);
+    assert.match(JSON.stringify(requests.at(-1).body.messages.filter(message => message.role === 'tool')), /TEST-WEB-PAGE/);
 
     for (const effort of ['default', 'none', 'low', 'high', 'max']) {
       await call('testModel', { ...model, provider: 'deepseek', model: 'deepseek-flash', effort });

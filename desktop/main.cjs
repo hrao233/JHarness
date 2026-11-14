@@ -155,6 +155,21 @@ function context(projectId, sessionId) {
 
 function register() {
   ipcMain.handle('jh:state', () => publicSettings());
+  ipcMain.handle('jh:memory', (_, projectId, operation, input = {}) => {
+    const project = settings.projects.find(item => item.id === projectId);
+    if (!project) throw new Error('找不到项目。');
+    if (operation === 'list') return call('memoryList', { projectId });
+    if (operation === 'read') return call('memoryRead', { projectId, name: input.name, archive: input.archive === true });
+    if (operation === 'search') return call('memorySearch', { projectId, query: input.query });
+    if (activeRun) throw new Error('请在当前任务结束后修改记忆设置。');
+    if (operation === 'update') return call('memoryUpdate', { projectId, text: input.text, expected: input.expected });
+    if (operation === 'auto') {
+      project.autoMemory = input.enabled === true;
+      persist();
+      return project.autoMemory;
+    }
+    throw new Error('未知的记忆操作。');
+  });
   ipcMain.handle('jh:copy', (_, text) => {
     if (typeof text !== 'string') throw new Error('无法复制此内容。');
     clipboard.writeText(text);
@@ -294,7 +309,8 @@ function register() {
         return { label: label(item), text: item.text, image: item.image, mime: item.mime, kind: item.kind };
       });
       const session = settings.projects.find(item => item.id === projectId).sessions.find(item => item.id === sessionId);
-      await call('chat', { ...selected, ...model, message, runId, parts, permission, effort,
+      const autoMemory = settings.projects.find(item => item.id === projectId).autoMemory === true;
+      await call('chat', { ...selected, ...model, message, runId, parts, permission, effort, autoMemory,
         serviceTier: fast ? model.fastTier : '' });
       if (session.title === '新会话') session.title = message.trim().replace(/\s+/g, ' ').slice(0, 40);
       Object.assign(session, { modelId: options.modelId || '', effort, fast, permission, updatedAt: Date.now() });

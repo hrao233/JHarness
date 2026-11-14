@@ -170,6 +170,12 @@ h1{margin:0;font-weight:650;letter-spacing:-.045em;font-size:30px}
 .error-text{color:#9c3023}
 .success-text{color:#2f6247}
 .nav-dialog{width:min(550px,calc(100vw - 30px));max-height:85vh}
+.memory-dialog{width:min(660px,calc(100vw - 30px))}
+.memory-dialog textarea,.memory-ledger{width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;background:#fafbf9}
+.memory-dialog textarea{min-height:160px;resize:vertical}
+.memory-search{display:flex;gap:8px;margin:12px 0}
+.memory-search button{flex:none}
+.memory-ledger{max-height:48vh;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
 .nav-list{margin-top:11px;max-height:55vh;overflow:auto}
 .library-item{border-top:1px solid var(--line);padding:10px 0}
 .library-item small{color:var(--muted)}

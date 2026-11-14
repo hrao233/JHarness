@@ -145,6 +145,7 @@ h1{margin:0;font-weight:650;letter-spacing:-.045em;font-size:30px}
 .approval-card pre{white-space:pre-wrap;overflow:auto;max-height:100px;margin:5px 0;padding:5px;border-radius:5px;overflow-wrap:anywhere}
 .approval-card .before{background:#f8e6e5}
 .approval-card .after{background:#e6f3e8}
+.approval-card .approval-command{background:#f5eddf;max-height:130px}
 .approval-actions{justify-content:flex-end}
 .muted{color:var(--muted);margin:0}
 .notice{display:flex;align-items:center;gap:8px;color:#8b3929;background:#fcf1ed;border:1px solid #ead7d0;border-radius:8px;margin-bottom:8px;padding:7px 9px}

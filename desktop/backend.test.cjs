@@ -117,7 +117,7 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     assert.equal(await readFile(path.join(root, 'outside.txt'), 'utf8'), 'untouched');
     assert.ok(requests.every(request => request.path === '/v1/chat/completions' && request.auth === 'Bearer fixture-key'));
     assert.ok(requests.filter(request => request.body.tools?.length).every(request =>
-      request.body.tools.every(tool => ['read_file', 'list_files', 'search_files', 'edit_file', 'create_file']
+      request.body.tools.every(tool => ['read_file', 'list_files', 'search_files', 'edit_file', 'create_file', 'run_command']
         .includes(tool.function.name))));
     const exited = once(child, 'exit');
     child.stdin.end();
@@ -200,6 +200,35 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     await waitEvent(stopped, 'done');
     assert.equal(await call('approve', { runId: stopped, approvalId: cancelled.data.id, allow: true }), false);
     await assert.rejects(readFile(path.join(projectPath, 'Cancelled.txt')), { code: 'ENOENT' });
+
+    const terminal = randomUUID();
+    const command = "[IO.File]::WriteAllText([IO.Path]::Combine((Get-Location).Path, 'command.txt'), 'approved'); Write-Output '完成'; exit 7";
+    steps = [
+      ['run_command', { command: "[IO.File]::WriteAllText([IO.Path]::Combine((Get-Location).Path, 'denied.txt'), 'unexpected')" }],
+      ['run_command', { command }],
+    ];
+    await call('chat', { ...context, sessionId: randomUUID(), ...model, runId: terminal,
+      permission: 'full', message: '运行项目命令' });
+    const denied = await waitEvent(terminal, 'approval');
+    assert.equal(denied.data.operation, 'run_command');
+    await call('approve', { runId: terminal, approvalId: denied.data.id, allow: false });
+    let commandApproval;
+    for (let i = 0; i < 150 && !commandApproval; i++) {
+      commandApproval = events.find(event => event.runId === terminal && event.event === 'approval'
+        && event.data.id !== denied.data.id);
+      if (!commandApproval) await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    assert.equal(commandApproval?.data.after, command);
+    assert.equal(path.normalize(commandApproval.data.path), projectPath);
+    await assert.rejects(readFile(path.join(projectPath, 'denied.txt')), { code: 'ENOENT' });
+    await assert.rejects(readFile(path.join(projectPath, 'command.txt')), { code: 'ENOENT' });
+    await call('approve', { runId: terminal, approvalId: commandApproval.data.id, allow: true });
+    await waitEvent(terminal, 'done');
+    assert.equal(await readFile(path.join(projectPath, 'command.txt'), 'utf8'), 'approved');
+    const commandResults = JSON.stringify(requests.at(-1).body.messages.filter(message => message.role === 'tool'));
+    assert.match(commandResults, /命令未获批准/);
+    assert.match(commandResults, /退出码 7/);
+    assert.match(commandResults, /完成/);
 
     for (const effort of ['default', 'none', 'low', 'high', 'max']) {
       await call('testModel', { ...model, provider: 'deepseek', model: 'deepseek-flash', effort });

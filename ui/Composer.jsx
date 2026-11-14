@@ -218,13 +218,18 @@ function FullAccessDialog({ finish }) {
 }
 
 export function ApprovalCard({ item, decide }) {
+  const command = item.operation === 'run_command';
   return <div className="approval-card" role="alert">
-    <div className="approval-title"><ShieldAlert size={18}/><strong>{item.operation === 'create_file' ? '创建文件' : '编辑文件'}</strong>
+    <div className="approval-title"><ShieldAlert size={18}/><strong>{command ? '运行 PowerShell 命令'
+      : item.operation === 'create_file' ? '创建文件' : '编辑文件'}</strong>
       <code>{item.path}</code></div>
-    <details><summary>查看变更内容</summary>
+    {command ? <>
+      <div>命令以当前 Windows 用户权限运行，可以访问项目目录之外的资源。</div>
+      <pre className="approval-command" tabIndex={0} aria-label="待批准的 PowerShell 命令">{item.after}</pre>
+    </> : <details><summary>查看变更内容</summary>
       {!!item.before && <pre className="before">{item.before}</pre>}
       <pre className="after">{item.after || '（移除选中的原文）'}</pre>
-    </details>
+    </details>}
     <div className="approval-actions">
       <button className="secondary" onClick={() => decide(item.id, false)}>拒绝</button>
       <button className="primary" onClick={() => decide(item.id, true)}>批准这一次</button>

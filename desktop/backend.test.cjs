@@ -122,10 +122,35 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     call = launch();
     const history = await call('history', context);
     assert.deepEqual(history.map(message => message.role), ['user', 'assistant']);
+    assert.deepEqual(history.map(message => message.turn), [1, 1]);
+    assert.equal(history[0].id, full);
+    assert.equal(history[1].id, (await waitEvent(full, 'result')).data.id);
     assert.match(history[0].text, /info.txt/);
     assert.match(history[0].text, /fixture.png/);
     assert.doesNotMatch(history[0].text, /FILE-CONTEXT/);
     assert.match(history[1].text, /ORCHID-28/);
+    const search = await call('searchSessions', { query: 'orchid-28', sessions: [{ ...context, title: 'Fixture' }] });
+    assert.equal(search[0].messageId, history[1].id);
+    assert.match(search[0].excerpt, /ORCHID-28/);
+    assert.deepEqual(await call('searchSessions', {
+      query: 'FILE-CONTEXT', sessions: [{ ...context, title: 'Fixture' }]
+    }), []);
+    await assert.rejects(call('addBookmark', { ...context, messageId: randomUUID(), text: 'forged' }));
+    const saved = await call('addBookmark', { ...context, messageId: history[1].id, text: 'ignored' });
+    assert.equal(saved[0].messageId, history[1].id);
+    assert.equal(saved[0].text, history[1].text);
+    assert.deepEqual(await call('addBookmark', { ...context, messageId: history[1].id }), saved);
+    const legacy = { ...context, id: randomUUID(), turn: 1, role: 'user', text: history[0].text };
+    assert.equal(await call('importBookmarks', { bookmarks: [legacy, legacy] }), true);
+    const afterImport = await call('listBookmarks');
+    assert.equal(afterImport.length, 2);
+    assert.equal(afterImport.find(item => item.id === legacy.id).messageId, history[0].id);
+    const afterSave = once(child, 'exit');
+    child.stdin.end();
+    await afterSave;
+    call = launch();
+    assert.deepEqual(await call('listBookmarks'), afterImport);
+    assert.equal((await call('removeBookmark', { id: saved[0].id })).length, 1);
 
     const ask = randomUUID();
     steps = [['edit_file', { path: 'README.md', old_text: 'ORCHID-28', new_text: 'NOT-APPROVED' }]];

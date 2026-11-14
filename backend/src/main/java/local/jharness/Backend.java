@@ -1,5 +1,6 @@
 package local.jharness;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.agent.RuntimeContext;
@@ -36,6 +37,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -66,11 +68,16 @@ public final class Backend {
 
     private final ObjectMapper json = new ObjectMapper();
     private final PrintStream protocol;
+    private final Object bookmarkLock = new Object();
     private final Path dataDirectory;
     private final Map<String, Disposable.Swap> runs = new ConcurrentHashMap<>();
     private final Map<String, Approval> approvals = new ConcurrentHashMap<>();
 
     private record Approval(String runId, CompletableFuture<Boolean> decision) {}
+    private record ChatMessage(String id, String role, String text, String timestamp, int turn) {}
+    private record Bookmark(String id, String projectId, String sessionId, String messageId,
+            int turn, String role, String text) {}
+    private record SearchMatch(String projectId, String sessionId, String messageId, String excerpt) {}
 
     private Backend(PrintStream protocol, Path dataDirectory) {
         this.protocol = protocol;
@@ -117,6 +124,11 @@ public final class Backend {
                 case "ping" -> Map.of("version", "0.1.0");
                 case "testModel" -> testModel(params);
                 case "history" -> history(params);
+                case "searchSessions" -> searchSessions(params);
+                case "listBookmarks" -> listBookmarks();
+                case "addBookmark" -> addBookmark(params);
+                case "removeBookmark" -> removeBookmark(params);
+                case "importBookmarks" -> importBookmarks(params);
                 case "chat" -> startChat(params);
                 case "approve" -> approve(params);
                 default -> throw new IllegalArgumentException("未知操作。");
@@ -140,18 +152,119 @@ public final class Backend {
         return Map.of("model", model.getModelName());
     }
 
-    private List<Map<String, String>> history(JsonNode params) throws Exception {
+    private List<ChatMessage> history(JsonNode params) throws Exception {
         var context = context(params);
         var log = store(workspace(params)).open(
                 new SessionKey(USER_ID, AGENT_ID, context.getSessionId()), context);
-        return SessionViews.transcript(log).messages().stream()
-                .filter(message -> message.getRole() == MsgRole.USER || message.getRole() == MsgRole.ASSISTANT)
-                .filter(message -> !message.getTextContent().isBlank())
-                .map(message -> Map.of("role", message.getRole() == MsgRole.USER ? "user" : "assistant",
-                        "text", message.getRole() == MsgRole.USER && message.getMetadata() != null
-                                && message.getMetadata().get("jharnessDisplay") instanceof String display
-                                ? display : message.getTextContent()))
-                .toList();
+        var history = new ArrayList<ChatMessage>();
+        int turn = 0;
+        for (Msg message : SessionViews.transcript(log).messages()) {
+            boolean user = message.getRole() == MsgRole.USER;
+            if ((!user && message.getRole() != MsgRole.ASSISTANT) || message.getTextContent().isBlank()) continue;
+            if (user) turn++;
+            String text = user && message.getMetadata() != null
+                    && message.getMetadata().get("jharnessDisplay") instanceof String display
+                    ? display : message.getTextContent();
+            history.add(new ChatMessage(message.getId(), user ? "user" : "assistant", text,
+                    message.getTimestamp(), turn));
+        }
+        return history;
+    }
+
+    private List<SearchMatch> searchSessions(JsonNode params) throws Exception {
+        String query = required(params, "query").toLowerCase(Locale.ROOT);
+        var results = new ArrayList<SearchMatch>();
+        for (JsonNode session : params.path("sessions")) {
+            String projectId = identifier(session, "projectId");
+            String sessionId = identifier(session, "sessionId");
+            if (session.path("title").asText().toLowerCase(Locale.ROOT).contains(query)
+                    || session.path("projectName").asText().toLowerCase(Locale.ROOT).contains(query)) {
+                results.add(new SearchMatch(projectId, sessionId, null, ""));
+            } else {
+                for (ChatMessage message : history(session)) {
+                    String text = message.text();
+                    int index = text.toLowerCase(Locale.ROOT).indexOf(query);
+                    if (index < 0) continue;
+                    int start = Math.min(text.length(), Math.max(index - 28, 0));
+                    int end = Math.min(text.length(), start + 125);
+                    String excerpt = (start > 0 ? "…" : "") + text.substring(start, end).strip()
+                            + (end < text.length() ? "…" : "");
+                    results.add(new SearchMatch(projectId, sessionId, message.id(), excerpt));
+                    break;
+                }
+            }
+            if (results.size() == 100) break;
+        }
+        return results;
+    }
+
+    private List<Bookmark> listBookmarks() throws Exception {
+        Path file = dataDirectory.resolve("bookmarks.json");
+        if (!Files.exists(file)) return new ArrayList<>();
+        return json.readValue(file.toFile(), new TypeReference<ArrayList<Bookmark>>() {});
+    }
+
+    private void saveBookmarks(List<Bookmark> bookmarks) throws Exception {
+        Path file = dataDirectory.resolve("bookmarks.json");
+        Path temporary = Files.createTempFile(dataDirectory, "bookmarks-", ".tmp");
+        try {
+            json.writeValue(temporary.toFile(), bookmarks);
+            Files.move(temporary, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } finally {
+            Files.deleteIfExists(temporary);
+        }
+    }
+
+    private List<Bookmark> addBookmark(JsonNode params) throws Exception {
+        String messageId = required(params, "messageId");
+        ChatMessage message = history(params).stream().filter(item -> item.id().equals(messageId))
+                .findFirst().orElseThrow(() -> new IllegalArgumentException("找不到已保存的消息。"));
+        String projectId = identifier(params, "projectId");
+        String sessionId = identifier(params, "sessionId");
+        synchronized (bookmarkLock) {
+            var bookmarks = listBookmarks();
+            if (bookmarks.stream().noneMatch(item -> item.projectId().equals(projectId)
+                    && item.sessionId().equals(sessionId) && messageId.equals(item.messageId()))) {
+                bookmarks.add(0, toBookmark(UUID.randomUUID().toString(), projectId, sessionId, message));
+                saveBookmarks(bookmarks);
+            }
+            return bookmarks;
+        }
+    }
+
+    private List<Bookmark> removeBookmark(JsonNode params) throws Exception {
+        String id = identifier(params, "id");
+        synchronized (bookmarkLock) {
+            var bookmarks = listBookmarks();
+            if (bookmarks.removeIf(item -> id.equals(item.id()))) saveBookmarks(bookmarks);
+            return bookmarks;
+        }
+    }
+
+    private boolean importBookmarks(JsonNode params) throws Exception {
+        synchronized (bookmarkLock) {
+            var bookmarks = listBookmarks();
+            int count = bookmarks.size();
+            for (JsonNode item : params.path("bookmarks")) {
+                String id = identifier(item, "id");
+                if (bookmarks.stream().anyMatch(bookmark -> id.equals(bookmark.id()))) continue;
+                String projectId = identifier(item, "projectId");
+                String sessionId = identifier(item, "sessionId");
+                int turn = item.path("turn").asInt();
+                String role = required(item, "role");
+                String text = item.path("text").asText();
+                var message = history(item).stream().filter(value -> value.turn() == turn
+                        && role.equals(value.role()) && text.equals(value.text())).findFirst();
+                bookmarks.add(message.map(value -> toBookmark(id, projectId, sessionId, value))
+                        .orElseGet(() -> new Bookmark(id, projectId, sessionId, null, turn, role, text)));
+            }
+            if (bookmarks.size() != count) saveBookmarks(bookmarks);
+            return true;
+        }
+    }
+
+    private static Bookmark toBookmark(String id, String projectId, String sessionId, ChatMessage message) {
+        return new Bookmark(id, projectId, sessionId, message.id(), message.turn(), message.role(), message.text());
     }
 
     private boolean startChat(JsonNode params) throws Exception {
@@ -226,7 +339,7 @@ public final class Backend {
             }
         }
         String display = labels.isEmpty() ? text : text + "\n\n" + String.join(" · ", labels);
-        return Msg.builder().role(MsgRole.USER).content(blocks)
+        return Msg.builder().id(identifier(params, "runId")).role(MsgRole.USER).content(blocks)
                 .metadata(Map.of("jharnessDisplay", display)).build();
     }
 
@@ -280,7 +393,8 @@ public final class Backend {
         } else if (value instanceof ToolResultEndEvent e) {
             event(runId, "tool-end", Map.of("toolId", e.getToolCallId(), "status", e.getState().toString()));
         } else if (value instanceof AgentResultEvent e) {
-            event(runId, "result", Map.of("text", e.getResult().getTextContent()));
+            Msg result = e.getResult();
+            event(runId, "result", Map.of("id", result.getId(), "text", result.getTextContent()));
         }
     }
 

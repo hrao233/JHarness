@@ -25,6 +25,7 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
   const dialog = useRef(null);
   const [query, setQuery] = useState('');
   const [result, setResult] = useState(null);
+  const [search, setSearch] = useState(null);
   const [error, setError] = useState('');
   const [revision, setRevision] = useState(0);
   const [diff, setDiff] = useState('unstaged');
@@ -41,9 +42,26 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
   }, [panel, project?.id, revision]);
 
   const needle = query.trim().toLowerCase();
+  useEffect(() => {
+    if (panel !== 'search' || !needle) return;
+    let live = true;
+    const timer = setTimeout(() => {
+      api.searchSessions(needle).then(matches => {
+        if (live) setSearch({ needle, matches });
+      }).catch(error => {
+        if (live) setSearch({ needle, error: errorText(error) });
+      });
+    }, 220);
+    return () => { live = false; clearTimeout(timer); };
+  }, [panel, needle]);
+
   const chats = panel === 'search' ? projects.flatMap(p => p.sessions.map(s => ({ p, s })))
-    .filter(({ p, s }) => (p.name + ' ' + s.title).toLowerCase().includes(needle))
     .sort((a, b) => (b.s.updatedAt || 0) - (a.s.updatedAt || 0)) : [];
+  const results = !needle ? chats : search?.needle === needle && search.matches
+    ? search.matches.flatMap(match => {
+      const chat = chats.find(({ p, s }) => p.id === match.projectId && s.id === match.sessionId);
+      return chat ? [{ ...chat, ...match }] : [];
+    }) : [];
 
   return <dialog ref={dialog} className={'dialog nav-dialog nav-' + panel} aria-label={titles[panel]}
     onCancel={event => { event.preventDefault(); close(); }}>
@@ -51,14 +69,16 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
       <button onClick={close} aria-label="关闭"><X size={18}/></button></div>
     {error && <p className="error-text" role="alert">{error}</p>}
     {panel === 'search' && <>
-      <input type="search" autoFocus aria-label="搜索项目或会话标题" placeholder="搜索项目或会话标题"
+      <input type="search" autoFocus maxLength={160} aria-label="搜索项目、会话标题或消息正文" placeholder="搜索项目、会话标题或消息正文"
         value={query} onChange={event => setQuery(event.target.value)}/>
       <div className="nav-list">
-        {chats.map(({ p, s }) => <button className="menu-row" disabled={busy} key={s.id}
-          onClick={() => { close(); void openChat(p.id, s.id); }}>
-          <span className="menu-copy">{s.title}<small>{p.name}</small></span>
+        {results.map(({ p, s, messageId, excerpt }) => <button className="menu-row" disabled={busy} key={s.id}
+          onClick={() => { close(); void openChat(p.id, s.id, messageId ? { messageId } : null); }}>
+          <span className="menu-copy">{s.title}<small>{p.name}</small>{excerpt && <small>{excerpt}</small>}</span>
         </button>)}
-        {!chats.length && <p className="muted">没有匹配的会话。</p>}
+        {needle && search?.needle !== needle && <p className="muted" role="status">正在搜索会话…</p>}
+        {needle && search?.needle === needle && search.error && <p className="error-text" role="alert">{search.error}</p>}
+        {!results.length && (!needle || (search?.needle === needle && !search.error)) && <p className="muted">没有匹配的会话。</p>}
       </div>
     </>}
     {panel === 'library' && <div className="nav-list">
@@ -68,7 +88,7 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
         <div>
           <button className="secondary" disabled={busy} onClick={() => {
             close();
-            void openChat(value.projectId, value.sessionId, value.turn);
+            void openChat(value.projectId, value.sessionId, { messageId: value.messageId, turn: value.turn });
           }}>打开原会话</button>
           <button className="secondary" onClick={() => copy(value.text)}>复制</button>
           <button className="secondary" onClick={() => removeBookmark(value.id)}>移除收藏</button>

@@ -13,7 +13,8 @@ export function Conversation({ items, sessionId, children, status, copy, quote, 
   const [preview, setPreview] = useState(null);
   let turn = 0;
   const rows = items.map((item, index) => {
-    if (item.role === 'user') turn++;
+    if (item.turn !== undefined) turn = item.turn;
+    else if (item.role === 'user') turn++;
     return { item, turn, index };
   });
   const prompts = rows.filter(({ item }) => item.role === 'user');
@@ -50,12 +51,14 @@ export function Conversation({ items, sessionId, children, status, copy, quote, 
     update();
   }
 
-  function goTo(turn) {
+  function goTo(turn, messageId) {
     const pane = scroll.current;
-    const prompt = pane?.querySelector('[data-prompt="' + turn + '"]');
-    if (!prompt) return;
-    pane.scrollTop = prompt.offsetTop - 20;
-    target.current = { turn, top: pane.scrollTop };
+    if (!pane) return;
+    const message = messageId ? pane.querySelector('[data-message-id="' + CSS.escape(messageId) + '"]') : null;
+    const anchor = message || pane.querySelector('[data-prompt="' + Number(turn) + '"]');
+    if (!anchor) return;
+    pane.scrollTop = anchor.offsetTop - 20;
+    target.current = { turn: Number(anchor.dataset.turn), top: pane.scrollTop };
     update();
   }
 
@@ -88,7 +91,7 @@ export function Conversation({ items, sessionId, children, status, copy, quote, 
 
   useEffect(() => {
     if (jump?.turn === 'latest') goBottom();
-    else if (jump) goTo(jump.turn);
+    else if (jump) goTo(jump.turn, jump.messageId);
   }, [jump]);
 
   return <div className="conversation">
@@ -123,9 +126,9 @@ export function Conversation({ items, sessionId, children, status, copy, quote, 
           ? <details className="tool" key={item.id || index}><summary><FileText size={15}/>{item.name}<small>{item.status}</small></summary>
             {item.args && <pre>{item.args}</pre>}{item.output && <pre>{item.output}</pre>}</details>
           : <Message key={sessionId + ':' + index} item={item} turn={turn}
-            bookmark={saved.find(value => value.sessionId === sessionId && value.turn === turn
-              && value.role === item.role && value.text === item.text)}
-            copy={copy} quote={quote} onSave={onSave} streaming={item.role === 'assistant' && item.runId === run}/>)}
+            bookmark={saved.find(value => value.sessionId === sessionId && (value.messageId
+              ? value.messageId === item.id : value.turn === turn && value.role === item.role && value.text === item.text))}
+            copy={copy} quote={quote} onSave={onSave} canSave={!!item.id && !run}/>)}
         {status && <p className="muted" role="status">正在处理…</p>}
       </div>
     </div>
@@ -134,7 +137,7 @@ export function Conversation({ items, sessionId, children, status, copy, quote, 
   </div>;
 }
 
-function Message({ item, turn, bookmark, copy, quote, onSave, streaming }) {
+function Message({ item, turn, bookmark, copy, quote, onSave, canSave }) {
   const [copied, setCopied] = useState(false);
   const reset = useRef(null);
   const menu = useRef(null);
@@ -149,7 +152,8 @@ function Message({ item, turn, bookmark, copy, quote, onSave, streaming }) {
   }
 
   return <article className={'message ' + (user ? 'message-user' : 'message-assistant')}
-    data-prompt={user ? turn : undefined} aria-label={user ? '用户消息 ' + turn : '助手回复'}>
+    data-prompt={user ? turn : undefined} data-message-id={item.id} data-turn={turn}
+    aria-label={user ? '用户消息 ' + turn : '助手回复'}>
     <div className={user ? 'user-msg' : 'assistant-msg'}>
       {user ? item.text : <Markdown remarkPlugins={[remarkGfm]}
         components={{ a: ({ children }) => <span>{children}</span>, img: () => null }}>{item.text}</Markdown>}
@@ -158,7 +162,7 @@ function Message({ item, turn, bookmark, copy, quote, onSave, streaming }) {
       <button type="button" aria-label={copied ? '已复制' : '复制消息'} title={copied ? '已复制' : '复制消息'}
         onClick={copyMessage}>{copied ? <Check size={15}/> : <Copy size={15}/>}</button>
       <button type="button" disabled={!quote} aria-label="引用到输入栏" title="引用到输入栏" onClick={() => quote(item.text)}><Quote size={15}/></button>
-      {!streaming && turn > 0 && <details ref={menu} className="message-menu" onBlur={event => {
+      {canSave && turn > 0 && <details ref={menu} className="message-menu" onBlur={event => {
         if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false;
       }} onKeyDown={event => {
         if (event.key === 'Escape') {

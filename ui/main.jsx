@@ -7,7 +7,7 @@ import { Navigation, NavigationPanel } from './Navigation.jsx';
 import './style.css';
 
 const api = window.jharness;
-const empty = { projects: [], models: [], bookmarks: [] };
+const empty = { projects: [], models: [] };
 const errText = error => String(error.message || error).replace(/^Error invoking remote method '[^']+': Error: /, '');
 const suggestions = ['读一下 README，解释这个项目的结构。', '这个项目有哪些主要模块？', '帮我找到项目的启动入口。'];
 
@@ -29,11 +29,11 @@ function App() {
   const [showSidebar, setShowSidebar] = useState(true);
   const [panel, setPanel] = useState(null);
   const [jump, setJump] = useState(null);
+  const [bookmarks, setBookmarks] = useState([]);
   const [loading, setLoading] = useState(false);
   const running = useRef(null);
   const selection = useRef(null);
   const scroll = useRef(null);
-  const bookmarks = data.bookmarks || [];
   const project = data.projects.find(value => value.id === selected?.project);
   const session = project?.sessions.find(value => value.id === selected?.session);
   const model = data.models.find(value => value.id === (modelId || data.defaultModelId));
@@ -78,6 +78,7 @@ function App() {
       const p = state.projects[0];
       if (p) void select(p, p.sessions[0]);
     }).catch(error => setNotice(errText(error)));
+    api.bookmarks().then(setBookmarks).catch(error => setNotice(errText(error)));
     return api.onEvent(message => {
       const current = running.current;
       if (message.runId !== current?.id) return;
@@ -95,10 +96,10 @@ function App() {
       setItems(previous => {
         if (event === 'text' || event === 'result') {
           const index = previous.findLastIndex(item => item.role === 'assistant' && item.runId === current.id);
-          if (index < 0) return [...previous, { role: 'assistant', runId: current.id, text: data.text || data.delta }];
+          if (index < 0) return [...previous, { id: data.id, role: 'assistant', runId: current.id, text: data.text || data.delta }];
           const item = previous[index];
           return previous.map((value, i) => i === index
-            ? { ...item, text: event === 'result' ? data.text : item.text + data.delta }
+            ? { ...item, id: data.id ?? item.id, text: event === 'result' ? data.text : item.text + data.delta }
             : value);
         }
         if (event === 'tool-start') {
@@ -179,27 +180,24 @@ function App() {
 
   async function removeBookmark(id) {
     try {
-      const bookmarks = await api.removeBookmark(id);
-      setData(previous => ({ ...previous, bookmarks }));
+      setBookmarks(await api.removeBookmark(id));
     } catch (error) { setNotice(errText(error)); }
   }
 
-  async function saveBookmark({ item, turn, bookmark }) {
+  async function saveBookmark({ item, bookmark }) {
     if (bookmark) return removeBookmark(bookmark.id);
-    if (!session || !turn || item.role === 'assistant' && item.runId === run) return;
+    if (!session || !item.id || run) return;
     try {
-      const bookmarks = await api.bookmark({ projectId: project.id, sessionId: session.id,
-        turn, role: item.role, text: item.text });
-      setData(previous => ({ ...previous, bookmarks }));
+      setBookmarks(await api.bookmark({ projectId: project.id, sessionId: session.id, messageId: item.id }));
     } catch (error) { setNotice(errText(error)); }
   }
 
-  async function openChat(projectId, sessionId, turn) {
+  async function openChat(projectId, sessionId, anchor) {
     const target = data.projects.find(value => value.id === projectId);
     const chat = target?.sessions.find(value => value.id === sessionId);
     if (!chat || run) return;
     await select(target, chat);
-    if (turn && selection.current?.session === sessionId) setJump({ turn });
+    if (anchor && selection.current?.session === sessionId) setJump(anchor);
   }
 
   async function decide(id, allow) {
@@ -231,7 +229,7 @@ function App() {
       reservation.selection = selection.current;
       const labels = parts.map(part => part.label);
       const display = text + (labels.length ? '\n\n' + labels.join(' · ') : '');
-      setItems(previous => [...previous, { role: 'user', text: display, runId: id }]);
+      setItems(previous => [...previous, { id, role: 'user', text: display, runId: id }]);
       await api.chat(project.id, target.id, text, id, { modelId, effort, permission: perm, parts });
     } catch (error) {
       if (running.current?.id === id) {

@@ -14,6 +14,7 @@ let activeRun;
 let settings;
 let settingsFile;
 let quitting = false;
+let bookmarkMigration;
 const pending = new Map();
 const attachments = new Map();
 const effortValues = ['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -80,8 +81,24 @@ function call(method, params = {}) {
 
 function publicSettings() {
   const models = settings.models.map(({ encryptedKey, ...model }) => ({ ...model, hasKey: Boolean(encryptedKey) }));
-  return { projects: settings.projects, models, defaultModelId: settings.defaultModelId,
-    bookmarks: settings.bookmarks || [] };
+  return { projects: settings.projects, models, defaultModelId: settings.defaultModelId };
+}
+
+function migrateBookmarks() {
+  if (!settings.bookmarks?.length) return Promise.resolve();
+  if (!bookmarkMigration) {
+    bookmarkMigration = call('importBookmarks', { bookmarks: settings.bookmarks }).then(() => {
+      const previous = settings.bookmarks;
+      delete settings.bookmarks;
+      try {
+        persist();
+      } catch (error) {
+        settings.bookmarks = previous;
+        throw error;
+      }
+    }).finally(() => { bookmarkMigration = undefined; });
+  }
+  return bookmarkMigration;
 }
 
 function modelInput(input) {
@@ -116,22 +133,26 @@ function register() {
     if (typeof text !== 'string') throw new Error('无法复制此内容。');
     clipboard.writeText(text);
   });
-  ipcMain.handle('jh:bookmark-add', (_, value) => {
-    context(value.projectId, value.sessionId);
-    const { projectId, sessionId, turn, role, text } = value;
-    if (!Number.isSafeInteger(turn) || turn < 1 || !['user', 'assistant'].includes(role)
-        || typeof text !== 'string' || !text.trim()) throw new Error('无法收藏此消息。');
-    const bookmarks = settings.bookmarks ||= [];
-    if (!bookmarks.some(item => item.sessionId === sessionId && item.turn === turn && item.role === role && item.text === text)) {
-      bookmarks.unshift({ id: randomUUID(), projectId, sessionId, turn, role, text });
-      persist();
-    }
-    return bookmarks;
+  ipcMain.handle('jh:bookmarks', async () => {
+    await migrateBookmarks();
+    return call('listBookmarks');
   });
-  ipcMain.handle('jh:bookmark-remove', (_, id) => {
-    settings.bookmarks = (settings.bookmarks || []).filter(item => item.id !== id);
-    persist();
-    return settings.bookmarks;
+  ipcMain.handle('jh:bookmark-add', async (_, { projectId, sessionId, messageId }) => {
+    const selected = context(projectId, sessionId);
+    await migrateBookmarks();
+    return call('addBookmark', { ...selected, messageId });
+  });
+  ipcMain.handle('jh:bookmark-remove', async (_, id) => {
+    await migrateBookmarks();
+    return call('removeBookmark', { id });
+  });
+  ipcMain.handle('jh:search-sessions', (_, query) => {
+    if (typeof query !== 'string' || !query.trim() || query.length > 160) return [];
+    const sessions = settings.projects.flatMap(project => project.sessions.map(session => ({
+      projectId: project.id, sessionId: session.id, projectName: project.name, title: session.title,
+      updatedAt: session.updatedAt || 0
+    }))).sort((a, b) => b.updatedAt - a.updatedAt);
+    return call('searchSessions', { query, sessions });
   });
   ipcMain.handle('jh:git-review', async (_, projectId) => {
     const project = settings.projects.find(item => item.id === projectId);

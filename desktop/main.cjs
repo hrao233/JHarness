@@ -18,6 +18,18 @@ let bookmarkMigration;
 const pending = new Map();
 const attachments = new Map();
 const effortValues = ['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const deepseekEfforts = ['default', 'none', 'low', 'high', 'max'];
+
+function fastTier(profile) {
+  if (profile.provider !== 'compatible') return '';
+  if (profile.fastTier !== undefined) return profile.fastTier;
+  return new URL(profile.baseUrl).hostname === 'api.openai.com' ? 'fast' : '';
+}
+
+function effortLevels(profile) {
+  if (profile.provider === 'deepseek') return deepseekEfforts;
+  return ['default', ...(profile.efforts || ['minimal', 'low', 'medium', 'high', 'xhigh'])];
+}
 
 function persist() {
   const temporary = settingsFile + '.tmp';
@@ -80,7 +92,9 @@ function call(method, params = {}) {
 }
 
 function publicSettings() {
-  const models = settings.models.map(({ encryptedKey, ...model }) => ({ ...model, hasKey: Boolean(encryptedKey) }));
+  const models = settings.models.map(({ encryptedKey, ...model }) => ({
+    ...model, fastTier: fastTier(model), effortLevels: effortLevels(model), hasKey: Boolean(encryptedKey)
+  }));
   return { projects: settings.projects, models, defaultModelId: settings.defaultModelId };
 }
 
@@ -118,7 +132,11 @@ function modelInput(input) {
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
     throw new Error('请输入有效的 HTTP 或 HTTPS Base URL。');
   }
-  return { provider, model, baseUrl, key };
+  const profile = { provider, baseUrl, fastTier: input.fastTier };
+  const tier = fastTier(profile);
+  if (!['', 'fast', 'priority'].includes(tier)) throw new Error('无效的快速模式配置。');
+  const efforts = Array.isArray(input.efforts) ? effortValues.slice(1).filter(value => input.efforts.includes(value)) : undefined;
+  return { provider, model, baseUrl, key, fastTier: tier, efforts };
 }
 
 function context(projectId, sessionId) {
@@ -222,7 +240,11 @@ function register() {
     if (!project) return [];
     return (await projectParts(project.directory)).map(({ text, ...part }) => ({ ...part, label: label(part) }));
   });
-  ipcMain.handle('jh:test-model', (_, input) => call('testModel', modelInput(input)));
+  ipcMain.handle('jh:test-model', (_, input) => {
+    const model = modelInput(input);
+    const effort = effortLevels(model).includes(input.testEffort) ? input.testEffort : 'default';
+    return call('testModel', { ...model, effort, serviceTier: input.testFast ? model.fastTier : '' });
+  });
   ipcMain.handle('jh:save-model', (_, input) => {
     const { key, ...model } = modelInput(input);
     if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows 凭证保护不可用。');
@@ -241,7 +263,10 @@ function register() {
     const profile = settings.models.find(item => item.id === (options.modelId || settings.defaultModelId));
     if (!profile) throw new Error('请先在设置中添加模型。');
     const model = modelInput(profile);
-    const effort = effortValues.includes(options.effort) ? options.effort : 'default';
+    const effort = options.effort || 'default';
+    if (!effortLevels(model).includes(effort)) throw new Error('当前模型未配置此推理强度。');
+    const fast = options.fast === true;
+    if (fast && !model.fastTier) throw new Error('当前模型未配置快速模式。');
     const permission = ['ask', 'assist', 'full'].includes(options.permission) ? options.permission : 'assist';
     if (typeof message !== 'string' || !message.trim() || message.length > 16000) {
       throw new Error('请输入 16,000 字符以内的消息。');
@@ -262,9 +287,10 @@ function register() {
         return { label: label(item), text: item.text, image: item.image, mime: item.mime, kind: item.kind };
       });
       const session = settings.projects.find(item => item.id === projectId).sessions.find(item => item.id === sessionId);
-      await call('chat', { ...selected, ...model, message, runId, parts, permission, effort });
+      await call('chat', { ...selected, ...model, message, runId, parts, permission, effort,
+        serviceTier: fast ? model.fastTier : '' });
       if (session.title === '新会话') session.title = message.trim().replace(/\s+/g, ' ').slice(0, 40);
-      Object.assign(session, { modelId: options.modelId || '', effort, permission, updatedAt: Date.now() });
+      Object.assign(session, { modelId: options.modelId || '', effort, fast, permission, updatedAt: Date.now() });
       persist();
       for (const part of requested) attachments.delete(part.id);
       return session.title;

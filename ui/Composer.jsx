@@ -4,22 +4,20 @@ import { ArrowUp, Check, ChevronDown, ChevronRight, FileText, FolderOpen, Hand, 
 
 const permissionOptions = [
   { id: 'ask', label: '请求批准', description: '每次修改或创建项目文件前询问', Icon: Hand },
-  { id: 'assist', label: '帮我批准', description: '小范围替换自动批准。创建文件、整段移除或大段替换前询问', Icon: ShieldCheck },
+  { id: 'assist', label: '帮我批准', description: '用当前模型单独审查拟议改动。审查不确定时由你决定', Icon: ShieldCheck },
   { id: 'full', label: '完全访问权限', description: '允许项目内的可用文件操作，无需逐次批准', Icon: ShieldAlert }
 ];
-const effortLabels = { default: '默认', none: '关闭', minimal: '最低', low: '低', medium: '中',
+export const effortLabels = { default: '默认', none: '关闭', minimal: '最低', low: '低', medium: '中',
   high: '高', xhigh: '很高', max: '极高' };
-const deepseekEfforts = ['default', 'none', 'low', 'high', 'max'];
-const compatibleEfforts = ['default', 'minimal', 'low', 'medium', 'high', 'xhigh'];
 const partIcons = { file: FileText, folder: FolderOpen, image: Image, skill: FileText, plugin: Puzzle };
 
 export function Composer({ draft, setDraft, project, loading, run, send, stop, parts, remove, attach,
     availableParts, loadParts, addPart, permission, setPermission, models, modelId, model,
-    defaultModelId, effort, setEffort, selectModel, settings }) {
+    defaultModelId, effort, setEffort, fast, setFast, selectModel, settings }) {
   const [menu, setMenu] = useState(null);
   const box = useRef(null);
   const choice = permissionOptions.find(option => option.id === permission) || permissionOptions[1];
-  const levels = model?.provider === 'deepseek' ? deepseekEfforts : compatibleEfforts;
+  const levels = model?.effortLevels || ['default'];
   const tick = Math.max(0, levels.indexOf(effort));
 
   useEffect(() => {
@@ -111,6 +109,26 @@ export function Composer({ draft, setDraft, project, loading, run, send, stop, p
         </div>
       </div>
       <div className="action-group">
+        {!!model && <div className="menu-anchor">
+          <button type="button" className="compose-button icon-button speed-button"
+            title={fast ? '快速模式已开启' : '设置生成速度'} aria-label="设置生成速度"
+            aria-expanded={menu === 'speed'} aria-pressed={fast} disabled={!!run} onClick={() => toggle('speed')}>
+            <Zap size={17}/>
+          </button>
+          {menu === 'speed' && <div className="popover speed-menu right-menu" aria-label="生成速度">
+            <div className="menu-label">生成速度</div>
+            <button type="button" className="menu-row" aria-pressed={!fast}
+              onClick={() => { setFast(false); setMenu(null); }}>
+              <span className="menu-copy">标准<small>使用服务商的默认处理档位</small></span>{!fast && <Check size={17}/>}
+            </button>
+            {model.fastTier ? <button type="button" className="menu-row" aria-pressed={fast}
+              onClick={() => { setFast(true); setMenu(null); }}>
+              <span className="menu-copy">快速<small>请求服务商快速档位，可能有额外用量费用</small></span>{fast && <Check size={17}/>}
+            </button> : <div className="menu-empty">{model.provider === 'deepseek'
+              ? 'DeepSeek 官方接口未提供独立快速档位。'
+              : '到模型设置配置服务商支持的快速档位。'}</div>}
+          </div>}
+        </div>}
         <div className="menu-anchor">
           <button type="button" className="compose-button model-button" title="选择推理强度（Ctrl+Shift+M）"
             disabled={!!run} aria-expanded={menu === 'reasoning' || menu === 'models'}
@@ -118,24 +136,24 @@ export function Composer({ draft, setDraft, project, loading, run, send, stop, p
               if (menu === 'models') setMenu(null);
               else toggle(model ? 'reasoning' : 'models');
             }}>
-            <Zap size={17}/><span className="model-name">{model?.model || '选择模型'}</span>
-            {model && <span className="effort-label">{effortLabels[levels[tick]]}</span>}<ChevronDown size={14}/>
+            <span className="model-name">{model?.model || '选择模型'}</span>
+            {levels.length > 1 && <span className="effort-label">{effortLabels[levels[tick]]}</span>}<ChevronDown size={14}/>
           </button>
           {menu === 'reasoning' && <div className="popover reasoning-menu right-menu" aria-label="选择推理强度">
-            <div className="reasoning-head"><Zap size={19}/><strong>{model ? effortLabels[levels[tick]] : '选择模型'}</strong>
+            <div className="reasoning-head"><span/><strong>{levels.length > 1 ? effortLabels[levels[tick]] : '模型默认'}</strong>
               <button type="button" title="恢复默认推理强度" aria-label="恢复默认推理强度" disabled={!model || tick === 0}
                 onClick={() => setEffort('default')}><RotateCcw size={17}/></button>
             </div>
             <button type="button" className="model-picker-link" onClick={() => setMenu('models')}>
               {model?.model || '选择模型'}<ChevronRight size={15}/>
             </button>
-            {model && <div className="reasoning-slider">
+            {levels.length > 1 ? <div className="reasoning-slider">
               <input type="range" min="0" max={levels.length - 1} step="1" value={tick}
                 aria-label="推理强度" aria-valuetext={effortLabels[levels[tick]]}
                 style={{ '--progress': (tick * 100 / (levels.length - 1)) + '%' }}
                 onChange={event => setEffort(levels[Number(event.target.value)])}/>
               <div className="slider-labels"><span>默认</span><span>{effortLabels[levels.at(-1)]}</span></div>
-            </div>}
+            </div> : <p className="menu-empty">此配置使用模型默认推理强度。</p>}
           </div>}
           {menu === 'models' && <div className="popover model-menu right-menu" aria-label="选择模型">
             <div className="menu-label">选择模型</div>

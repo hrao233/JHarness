@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ChevronDown, ChevronRight, CircleHelp, FolderOpen, FolderPlus, MessageSquare, Plus, X, FileText } from 'lucide-react';
-import { ApprovalCard, Composer } from './Composer.jsx';
+import { ApprovalCard, Composer, effortLabels } from './Composer.jsx';
 import { Conversation } from './Conversation.jsx';
 import { Navigation, NavigationPanel } from './Navigation.jsx';
 import './style.css';
@@ -20,6 +20,7 @@ function App() {
   const [availableParts, setAvailableParts] = useState(null);
   const [perm, setPerm] = useState('assist');
   const [effort, setEffort] = useState('default');
+  const [fast, setFast] = useState(false);
   const [modelId, setModelId] = useState('');
   const [approvals, setApprovals] = useState([]);
   const [collapsed, setCollapsed] = useState({});
@@ -37,6 +38,8 @@ function App() {
   const project = data.projects.find(value => value.id === selected?.project);
   const session = project?.sessions.find(value => value.id === selected?.session);
   const model = data.models.find(value => value.id === (modelId || data.defaultModelId));
+  const effectiveEffort = model?.effortLevels?.includes(effort) ? effort : 'default';
+  const effectiveFast = !!model?.fastTier && fast;
   const recent = data.projects.flatMap(p => p.sessions.filter(s => s.updatedAt).map(s => ({ p, s })))
     .sort((a, b) => b.s.updatedAt - a.s.updatedAt).slice(0, 5);
 
@@ -56,6 +59,7 @@ function App() {
     setSelected(next);
     setModelId(s?.modelId || '');
     setEffort(s?.effort || 'default');
+    setFast(s?.fast === true);
     setPerm(s?.permission || 'assist');
     setCollapsed(previous => ({ ...previous, [p.id]: false }));
     setItems([]);
@@ -92,6 +96,17 @@ function App() {
       }
       if (event === 'approval') return setApprovals(previous => [...previous, data]);
       if (event === 'approval-end') return setApprovals(previous => previous.filter(item => item.id !== data.id));
+      if (event === 'review') {
+        const labels = { PENDING: '正在自动审查', APPROVE: '自动审查已批准', DENY: '自动审查已阻止', ASK: '需要你批准' };
+        setItems(previous => {
+          const id = current.id + ':review:' + data.path;
+          const index = previous.findLastIndex(item => item.id === id && item.status === labels.PENDING);
+          const item = { role: 'tool', id, name: data.path, status: labels[data.decision], args: '', output: '' };
+          if (index < 0) return [...previous, { ...item, id: data.decision === 'PENDING' ? id : crypto.randomUUID() }];
+          return previous.map((value, i) => i === index ? { ...item, id: crypto.randomUUID() } : value);
+        });
+        return;
+      }
       if (selection.current !== current.selection) return;
       setItems(previous => {
         if (event === 'text' || event === 'result') {
@@ -230,7 +245,7 @@ function App() {
       const labels = parts.map(part => part.label);
       const display = text + (labels.length ? '\n\n' + labels.join(' · ') : '');
       setItems(previous => [...previous, { id, role: 'user', text: display, runId: id }]);
-      await api.chat(project.id, target.id, text, id, { modelId, effort, permission: perm, parts });
+      await api.chat(project.id, target.id, text, id, { modelId, effort: effectiveEffort, fast: effectiveFast, permission: perm, parts });
     } catch (error) {
       if (running.current?.id === id) {
         running.current = null;
@@ -247,7 +262,8 @@ function App() {
     setDraft('');
     setParts([]);
     setModelId(modelId);
-    setEffort(effort);
+    setEffort(effectiveEffort);
+    setFast(effectiveFast);
     setPerm(perm);
     if (reservation.stopRequested && running.current === reservation) {
       api.stop(id).catch(error => setNotice(errText(error)));
@@ -323,8 +339,8 @@ function App() {
           parts={parts} remove={part => setParts(previous => previous.filter(value => value !== part))}
           attach={attach} availableParts={availableParts} loadParts={loadParts} addPart={part => appendParts([part])}
           permission={perm} setPermission={setPerm} models={data.models} modelId={modelId} model={model}
-          defaultModelId={data.defaultModelId} effort={effort} setEffort={setEffort}
-          selectModel={id => { setModelId(id); setEffort('default'); }} settings={() => setShowSettings(true)}/>
+          defaultModelId={data.defaultModelId} effort={effectiveEffort} setEffort={setEffort} fast={effectiveFast} setFast={setFast}
+          selectModel={id => { setModelId(id); setEffort('default'); setFast(false); }} settings={() => setShowSettings(true)}/>
       </div></div>
     </main>
     {panel && <NavigationPanel key={panel} panel={panel} close={() => setPanel(null)} projects={data.projects}
@@ -335,13 +351,16 @@ function App() {
         setData(state);
         setModelId(savedModelId);
         setEffort('default');
+        setFast(false);
       }}/>}
   </div>;
 }
 
 function modelForm(value, defaultModelId) {
   return { id: value?.id || '', provider: value?.provider || 'deepseek', baseUrl: value?.baseUrl || '',
-    model: value?.model || 'deepseek-flash', key: '', makeDefault: !defaultModelId || value?.id === defaultModelId };
+    model: value?.model || 'deepseek-flash', key: '', makeDefault: !defaultModelId || value?.id === defaultModelId,
+    fastTier: value?.fastTier ?? '', efforts: value?.effortLevels?.filter(level => level !== 'default')
+      || ['minimal', 'low', 'medium', 'high', 'xhigh'] };
 }
 
 function ModelSettings({ models, defaultModelId, selectedId, close, onSave }) {
@@ -349,8 +368,11 @@ function ModelSettings({ models, defaultModelId, selectedId, close, onSave }) {
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
+  const [testEffort, setTestEffort] = useState('default');
+  const [testFast, setTestFast] = useState(false);
   const panel = useRef(null);
   const compatible = form.provider === 'compatible';
+  const levels = compatible ? form.efforts : ['none', 'low', 'high', 'max'];
   const value = models.find(item => item.id === form.id);
   const keepKey = value?.hasKey && value.provider === form.provider && (!compatible || value.baseUrl === form.baseUrl.trim());
 
@@ -366,7 +388,8 @@ function ModelSettings({ models, defaultModelId, selectedId, close, onSave }) {
     setFailed(false);
     setStatus('');
     try {
-      const next = await (save ? api.saveModel(form) : api.testModel(form));
+      const next = await (save ? api.saveModel(form) : api.testModel({ ...form, testEffort,
+        testFast: compatible && !!form.fastTier && testFast }));
       if (save) {
         onSave(next);
         close();
@@ -383,6 +406,8 @@ function ModelSettings({ models, defaultModelId, selectedId, close, onSave }) {
       {!!models.length && <label>配置<select value={form.id} disabled={busy} onChange={event => {
         const id = event.target.value;
         setStatus('');
+        setTestEffort('default');
+        setTestFast(false);
         setForm(modelForm(models.find(item => item.id === id), defaultModelId));
       }}><option value="">添加模型</option>{models.map(item =>
         <option value={item.id} key={item.id}>{item.model} · {item.provider === 'deepseek' ? 'DeepSeek 官方' : item.baseUrl}</option>)}
@@ -390,6 +415,8 @@ function ModelSettings({ models, defaultModelId, selectedId, close, onSave }) {
       <label>服务商<select value={form.provider} disabled={busy} onChange={event => {
         const provider = event.target.value;
         setStatus('');
+        setTestEffort('default');
+        setTestFast(false);
         setForm(previous => ({ ...previous, provider, key: '', baseUrl: value?.provider === provider ? value.baseUrl : '',
           model: value?.provider === provider ? value.model : provider === 'deepseek' ? 'deepseek-flash' : '' }));
       }}><option value="deepseek">DeepSeek 官方</option><option value="compatible">OpenAI 兼容接口</option></select></label>
@@ -397,6 +424,20 @@ function ModelSettings({ models, defaultModelId, selectedId, close, onSave }) {
         <label>Base URL<input required type="url" placeholder="https://api.example.com/v1" value={form.baseUrl}
           onChange={event => edit('baseUrl', event.target.value)}/></label>
         <label>模型 ID<input required value={form.model} onChange={event => edit('model', event.target.value)}/></label>
+        <label>服务商快速档位<select value={form.fastTier} onChange={event => {
+          edit('fastTier', event.target.value);
+          setTestFast(false);
+        }}>
+          <option value="">关闭</option><option value="fast">fast</option><option value="priority">priority</option>
+        </select></label>
+        <details className="effort-config"><summary>配置服务商支持的推理强度</summary>
+          <div>{Object.entries(effortLabels).filter(([id]) => id !== 'default').map(([id, label]) =>
+            <label className="check-row" key={id}><input type="checkbox" checked={form.efforts.includes(id)}
+              onChange={event => {
+                edit('efforts', event.target.checked ? [...form.efforts, id] : form.efforts.filter(value => value !== id));
+                if (testEffort === id) setTestEffort('default');
+              }}/>{label}</label>)}</div>
+        </details>
       </> : <label>模型<select value={form.model} onChange={event => edit('model', event.target.value)}>
         <option value="deepseek-flash">DeepSeek Flash</option>
         <option value="deepseek-v4-pro">DeepSeek V4 Pro</option>
@@ -406,6 +447,14 @@ function ModelSettings({ models, defaultModelId, selectedId, close, onSave }) {
       <label className="check-row"><input type="checkbox" checked={form.makeDefault}
         disabled={!defaultModelId || form.id === defaultModelId}
         onChange={event => edit('makeDefault', event.target.checked)}/>设为默认模型</label>
+      <details className="effort-config"><summary>连接测试选项</summary>
+        <label>测试推理强度<select value={testEffort} onChange={event => setTestEffort(event.target.value)}>
+          <option value="default">默认</option>{levels.map(level =>
+            <option key={level} value={level}>{effortLabels[level]}</option>)}
+        </select></label>
+        {compatible && form.fastTier && <label className="check-row"><input type="checkbox" checked={testFast}
+          onChange={event => setTestFast(event.target.checked)}/>测试快速档位</label>}
+      </details>
       {status && <p className={failed ? 'error-text' : 'success-text'} role="status">{status}</p>}
       <div className="dialog-actions">
         <button type="button" className="secondary" disabled={busy} onClick={() => execute(false)}>测试连接</button>

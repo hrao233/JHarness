@@ -144,8 +144,9 @@ public final class Backend {
                 .content(TextBlock.builder().text("Reply with OK.").build()).build();
         Model model = model(params);
         boolean received = model.stream(List.of(message), List.of(),
-                        GenerateOptions.builder().maxTokens(48).build())
-                .any(chunk -> !chunk.getContent().isEmpty()).block(Duration.ofSeconds(25));
+                        GenerateOptions.builder().build())
+                .any(chunk -> chunk.getContent().stream().anyMatch(TextBlock.class::isInstance))
+                .block(Duration.ofSeconds(25));
         if (!received) {
             throw new IllegalStateException("模型没有返回内容。");
         }
@@ -284,8 +285,10 @@ public final class Backend {
             if (!List.of("ask", "assist", "full").contains(permission)) {
                 throw new IllegalArgumentException("无效的审批模式。");
             }
+            var review = permission.equals("assist")
+                    ? new WriteReview(model(params, true), required(params, "message")) : null;
             tools.registerTool(new ProjectTools(project,
-                    (operation, path, before, after) -> allowWrite(runId, permission, operation, path, before, after)));
+                    (operation, path, before, after) -> allowWrite(runId, permission, review, operation, path, before, after)));
             var allowed = new ToolsConfig();
             allowed.setStrictAllow(true);
             allowed.setAllow(List.of("list_files", "read_file", "search_files", "edit_file", "create_file"));
@@ -354,13 +357,16 @@ public final class Backend {
                 .forEach(approval -> approval.decision().complete(false));
     }
 
-    private boolean allowWrite(String runId, String permission, String operation, String path,
+    private boolean allowWrite(String runId, String permission, WriteReview review, String operation, String path,
             String before, String after) {
         if (!runs.containsKey(runId)) return false;
-        if (permission.equals("full") || (permission.equals("assist")
-                && operation.equals("edit_file") && !after.isBlank()
-                && before.length() <= 2000 && after.length() <= 2000)) {
-            return true;
+        if (permission.equals("full")) return true;
+        if (review != null) {
+            event(runId, "review", Map.of("path", path, "decision", "PENDING"));
+            var decision = review.assess(operation, path, before, after);
+            if (!runs.containsKey(runId)) return false;
+            event(runId, "review", Map.of("path", path, "decision", decision.name()));
+            if (decision != WriteReview.Decision.ASK) return decision == WriteReview.Decision.APPROVE;
         }
         String id = UUID.randomUUID().toString();
         var approval = new Approval(runId, new CompletableFuture<>());
@@ -411,16 +417,27 @@ public final class Backend {
     }
 
     private Model model(JsonNode params) {
+        return model(params, false);
+    }
+
+    private Model model(JsonNode params, boolean reviewer) {
         String key = required(params, "key");
         var context = ModelCreationContext.builder().apiKey(key).stream(true);
-        String effort = params.path("effort").asText("default");
+        String effort = reviewer ? "default" : params.path("effort").asText("default");
+        String speed = reviewer ? "" : params.path("serviceTier").asText("");
+        boolean deepseek = params.path("provider").asText().equals("deepseek");
+        if (!List.of("", "fast", "priority").contains(speed) || (deepseek && !speed.isEmpty())) {
+            throw new IllegalArgumentException("此模型配置不支持快速模式。");
+        }
+        var options = GenerateOptions.builder();
         String id;
-        if (params.path("provider").asText().equals("deepseek")) {
+        if (deepseek) {
             id = "deepseek:" + required(params, "model");
+            context.baseUrl(params.path("baseUrl").asText("https://api.deepseek.com"));
             if (!List.of("default", "none", "low", "high", "max").contains(effort)) {
                 throw new IllegalArgumentException("无效的 DeepSeek 推理强度。");
             }
-            if (!effort.equals("default")) context.enableThinking(!effort.equals("none"));
+            if (reviewer || !effort.equals("default")) context.enableThinking(!reviewer && !effort.equals("none"));
         } else {
             URI base = URI.create(required(params, "baseUrl"));
             if (!List.of("https", "http").contains(base.getScheme()) || base.getHost() == null
@@ -429,11 +446,13 @@ public final class Backend {
             }
             id = "openai:" + required(params, "model");
             context.baseUrl(base.toString()).endpointPath("/chat/completions");
+            if (!List.of("default", "none", "minimal", "low", "medium", "high", "xhigh", "max").contains(effort)) {
+                throw new IllegalArgumentException("无效的兼容接口推理强度。");
+            }
         }
-        if (!effort.equals("default")
-                && !(params.path("provider").asText().equals("deepseek") && effort.equals("none"))) {
-            context.component(GenerateOptions.class, GenerateOptions.builder().reasoningEffort(effort).build());
-        }
+        if (!effort.equals("default") && !(deepseek && effort.equals("none"))) options.reasoningEffort(effort);
+        if (!speed.isEmpty()) options.additionalBodyParam("service_tier", speed);
+        context.component(GenerateOptions.class, options.build());
         var settings = context.build();
         try {
             return ModelRegistry.resolve(id, settings);
@@ -465,6 +484,12 @@ public final class Backend {
             if (text.contains("404") || text.contains("model_not_found")) return "找不到模型或接口，请检查模型 ID 和 Base URL。";
             if (text.contains("429")) return "服务商限流，请稍后重试。";
             if (text.contains("402")) return "服务商返回余额或额度错误。";
+            if (text.contains("service_tier") || text.contains("service tier")) {
+                return "服务商拒绝了快速档位，请检查模型、账户权限和快速模式配置。";
+            }
+            if (text.contains("reasoning_effort") || text.contains("reasoning effort")) {
+                return "服务商拒绝了推理强度，请修改模型配置或使用默认档位。";
+            }
             if (text.contains("timed out") || text.contains("timeout")) return "连接超时，请检查网络和服务地址。";
             if (text.contains("refused") || text.contains("unknownhost") || text.contains("connectexception")) {
                 return "无法连接模型服务，请检查网络和服务地址。";

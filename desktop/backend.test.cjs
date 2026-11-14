@@ -26,18 +26,20 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     ['edit_file', { path: 'README.md', old_text: 'ORCHID-27', new_text: 'changed' }, '原文必须'],
   ];
   const requests = [];
+  let reviewResponses = [];
   const server = createServer(async (request, response) => {
     let raw = '';
     for await (const chunk of request) raw += chunk;
     const body = JSON.parse(raw);
     requests.push({ path: request.url, auth: request.headers.authorization, body });
+    const reviewing = body.messages.some(message => JSON.stringify(message.content).includes('review one proposed project file write'));
     const results = body.messages.filter(message => message.role === 'tool');
     const toolAvailable = body.tools?.some(tool => tool.function?.name === 'read_file');
     const step = steps[results.length];
     const delta = toolAvailable && step
       ? { role: 'assistant', tool_calls: [{ index: 0, id: 'call_' + results.length, type: 'function',
           function: { name: step[0], arguments: JSON.stringify(step[1]) } }] }
-      : { role: 'assistant', content: toolAvailable ? '**ORCHID-28**' : 'OK' };
+      : { role: 'assistant', content: reviewing ? reviewResponses.shift() : toolAvailable ? '**ORCHID-28**' : 'OK' };
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.end('data: ' + JSON.stringify({ id: 'chatcmpl-test', object: 'chat.completion.chunk',
       created: 1, model: 'fixture', choices: [{ index: 0, delta,
@@ -89,7 +91,7 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     }
     assert.equal((await call('testModel', model)).model, 'fixture');
     const full = randomUUID();
-    await call('chat', { ...context, ...model, runId: full, permission: 'full', effort: 'high',
+    await call('chat', { ...context, ...model, runId: full, permission: 'full', effort: 'high', serviceTier: 'fast',
       message: '读并修改 README，然后创建 Note.java',
       parts: [{ label: '文件 · info.txt', kind: 'file', text: 'FILE-CONTEXT' },
         { label: '插件 Skill · formatter', kind: 'plugin', text: 'SKILL-CONTEXT' },
@@ -98,6 +100,7 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     assert.equal(events.some(event => event.runId === full && event.event === 'approval'), false);
     const firstChat = requests.find(request => request.body.tools?.length).body;
     assert.equal(firstChat.reasoning_effort, 'high');
+    assert.equal(firstChat.service_tier, 'fast');
     assert.match(JSON.stringify(firstChat.messages), /FILE-CONTEXT/);
     assert.match(JSON.stringify(firstChat.messages), /SKILL-CONTEXT/);
     assert.match(JSON.stringify(firstChat.messages), /data:image\/png;base64,iVBORw0KGgo=/);
@@ -166,10 +169,12 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     const assist = randomUUID();
     steps = [
       ['edit_file', { path: 'README.md', old_text: 'ORCHID-28', new_text: 'ORCHID-29' }],
+      ['create_file', { path: 'Blocked.txt', content: 'deny this change' }],
       ['create_file', { path: 'Approved.txt', content: 'approved' }],
     ];
+    reviewResponses = ['APPROVE', 'DENY', 'unrecognized response'];
     await call('chat', { ...context, sessionId: randomUUID(), ...model, runId: assist,
-      permission: 'assist', message: '修改并创建' });
+      permission: 'assist', effort: 'low', serviceTier: 'priority', message: '修改并创建' });
     const create = await waitEvent(assist, 'approval');
     assert.equal(create.data.operation, 'create_file');
     assert.match(await readFile(path.join(projectPath, 'README.md'), 'utf8'), /ORCHID-29/);
@@ -177,6 +182,15 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     assert.equal(await call('approve', { runId: assist, approvalId: create.data.id, allow: true }), true);
     await waitEvent(assist, 'done');
     assert.equal(await readFile(path.join(projectPath, 'Approved.txt'), 'utf8'), 'approved');
+    await assert.rejects(readFile(path.join(projectPath, 'Blocked.txt')), { code: 'ENOENT' });
+    assert.deepEqual(events.filter(event => event.runId === assist && event.event === 'review')
+      .map(event => event.data.decision), ['PENDING', 'APPROVE', 'PENDING', 'DENY', 'PENDING', 'ASK']);
+    const reviews = requests.filter(({ body }) => body.messages
+      .some(message => JSON.stringify(message.content).includes('review one proposed project file write')));
+    assert.equal(reviews.length, 3);
+    assert.ok(reviews.every(({ body }) => !body.tools?.length && !body.service_tier && !body.reasoning_effort));
+    assert.ok(requests.some(({ body }) => body.tools?.length && body.service_tier === 'priority'
+      && body.reasoning_effort === 'low'));
 
     const stopped = randomUUID();
     steps = [['create_file', { path: 'Cancelled.txt', content: 'cancelled' }]];
@@ -186,6 +200,16 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     await waitEvent(stopped, 'done');
     assert.equal(await call('approve', { runId: stopped, approvalId: cancelled.data.id, allow: true }), false);
     await assert.rejects(readFile(path.join(projectPath, 'Cancelled.txt')), { code: 'ENOENT' });
+
+    for (const effort of ['default', 'none', 'low', 'high', 'max']) {
+      await call('testModel', { ...model, provider: 'deepseek', model: 'deepseek-flash', effort });
+      const payload = requests.at(-1).body;
+      assert.equal(payload.thinking?.type, effort === 'default' ? undefined : effort === 'none' ? 'disabled' : 'enabled');
+      assert.equal(payload.reasoning_effort, ['low', 'high', 'max'].includes(effort) ? effort : undefined);
+      assert.equal(payload.service_tier, undefined);
+    }
+    await assert.rejects(call('testModel', { ...model, provider: 'deepseek', effort: 'medium' }));
+    await assert.rejects(call('testModel', { ...model, provider: 'deepseek', serviceTier: 'fast' }));
   } finally {
     if (child && child.exitCode === null) {
       const exited = once(child, 'exit');

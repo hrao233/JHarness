@@ -1,13 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ArrowUp, Check, ChevronDown, ChevronRight, FileText, FolderOpen, Hand, Image, Paperclip, Plus,
-  Puzzle, RotateCcw, ShieldAlert, ShieldCheck, Square, X, Zap } from 'lucide-react';
+  Puzzle, ShieldAlert, ShieldCheck, Square, X, Zap } from 'lucide-react';
 
 const permissionOptions = [
   { id: 'ask', label: '请求批准', description: '每次修改或创建项目文件前询问', Icon: Hand },
   { id: 'assist', label: '帮我批准', description: '用当前模型单独审查拟议改动。审查不确定时由你决定', Icon: ShieldCheck },
   { id: 'full', label: '完全访问权限', description: '允许项目内的可用文件操作，无需逐次批准', Icon: ShieldAlert }
 ];
-export const effortLabels = { default: '默认', none: '关闭', minimal: '最低', low: '低', medium: '中',
+export const effortLabels = { none: '关闭', minimal: '最低', low: '低', medium: '中',
   high: '高', xhigh: '很高', max: '极高' };
 const partIcons = { file: FileText, folder: FolderOpen, image: Image, skill: FileText, plugin: Puzzle };
 
@@ -17,7 +17,7 @@ export function Composer({ draft, setDraft, project, loading, run, send, stop, p
   const [menu, setMenu] = useState(null);
   const box = useRef(null);
   const choice = permissionOptions.find(option => option.id === permission) || permissionOptions[1];
-  const levels = model?.effortLevels || ['default'];
+  const levels = model?.effortLevels || [];
   const tick = Math.max(0, levels.indexOf(effort));
 
   useEffect(() => {
@@ -137,13 +137,10 @@ export function Composer({ draft, setDraft, project, loading, run, send, stop, p
               else toggle(model ? 'reasoning' : 'models');
             }}>
             <span className="model-name">{model?.model || '选择模型'}</span>
-            {levels.length > 1 && <span className="effort-label">{effortLabels[levels[tick]]}</span>}<ChevronDown size={14}/>
+            {!!levels.length && <span className="effort-label">{effortLabels[levels[tick]]}</span>}<ChevronDown size={14}/>
           </button>
           {menu === 'reasoning' && <div className="popover reasoning-menu right-menu" aria-label="选择推理强度">
-            <div className="reasoning-head"><span/><strong>{levels.length > 1 ? effortLabels[levels[tick]] : '模型默认'}</strong>
-              <button type="button" title="恢复默认推理强度" aria-label="恢复默认推理强度" disabled={!model || tick === 0}
-                onClick={() => setEffort('default')}><RotateCcw size={17}/></button>
-            </div>
+            {!!levels.length && <div className="reasoning-head"><strong>{effortLabels[levels[tick]]}</strong></div>}
             <button type="button" className="model-picker-link" onClick={() => setMenu('models')}>
               {model?.model || '选择模型'}<ChevronRight size={15}/>
             </button>
@@ -152,8 +149,8 @@ export function Composer({ draft, setDraft, project, loading, run, send, stop, p
                 aria-label="推理强度" aria-valuetext={effortLabels[levels[tick]]}
                 style={{ '--progress': (tick * 100 / (levels.length - 1)) + '%' }}
                 onChange={event => setEffort(levels[Number(event.target.value)])}/>
-              <div className="slider-labels"><span>默认</span><span>{effortLabels[levels.at(-1)]}</span></div>
-            </div> : <p className="menu-empty">此配置使用模型默认推理强度。</p>}
+              <div className="slider-labels"><span>{effortLabels[levels[0]]}</span><span>{effortLabels[levels.at(-1)]}</span></div>
+            </div> : !levels.length && <p className="menu-empty">此模型配置未启用推理档位。</p>}
           </div>}
           {menu === 'models' && <div className="popover model-menu right-menu" aria-label="选择模型">
             <div className="menu-label">选择模型</div>

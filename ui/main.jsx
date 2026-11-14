@@ -19,7 +19,7 @@ function App() {
   const [parts, setParts] = useState([]);
   const [availableParts, setAvailableParts] = useState(null);
   const [perm, setPerm] = useState('assist');
-  const [effort, setEffort] = useState('default');
+  const [effort, setEffort] = useState('');
   const [fast, setFast] = useState(false);
   const [modelId, setModelId] = useState('');
   const [approvals, setApprovals] = useState([]);
@@ -38,7 +38,7 @@ function App() {
   const project = data.projects.find(value => value.id === selected?.project);
   const session = project?.sessions.find(value => value.id === selected?.session);
   const model = data.models.find(value => value.id === (modelId || data.defaultModelId));
-  const effectiveEffort = model?.effortLevels?.includes(effort) ? effort : 'default';
+  const effectiveEffort = model?.effortLevels?.includes(effort) ? effort : model?.initialEffort || '';
   const effectiveFast = !!model?.fastTier && fast;
   const recent = data.projects.flatMap(p => p.sessions.filter(s => s.updatedAt).map(s => ({ p, s })))
     .sort((a, b) => b.s.updatedAt - a.s.updatedAt).slice(0, 5);
@@ -58,7 +58,7 @@ function App() {
     selection.current = next;
     setSelected(next);
     setModelId(s?.modelId || '');
-    setEffort(s?.effort || 'default');
+    setEffort(s?.effort || '');
     setFast(s?.fast === true);
     setPerm(s?.permission || 'assist');
     setCollapsed(previous => ({ ...previous, [p.id]: false }));
@@ -340,7 +340,7 @@ function App() {
           attach={attach} availableParts={availableParts} loadParts={loadParts} addPart={part => appendParts([part])}
           permission={perm} setPermission={setPerm} models={data.models} modelId={modelId} model={model}
           defaultModelId={data.defaultModelId} effort={effectiveEffort} setEffort={setEffort} fast={effectiveFast} setFast={setFast}
-          selectModel={id => { setModelId(id); setEffort('default'); setFast(false); }} settings={() => setShowSettings(true)}/>
+          selectModel={id => { setModelId(id); setEffort(''); setFast(false); }} settings={() => setShowSettings(true)}/>
       </div></div>
     </main>
     {panel && <NavigationPanel key={panel} panel={panel} close={() => setPanel(null)} projects={data.projects}
@@ -350,7 +350,7 @@ function App() {
       close={() => setShowSettings(false)} onSave={({ savedModelId, ...state }) => {
         setData(state);
         setModelId(savedModelId);
-        setEffort('default');
+        setEffort('');
         setFast(false);
       }}/>}
   </div>;
@@ -359,7 +359,7 @@ function App() {
 function modelForm(value, defaultModelId) {
   return { id: value?.id || '', provider: value?.provider || 'deepseek', baseUrl: value?.baseUrl || '',
     model: value?.model || 'deepseek-flash', key: '', makeDefault: !defaultModelId || value?.id === defaultModelId,
-    fastTier: value?.fastTier ?? '', efforts: value?.effortLevels?.filter(level => level !== 'default')
+    fastTier: value?.fastTier ?? '', efforts: value?.efforts
       || ['minimal', 'low', 'medium', 'high', 'xhigh'] };
 }
 
@@ -368,11 +368,12 @@ function ModelSettings({ models, defaultModelId, selectedId, close, onSave }) {
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
-  const [testEffort, setTestEffort] = useState('default');
+  const [testEffort, setTestEffort] = useState('');
   const [testFast, setTestFast] = useState(false);
   const panel = useRef(null);
   const compatible = form.provider === 'compatible';
   const levels = compatible ? form.efforts : ['none', 'low', 'high', 'max'];
+  const selectedTestEffort = levels.includes(testEffort) ? testEffort : levels.includes('high') ? 'high' : levels[0];
   const value = models.find(item => item.id === form.id);
   const keepKey = value?.hasKey && value.provider === form.provider && (!compatible || value.baseUrl === form.baseUrl.trim());
 
@@ -388,7 +389,7 @@ function ModelSettings({ models, defaultModelId, selectedId, close, onSave }) {
     setFailed(false);
     setStatus('');
     try {
-      const next = await (save ? api.saveModel(form) : api.testModel({ ...form, testEffort,
+      const next = await (save ? api.saveModel(form) : api.testModel({ ...form, testEffort: selectedTestEffort,
         testFast: compatible && !!form.fastTier && testFast }));
       if (save) {
         onSave(next);
@@ -406,7 +407,7 @@ function ModelSettings({ models, defaultModelId, selectedId, close, onSave }) {
       {!!models.length && <label>配置<select value={form.id} disabled={busy} onChange={event => {
         const id = event.target.value;
         setStatus('');
-        setTestEffort('default');
+        setTestEffort('');
         setTestFast(false);
         setForm(modelForm(models.find(item => item.id === id), defaultModelId));
       }}><option value="">添加模型</option>{models.map(item =>
@@ -415,7 +416,7 @@ function ModelSettings({ models, defaultModelId, selectedId, close, onSave }) {
       <label>服务商<select value={form.provider} disabled={busy} onChange={event => {
         const provider = event.target.value;
         setStatus('');
-        setTestEffort('default');
+        setTestEffort('');
         setTestFast(false);
         setForm(previous => ({ ...previous, provider, key: '', baseUrl: value?.provider === provider ? value.baseUrl : '',
           model: value?.provider === provider ? value.model : provider === 'deepseek' ? 'deepseek-flash' : '' }));
@@ -431,11 +432,11 @@ function ModelSettings({ models, defaultModelId, selectedId, close, onSave }) {
           <option value="">关闭</option><option value="fast">fast</option><option value="priority">priority</option>
         </select></label>
         <details className="effort-config"><summary>配置服务商支持的推理强度</summary>
-          <div>{Object.entries(effortLabels).filter(([id]) => id !== 'default').map(([id, label]) =>
+          <div>{Object.entries(effortLabels).map(([id, label]) =>
             <label className="check-row" key={id}><input type="checkbox" checked={form.efforts.includes(id)}
               onChange={event => {
                 edit('efforts', event.target.checked ? [...form.efforts, id] : form.efforts.filter(value => value !== id));
-                if (testEffort === id) setTestEffort('default');
+                if (testEffort === id) setTestEffort('');
               }}/>{label}</label>)}</div>
         </details>
       </> : <label>模型<select value={form.model} onChange={event => edit('model', event.target.value)}>
@@ -448,10 +449,10 @@ function ModelSettings({ models, defaultModelId, selectedId, close, onSave }) {
         disabled={!defaultModelId || form.id === defaultModelId}
         onChange={event => edit('makeDefault', event.target.checked)}/>设为默认模型</label>
       <details className="effort-config"><summary>连接测试选项</summary>
-        <label>测试推理强度<select value={testEffort} onChange={event => setTestEffort(event.target.value)}>
-          <option value="default">默认</option>{levels.map(level =>
+        {!!levels.length && <label>测试推理强度<select value={selectedTestEffort} onChange={event => setTestEffort(event.target.value)}>
+          {levels.map(level =>
             <option key={level} value={level}>{effortLabels[level]}</option>)}
-        </select></label>
+        </select></label>}
         {compatible && form.fastTier && <label className="check-row"><input type="checkbox" checked={testFast}
           onChange={event => setTestFast(event.target.checked)}/>测试快速档位</label>}
       </details>

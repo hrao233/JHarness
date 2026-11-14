@@ -17,8 +17,8 @@ let quitting = false;
 let bookmarkMigration;
 const pending = new Map();
 const attachments = new Map();
-const effortValues = ['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
-const deepseekEfforts = ['default', 'none', 'low', 'high', 'max'];
+const effortValues = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const deepseekEfforts = ['none', 'low', 'high', 'max'];
 
 function fastTier(profile) {
   if (profile.provider !== 'compatible') return '';
@@ -28,7 +28,14 @@ function fastTier(profile) {
 
 function effortLevels(profile) {
   if (profile.provider === 'deepseek') return deepseekEfforts;
-  return ['default', ...(profile.efforts || ['minimal', 'low', 'medium', 'high', 'xhigh'])];
+  return profile.efforts || ['minimal', 'low', 'medium', 'high', 'xhigh'];
+}
+
+function resolveEffort(profile, selected) {
+  const levels = effortLevels(profile);
+  if (levels.includes(selected)) return selected;
+  if (selected && selected !== 'default') throw new Error('当前模型未配置此推理强度。');
+  return levels.includes('high') ? 'high' : levels[0];
 }
 
 function persist() {
@@ -93,7 +100,8 @@ function call(method, params = {}) {
 
 function publicSettings() {
   const models = settings.models.map(({ encryptedKey, ...model }) => ({
-    ...model, fastTier: fastTier(model), effortLevels: effortLevels(model), hasKey: Boolean(encryptedKey)
+    ...model, fastTier: fastTier(model), effortLevels: effortLevels(model), initialEffort: resolveEffort(model),
+    hasKey: Boolean(encryptedKey)
   }));
   return { projects: settings.projects, models, defaultModelId: settings.defaultModelId };
 }
@@ -135,7 +143,7 @@ function modelInput(input) {
   const profile = { provider, baseUrl, fastTier: input.fastTier };
   const tier = fastTier(profile);
   if (!['', 'fast', 'priority'].includes(tier)) throw new Error('无效的快速模式配置。');
-  const efforts = Array.isArray(input.efforts) ? effortValues.slice(1).filter(value => input.efforts.includes(value)) : undefined;
+  const efforts = Array.isArray(input.efforts) ? effortValues.filter(value => input.efforts.includes(value)) : undefined;
   return { provider, model, baseUrl, key, fastTier: tier, efforts };
 }
 
@@ -242,7 +250,7 @@ function register() {
   });
   ipcMain.handle('jh:test-model', (_, input) => {
     const model = modelInput(input);
-    const effort = effortLevels(model).includes(input.testEffort) ? input.testEffort : 'default';
+    const effort = resolveEffort(model, input.testEffort);
     return call('testModel', { ...model, effort, serviceTier: input.testFast ? model.fastTier : '' });
   });
   ipcMain.handle('jh:save-model', (_, input) => {
@@ -263,8 +271,7 @@ function register() {
     const profile = settings.models.find(item => item.id === (options.modelId || settings.defaultModelId));
     if (!profile) throw new Error('请先在设置中添加模型。');
     const model = modelInput(profile);
-    const effort = options.effort || 'default';
-    if (!effortLevels(model).includes(effort)) throw new Error('当前模型未配置此推理强度。');
+    const effort = resolveEffort(model, options.effort);
     const fast = options.fast === true;
     if (fast && !model.fastTier) throw new Error('当前模型未配置快速模式。');
     const permission = ['ask', 'assist', 'full'].includes(options.permission) ? options.permission : 'assist';

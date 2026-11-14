@@ -4,6 +4,7 @@ const { randomUUID } = require('node:crypto');
 const { createInterface } = require('node:readline');
 const { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } = require('node:fs');
 const path = require('node:path');
+const { importAttachment, projectParts, label } = require('./context-parts.cjs');
 
 let win;
 let backend;
@@ -12,6 +13,8 @@ let settings;
 let settingsFile;
 let quitting = false;
 const pending = new Map();
+const attachments = new Map();
+const effortValues = ['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 
 function persist() {
   const temporary = settingsFile + '.tmp';
@@ -74,22 +77,22 @@ function call(method, params = {}) {
 }
 
 function publicSettings() {
-  const { encryptedKey, ...model } = settings.model;
-  return { projects: settings.projects, model: { ...model, hasKey: Boolean(encryptedKey) } };
-}
-
-function savedKey() {
-  return settings.model.encryptedKey
-    ? safeStorage.decryptString(Buffer.from(settings.model.encryptedKey, 'base64')) : '';
+  const models = settings.models.map(({ encryptedKey, ...model }) => ({ ...model, hasKey: Boolean(encryptedKey) }));
+  return { projects: settings.projects, models, defaultModelId: settings.defaultModelId };
 }
 
 function modelInput(input) {
   const provider = input.provider === 'deepseek' ? 'deepseek' : 'compatible';
-  const model = provider === 'deepseek' ? 'deepseek-flash' : String(input.model || '').trim();
+  const model = String(input.model || (provider === 'deepseek' ? 'deepseek-flash' : '')).trim();
   const baseUrl = provider === 'deepseek' ? 'https://api.deepseek.com' : String(input.baseUrl || '').trim();
-  const key = String(input.key || '').trim() || (settings.model.provider === provider
-    && settings.model.baseUrl === baseUrl ? savedKey() : '');
+  const saved = settings.models.find(item => item.id === input.id && item.provider === provider
+    && item.baseUrl === baseUrl);
+  const key = String(input.key || '').trim() || (saved?.encryptedKey
+    ? safeStorage.decryptString(Buffer.from(saved.encryptedKey, 'base64')) : '');
   if (!model || !baseUrl || !key) throw new Error('请填写 Base URL、模型 ID 和 API Key。');
+  if (provider === 'deepseek' && !['deepseek-flash', 'deepseek-v4-pro'].includes(model)) {
+    throw new Error('请选择 DeepSeek 官方模型。');
+  }
   let url;
   try { url = new URL(baseUrl); } catch { throw new Error('请输入有效的 Base URL。'); }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
@@ -127,29 +130,75 @@ function register() {
     return session;
   });
   ipcMain.handle('jh:history', (_, project, session) => call('history', context(project, session)));
+  ipcMain.handle('jh:attachment', async (_, projectId, kind) => {
+    const project = settings.projects.find(item => item.id === projectId);
+    if (!project || !['file', 'folder'].includes(kind)) throw new Error('请选择项目和附件类型。');
+    const result = await dialog.showOpenDialog(win, {
+      title: kind === 'file' ? '添加文件' : '添加文件夹',
+      defaultPath: project.directory,
+      properties: [kind === 'file' ? 'openFile' : 'openDirectory', 'multiSelections']
+    });
+    if (result.canceled) return [];
+    if (result.filePaths.length > 8) throw new Error('每次最多选择 8 项。');
+    const parts = await Promise.all(result.filePaths.map(target =>
+      importAttachment(target, kind, project.directory)));
+    return parts.map(({ text, image, mime, ...part }) => {
+      if (attachments.size >= 16) attachments.delete(attachments.keys().next().value);
+      const id = randomUUID();
+      attachments.set(id, { projectId, text, image, mime, ...part });
+      return { id, label: label(part), ...part };
+    });
+  });
+  ipcMain.handle('jh:project-parts', async (_, projectId) => {
+    const project = settings.projects.find(item => item.id === projectId);
+    if (!project) return [];
+    return (await projectParts(project.directory)).map(({ text, ...part }) => ({ ...part, label: label(part) }));
+  });
   ipcMain.handle('jh:test-model', (_, input) => call('testModel', modelInput(input)));
   ipcMain.handle('jh:save-model', (_, input) => {
     const { key, ...model } = modelInput(input);
     if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows 凭证保护不可用。');
-    settings.model = { ...model, encryptedKey: safeStorage.encryptString(key).toString('base64') };
+    const index = settings.models.findIndex(item => item.id === input.id);
+    const id = index < 0 ? randomUUID() : input.id;
+    const profile = { id, ...model, encryptedKey: safeStorage.encryptString(key).toString('base64') };
+    if (index < 0) settings.models.push(profile);
+    else settings.models[index] = profile;
+    if (!settings.defaultModelId || input.makeDefault) settings.defaultModelId = id;
     persist();
-    return publicSettings().model;
+    return { ...publicSettings(), savedModelId: id };
   });
-  ipcMain.handle('jh:chat', async (_, projectId, sessionId, message, runId) => {
+  ipcMain.handle('jh:chat', async (_, projectId, sessionId, message, runId, options = {}) => {
     if (activeRun) throw new Error('已有会话正在运行。');
     const selected = context(projectId, sessionId);
-    const model = modelInput(settings.model);
+    const profile = settings.models.find(item => item.id === (options.modelId || settings.defaultModelId));
+    if (!profile) throw new Error('请先在设置中添加模型。');
+    const model = modelInput(profile);
+    const effort = effortValues.includes(options.effort) ? options.effort : 'default';
+    const permission = ['ask', 'assist', 'full'].includes(options.permission) ? options.permission : 'assist';
     if (typeof message !== 'string' || !message.trim() || message.length > 16000) {
       throw new Error('请输入 16,000 字符以内的消息。');
     }
     activeRun = runId;
     try {
+      const requested = Array.isArray(options.parts) ? options.parts : [];
+      if (requested.length > 8) throw new Error('每条消息最多附加 8 项。');
+      const local = requested.some(part => part.source) ? await projectParts(selected.projectPath) : [];
+      const parts = requested.map(part => {
+        const attachment = attachments.get(part.id);
+        const item = attachment?.projectId === projectId ? attachment
+          : local.find(value => value.source === part.source && value.kind === part.kind);
+        if (!item) throw new Error('附件已失效，请重新添加。');
+        if (item.image && model.provider === 'deepseek' && model.model !== 'deepseek-flash') {
+          throw new Error('当前 DeepSeek 官方模型不接受图片。请选择 DeepSeek Flash。');
+        }
+        return { label: label(item), text: item.text, image: item.image, mime: item.mime, kind: item.kind };
+      });
       const session = settings.projects.find(item => item.id === projectId).sessions.find(item => item.id === sessionId);
-      if (session.title === '新会话') {
-        session.title = message.trim().replace(/\s+/g, ' ').slice(0, 40);
-        persist();
-      }
-      await call('chat', { ...selected, ...model, message, runId });
+      await call('chat', { ...selected, ...model, message, runId, parts, permission, effort });
+      if (session.title === '新会话') session.title = message.trim().replace(/\s+/g, ' ').slice(0, 40);
+      Object.assign(session, { modelId: options.modelId || '', effort, permission, updatedAt: Date.now() });
+      persist();
+      for (const part of requested) attachments.delete(part.id);
       return session.title;
     } catch (error) {
       if (activeRun === runId) activeRun = undefined;
@@ -157,6 +206,8 @@ function register() {
     }
   });
   ipcMain.handle('jh:stop', (_, runId) => call('stop', { runId }));
+  ipcMain.handle('jh:approve', (_, runId, approvalId, allow) =>
+    call('approve', { runId, approvalId, allow: allow === true }));
 }
 
 app.setName('JHarness');
@@ -172,7 +223,14 @@ else {
     mkdirSync(directory, { recursive: true });
     settingsFile = path.join(directory, 'settings.json');
     settings = existsSync(settingsFile) ? JSON.parse(readFileSync(settingsFile, 'utf8'))
-      : { projects: [], model: { provider: 'deepseek', model: 'deepseek-flash', baseUrl: 'https://api.deepseek.com' } };
+      : { projects: [] };
+    if (!Array.isArray(settings.models)) {
+      const legacy = settings.model?.encryptedKey ? { id: randomUUID(), ...settings.model } : null;
+      settings.models = legacy ? [legacy] : [];
+      settings.defaultModelId = legacy?.id;
+      delete settings.model;
+      persist();
+    }
     register();
     startBackend(path.join(directory, 'workspaces'));
     win = new BrowserWindow({

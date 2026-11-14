@@ -7,7 +7,10 @@ contextBridge.exposeInMainWorld('jharness', {
   history: (project, session) => ipcRenderer.invoke('jh:history', project, session),
   testModel: input => ipcRenderer.invoke('jh:test-model', input),
   saveModel: input => ipcRenderer.invoke('jh:save-model', input),
-  chat: (project, session, text, run) => ipcRenderer.invoke('jh:chat', project, session, text, run),
+  attach: (project, kind) => ipcRenderer.invoke('jh:attachment', project, kind),
+  projectParts: project => ipcRenderer.invoke('jh:project-parts', project),
+  chat: (project, session, text, run, options) => ipcRenderer.invoke('jh:chat', project, session, text, run, options),
+  approve: (run, id, allow) => ipcRenderer.invoke('jh:approve', run, id, allow),
   stop: run => ipcRenderer.invoke('jh:stop', run),
   onEvent: callback => {
     const listener = (_, message) => callback(message);

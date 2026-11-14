@@ -10,6 +10,9 @@ import io.agentscope.core.event.ToolCallDeltaEvent;
 import io.agentscope.core.event.ToolCallStartEvent;
 import io.agentscope.core.event.ToolResultEndEvent;
 import io.agentscope.core.event.ToolResultTextDeltaEvent;
+import io.agentscope.core.message.Base64Source;
+import io.agentscope.core.message.ContentBlock;
+import io.agentscope.core.message.ImageBlock;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
 import io.agentscope.core.message.TextBlock;
@@ -34,11 +37,17 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import reactor.core.Disposable;
 import reactor.core.Disposables;
 import reactor.core.publisher.Flux;
@@ -59,6 +68,9 @@ public final class Backend {
     private final PrintStream protocol;
     private final Path dataDirectory;
     private final Map<String, Disposable.Swap> runs = new ConcurrentHashMap<>();
+    private final Map<String, Approval> approvals = new ConcurrentHashMap<>();
+
+    private record Approval(String runId, CompletableFuture<Boolean> decision) {}
 
     private Backend(PrintStream protocol, Path dataDirectory) {
         this.protocol = protocol;
@@ -80,10 +92,12 @@ public final class Backend {
             while ((line = reader.readLine()) != null) {
                 var request = json.readTree(line);
                 if (request.path("method").asText().equals("stop")) {
-                    var running = runs.get(request.path("params").path("runId").asText());
+                    String runId = request.path("params").path("runId").asText();
+                    var running = runs.get(runId);
                     if (running != null) {
                         running.dispose();
                     }
+                    cancelApprovals(runId);
                     send(Map.of("id", request.path("id").asText(), "result", true));
                 } else {
                     workers.submit(() -> handle(request));
@@ -104,6 +118,7 @@ public final class Backend {
                 case "testModel" -> testModel(params);
                 case "history" -> history(params);
                 case "chat" -> startChat(params);
+                case "approve" -> approve(params);
                 default -> throw new IllegalArgumentException("未知操作。");
             };
             send(Map.of("id", id, "result", result));
@@ -133,7 +148,9 @@ public final class Backend {
                 .filter(message -> message.getRole() == MsgRole.USER || message.getRole() == MsgRole.ASSISTANT)
                 .filter(message -> !message.getTextContent().isBlank())
                 .map(message -> Map.of("role", message.getRole() == MsgRole.USER ? "user" : "assistant",
-                        "text", message.getTextContent()))
+                        "text", message.getRole() == MsgRole.USER && message.getMetadata() != null
+                                && message.getMetadata().get("jharnessDisplay") instanceof String display
+                                ? display : message.getTextContent()))
                 .toList();
     }
 
@@ -147,10 +164,15 @@ public final class Backend {
             Path workspace = workspace(params);
             Path project = Path.of(required(params, "projectPath")).toRealPath();
             RuntimeContext context = context(params);
-            String message = required(params, "message");
+            Msg message = userMessage(params);
             var model = model(params);
             var tools = new Toolkit();
-            tools.registerTool(new ProjectTools(project));
+            String permission = params.path("permission").asText("assist");
+            if (!List.of("ask", "assist", "full").contains(permission)) {
+                throw new IllegalArgumentException("无效的审批模式。");
+            }
+            tools.registerTool(new ProjectTools(project,
+                    (operation, path, before, after) -> allowWrite(runId, permission, operation, path, before, after)));
             var allowed = new ToolsConfig();
             allowed.setStrictAllow(true);
             allowed.setAllow(List.of("list_files", "read_file", "search_files", "edit_file", "create_file"));
@@ -169,6 +191,7 @@ public final class Backend {
                     .subscribeOn(Schedulers.boundedElastic())
                     .doFinally(signal -> {
                         runs.remove(runId);
+                        cancelApprovals(runId);
                         event(runId, "done", Map.of("status", signal.name()));
                     })
                     .subscribe(value -> publish(runId, value),
@@ -180,6 +203,69 @@ public final class Backend {
             throw error;
         }
 
+    }
+
+    private Msg userMessage(JsonNode params) {
+        String text = required(params, "message");
+        var blocks = new ArrayList<ContentBlock>();
+        blocks.add(TextBlock.builder().text(text).build());
+        var labels = new ArrayList<String>();
+        for (JsonNode part : params.path("parts")) {
+            String label = required(part, "label");
+            labels.add(label);
+            if (part.hasNonNull("image")) {
+                var source = Base64Source.builder().mediaType(required(part, "mime"))
+                        .data(required(part, "image")).build();
+                blocks.add(TextBlock.builder().text("[" + label + "]").build());
+                blocks.add(ImageBlock.builder().source(source).build());
+            } else {
+                String kind = part.path("kind").asText();
+                String role = List.of("skill", "plugin").contains(kind)
+                        ? "用户为本次请求选择的工作指引" : "用户提供的参考资料";
+                blocks.add(TextBlock.builder().text("[" + role + " · " + label + "]\n" + required(part, "text")).build());
+            }
+        }
+        String display = labels.isEmpty() ? text : text + "\n\n" + String.join(" · ", labels);
+        return Msg.builder().role(MsgRole.USER).content(blocks)
+                .metadata(Map.of("jharnessDisplay", display)).build();
+    }
+
+    private boolean approve(JsonNode params) {
+        var approval = approvals.get(identifier(params, "approvalId"));
+        return approval != null && approval.runId().equals(identifier(params, "runId"))
+                && approval.decision().complete(params.path("allow").asBoolean(false));
+    }
+
+    private void cancelApprovals(String runId) {
+        approvals.values().stream().filter(approval -> approval.runId().equals(runId))
+                .forEach(approval -> approval.decision().complete(false));
+    }
+
+    private boolean allowWrite(String runId, String permission, String operation, String path,
+            String before, String after) {
+        if (!runs.containsKey(runId)) return false;
+        if (permission.equals("full") || (permission.equals("assist")
+                && operation.equals("edit_file") && !after.isBlank()
+                && before.length() <= 2000 && after.length() <= 2000)) {
+            return true;
+        }
+        String id = UUID.randomUUID().toString();
+        var approval = new Approval(runId, new CompletableFuture<>());
+        approvals.put(id, approval);
+        try {
+            if (!runs.containsKey(runId)) return false;
+            event(runId, "approval", Map.of("id", id, "operation", operation, "path", path,
+                    "before", before, "after", after));
+            return approval.decision().get(10, TimeUnit.MINUTES);
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (ExecutionException | TimeoutException error) {
+            return false;
+        } finally {
+            approvals.remove(id);
+            event(runId, "approval-end", Map.of("id", id));
+        }
     }
 
     private void publish(String runId, AgentEvent value) {
@@ -213,10 +299,14 @@ public final class Backend {
     private Model model(JsonNode params) {
         String key = required(params, "key");
         var context = ModelCreationContext.builder().apiKey(key).stream(true);
+        String effort = params.path("effort").asText("default");
         String id;
         if (params.path("provider").asText().equals("deepseek")) {
-            id = "deepseek:deepseek-flash";
-            context.enableThinking(false);
+            id = "deepseek:" + required(params, "model");
+            if (!List.of("default", "none", "low", "high", "max").contains(effort)) {
+                throw new IllegalArgumentException("无效的 DeepSeek 推理强度。");
+            }
+            if (!effort.equals("default")) context.enableThinking(!effort.equals("none"));
         } else {
             URI base = URI.create(required(params, "baseUrl"));
             if (!List.of("https", "http").contains(base.getScheme()) || base.getHost() == null
@@ -225,6 +315,10 @@ public final class Backend {
             }
             id = "openai:" + required(params, "model");
             context.baseUrl(base.toString()).endpointPath("/chat/completions");
+        }
+        if (!effort.equals("default")
+                && !(params.path("provider").asText().equals("deepseek") && effort.equals("none"))) {
+            context.component(GenerateOptions.class, GenerateOptions.builder().reasoningEffort(effort).build());
         }
         var settings = context.build();
         try {

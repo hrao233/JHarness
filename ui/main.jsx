@@ -2,11 +2,12 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { ArrowUp, ChevronRight, CircleHelp, FolderOpen, FolderPlus, MessageSquare, Plus, Settings, Square, X, FileText } from 'lucide-react';
+import { ChevronDown, ChevronRight, CircleHelp, FolderOpen, FolderPlus, MessageSquare, Plus, Settings, X, FileText } from 'lucide-react';
+import { ApprovalCard, Composer } from './Composer.jsx';
 import './style.css';
 
 const api = window.jharness;
-const empty = { projects: [], model: {} };
+const empty = { projects: [], models: [] };
 const errText = error => String(error.message || error).replace(/^Error invoking remote method '[^']+': Error: /, '');
 const suggestions = ['读一下 README，解释这个项目的结构。', '这个项目有哪些主要模块？', '帮我找到项目的启动入口。'];
 
@@ -15,6 +16,13 @@ function App() {
   const [selected, setSelected] = useState(null);
   const [items, setItems] = useState([]);
   const [draft, setDraft] = useState('');
+  const [parts, setParts] = useState([]);
+  const [availableParts, setAvailableParts] = useState(null);
+  const [perm, setPerm] = useState('assist');
+  const [effort, setEffort] = useState('default');
+  const [modelId, setModelId] = useState('');
+  const [approvals, setApprovals] = useState([]);
+  const [collapsed, setCollapsed] = useState({});
   const [run, setRun] = useState(null);
   const [notice, setNotice] = useState('');
   const [showSettings, setShowSettings] = useState(false);
@@ -24,6 +32,9 @@ function App() {
   const scroll = useRef(null);
   const project = data.projects.find(value => value.id === selected?.project);
   const session = project?.sessions.find(value => value.id === selected?.session);
+  const model = data.models.find(value => value.id === (modelId || data.defaultModelId));
+  const recent = data.projects.flatMap(p => p.sessions.filter(s => s.updatedAt).map(s => ({ p, s })))
+    .sort((a, b) => b.s.updatedAt - a.s.updatedAt).slice(0, 5);
 
   async function refresh() {
     const state = await api.state();
@@ -32,9 +43,17 @@ function App() {
   }
 
   async function select(p, s) {
+    if (selection.current?.project === p.id && selection.current?.session === s?.id) return;
+    setParts([]);
+    setAvailableParts(null);
+    setDraft('');
     const next = { project: p.id, session: s?.id };
     selection.current = next;
     setSelected(next);
+    setModelId(s?.modelId || '');
+    setEffort(s?.effort || 'default');
+    setPerm(s?.permission || 'assist');
+    setCollapsed(previous => ({ ...previous, [p.id]: false }));
     setItems([]);
     setNotice('');
     setLoading(Boolean(s));
@@ -62,8 +81,11 @@ function App() {
       if (event === 'done') {
         running.current = null;
         setRun(null);
+        setApprovals([]);
         return;
       }
+      if (event === 'approval') return setApprovals(previous => [...previous, data]);
+      if (event === 'approval-end') return setApprovals(previous => previous.filter(item => item.id !== data.id));
       if (selection.current !== current.selection) return;
       setItems(previous => {
         if (event === 'text' || event === 'result') {
@@ -102,25 +124,60 @@ function App() {
     } catch (error) { setNotice(errText(error)); }
   }
 
-  async function newSession() {
-    if (!project) return openProject();
+  async function newSession(p) {
+    if (!p) return openProject();
     try {
-      const created = await api.newSession(project.id);
+      const created = await api.newSession(p.id);
       await refresh();
-      await select(project, created);
+      await select(p, created);
+    } catch (error) { setNotice(errText(error)); }
+  }
+
+  async function loadParts() {
+    const selectedProject = project?.id;
+    if (!selectedProject) return;
+    setAvailableParts(null);
+    try {
+      const entries = await api.projectParts(selectedProject);
+      if (selection.current?.project === selectedProject) setAvailableParts(entries);
+    } catch (error) {
+      setAvailableParts([]);
+      setNotice(errText(error));
+    }
+  }
+
+  function appendParts(entries) {
+    setParts(previous => [...previous, ...entries.filter(part =>
+      !previous.some(old => part.id === old.id && part.source === old.source && part.kind === old.kind))].slice(0, 8));
+  }
+
+  async function attach(kind) {
+    if (!project) return;
+    const target = selection.current;
+    try {
+      const entries = await api.attach(project.id, kind);
+      if (selection.current === target) appendParts(entries);
+    } catch (error) { setNotice(errText(error)); }
+  }
+
+  async function decide(id, allow) {
+    if (!run) return;
+    try {
+      if (!await api.approve(run, id, allow)) setNotice('这项审批已结束。');
+      setApprovals(previous => previous.filter(item => item.id !== id));
     } catch (error) { setNotice(errText(error)); }
   }
 
   async function send(event) {
     event?.preventDefault();
-    const text = draft.trim();
+    const text = draft.trim() || (parts.length ? '请查看附加内容。' : '');
     if (!text || running.current || loading) return;
-    if (!data.model.hasKey) return setShowSettings(true);
+    if (!model?.hasKey) return setShowSettings(true);
     if (!project) return openProject();
     setNotice('');
     let target = session;
     const id = crypto.randomUUID();
-    const reservation = { id, selection: selection.current };
+    const reservation = { id, selection: selection.current, submitting: true };
     running.current = reservation;
     setRun(id);
     try {
@@ -130,31 +187,66 @@ function App() {
         await select(project, target);
       }
       reservation.selection = selection.current;
-      setDraft('');
-      setItems(previous => [...previous, { role: 'user', text }]);
-      await api.chat(project.id, target.id, text, id);
-      await refresh();
+      const labels = parts.map(part => part.label);
+      const display = text + (labels.length ? '\n\n' + labels.join(' · ') : '');
+      setItems(previous => [...previous, { role: 'user', text: display, runId: id }]);
+      await api.chat(project.id, target.id, text, id, { modelId, effort, permission: perm, parts });
     } catch (error) {
       if (running.current?.id === id) {
         running.current = null;
         setRun(null);
       }
+      setDraft(draft);
+      setParts(parts);
+      setItems(previous => previous.filter(item => item.role !== 'user' || item.runId !== id));
       setNotice(errText(error));
+      return;
     }
+    reservation.submitting = false;
+    setDraft('');
+    setParts([]);
+    setModelId(modelId);
+    setEffort(effort);
+    setPerm(perm);
+    if (reservation.stopRequested && running.current === reservation) {
+      api.stop(id).catch(error => setNotice(errText(error)));
+    }
+    refresh().catch(error => setNotice(errText(error)));
+  }
+
+  function stop() {
+    const current = running.current;
+    if (!current) return;
+    if (current.submitting) current.stopRequested = true;
+    else api.stop(current.id).catch(error => setNotice(errText(error)));
   }
 
   return <div className="app">
     <aside className="sidebar">
       <div className="brand"><span className="mark">J</span><strong>JHarness</strong></div>
-      <button className="side-action" disabled={!!run} onClick={newSession}><Plus size={17}/>新建会话</button>
+      <button className="side-action" disabled={!!run} onClick={() => newSession(project)}><Plus size={17}/>新建会话</button>
       <button className="side-action" disabled={!!run} onClick={openProject}><FolderPlus size={17}/>打开项目</button>
       <div className="projects">
+        {!!recent.length && <section className="recent">
+          <div className="side-label">最近会话</div>
+          {recent.map(({ p, s }) => <button className="session recent-session" disabled={!!run} key={s.id}
+            onClick={() => select(p, s)} title={p.name + ' / ' + s.title}>
+            <MessageSquare size={14}/><span>{s.title}</span></button>)}
+        </section>}
         {data.projects.length > 0 && <div className="side-label">项目</div>}
         {data.projects.map(p => <div className="project" key={p.id}>
-          <button title={p.directory} className="project-name" disabled={!!run} onClick={() => select(p, p.sessions[0])}>
-            <FolderOpen size={15}/><span>{p.name}</span>
-          </button>
-          {p.sessions.map(s => <button key={s.id} disabled={!!run}
+          <div className="project-row">
+            <button className="project-toggle" aria-label={p.name + ' 会话'} aria-expanded={!collapsed[p.id]}
+              onClick={() => setCollapsed(previous => ({ ...previous, [p.id]: !previous[p.id] }))}>
+              {collapsed[p.id] ? <ChevronRight size={13}/> : <ChevronDown size={13}/>}
+            </button>
+            <button title={p.directory} className="project-name" disabled={!!run} onClick={() => select(p, p.sessions[0])}>
+              <FolderOpen size={15}/><span>{p.name}</span>
+            </button>
+            <button className="project-add" disabled={!!run} aria-label={'在 ' + p.name + ' 新建会话'}
+              title="在此项目中新建会话" onClick={() => newSession(p)}><Plus size={16}/></button>
+          </div>
+          {!collapsed[p.id] && p.sessions.map(s => <button key={s.id} disabled={!!run}
             className={'session ' + (selected?.session === s.id ? 'selected' : '')}
             onClick={() => select(p, s)}><MessageSquare size={14}/><span>{s.title}</span></button>)}
         </div>)}
@@ -164,7 +256,6 @@ function App() {
     <main>
       <header><div className="crumb"><span title={project?.directory}>{project?.name || '工作台'}</span>
         <ChevronRight size={15}/><strong>{session?.title || '新会话'}</strong></div>
-        <button className="model" onClick={() => setShowSettings(true)}>{data.model.hasKey ? data.model.model : '配置模型'}</button>
       </header>
       <div className="scroll" ref={scroll}>
         <div className="thread">
@@ -184,40 +275,46 @@ function App() {
                 {item.role === 'user' ? item.text : <Markdown remarkPlugins={[remarkGfm]}
                   components={{ a: ({ children }) => <span>{children}</span>, img: () => null }}>{item.text}</Markdown>}
               </div>)}
-          {run && !items.some(item => item.runId === run) && <p className="muted" role="status">正在处理…</p>}
+          {run && !approvals.length && !items.some(item => item.role === 'assistant' && item.runId === run)
+            && <p className="muted" role="status">正在处理…</p>}
         </div>
       </div>
       <div className="bottom"><div className="composer-wrap">
+        {!!approvals.length && <div className="approvals">{approvals.map(item =>
+          <ApprovalCard key={item.id} item={item} decide={decide}/>)}</div>}
         {notice && <div className="notice" role="alert"><CircleHelp size={16}/>{notice}
           <button aria-label="关闭提示" onClick={() => setNotice('')}><X size={15}/></button></div>}
-        <form className="composer" onSubmit={send}>
-          <textarea rows="2" maxLength={16000} value={draft} placeholder={project ? '输入消息…' : '先选择项目文件夹'}
-            aria-label="消息" disabled={!project || loading} onChange={event => setDraft(event.target.value)}
-            onKeyDown={event => {
-              if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) void send(event);
-            }}/>
-          <div className="compose-actions"><span>{project ? '可编辑项目' : '未选择项目'}</span>
-            {run ? <button type="button" className="send" aria-label="停止"
-              onClick={() => api.stop(run).catch(error => setNotice(errText(error)))}><Square size={15}/></button>
-              : <button className="send" aria-label="发送" disabled={!project || !draft.trim() || loading}><ArrowUp size={19}/></button>}
-          </div>
-        </form>
+        <Composer draft={draft} setDraft={setDraft} project={project} loading={loading} run={run} send={send} stop={stop}
+          parts={parts} remove={part => setParts(previous => previous.filter(value => value !== part))}
+          attach={attach} availableParts={availableParts} loadParts={loadParts} addPart={part => appendParts([part])}
+          permission={perm} setPermission={setPerm} models={data.models} modelId={modelId} model={model}
+          defaultModelId={data.defaultModelId} effort={effort} setEffort={setEffort}
+          selectModel={id => { setModelId(id); setEffort('default'); }} settings={() => setShowSettings(true)}/>
       </div></div>
     </main>
-    {showSettings && <ModelSettings value={data.model} close={() => setShowSettings(false)}
-      onSave={model => setData(previous => ({ ...previous, model }))}/>}
+    {showSettings && <ModelSettings models={data.models} defaultModelId={data.defaultModelId} selectedId={model?.id}
+      close={() => setShowSettings(false)} onSave={({ savedModelId, ...state }) => {
+        setData(state);
+        setModelId(savedModelId);
+        setEffort('default');
+      }}/>}
   </div>;
 }
 
-function ModelSettings({ value, close, onSave }) {
-  const [form, setForm] = useState({ provider: value.provider || 'deepseek',
-    baseUrl: value.baseUrl || '', model: value.model || '', key: '' });
+function modelForm(value, defaultModelId) {
+  return { id: value?.id || '', provider: value?.provider || 'deepseek', baseUrl: value?.baseUrl || '',
+    model: value?.model || 'deepseek-flash', key: '', makeDefault: !defaultModelId || value?.id === defaultModelId };
+}
+
+function ModelSettings({ models, defaultModelId, selectedId, close, onSave }) {
+  const [form, setForm] = useState(() => modelForm(models.find(value => value.id === selectedId), defaultModelId));
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const panel = useRef(null);
   const compatible = form.provider === 'compatible';
-  const keepKey = value.hasKey && value.provider === form.provider && (!compatible || value.baseUrl === form.baseUrl.trim());
+  const value = models.find(item => item.id === form.id);
+  const keepKey = value?.hasKey && value.provider === form.provider && (!compatible || value.baseUrl === form.baseUrl.trim());
 
   useEffect(() => { panel.current.showModal(); }, []);
 
@@ -245,19 +342,32 @@ function ModelSettings({ value, close, onSave }) {
   return <dialog ref={panel} className="dialog" onCancel={event => { event.preventDefault(); if (!busy) close(); }}>
     <div className="dialog-head"><h2>模型设置</h2><button aria-label="关闭" disabled={busy} onClick={close}><X size={18}/></button></div>
     <form onSubmit={event => { event.preventDefault(); void execute(true); }}>
-      <label>服务商<select value={form.provider} onChange={event => {
+      {!!models.length && <label>配置<select value={form.id} disabled={busy} onChange={event => {
+        const id = event.target.value;
+        setStatus('');
+        setForm(modelForm(models.find(item => item.id === id), defaultModelId));
+      }}><option value="">添加模型</option>{models.map(item =>
+        <option value={item.id} key={item.id}>{item.model} · {item.provider === 'deepseek' ? 'DeepSeek 官方' : item.baseUrl}</option>)}
+      </select></label>}
+      <label>服务商<select value={form.provider} disabled={busy} onChange={event => {
         const provider = event.target.value;
         setStatus('');
-        setForm({ provider, key: '', baseUrl: value.provider === provider ? value.baseUrl : '',
-          model: value.provider === provider ? value.model : '' });
+        setForm(previous => ({ ...previous, provider, key: '', baseUrl: value?.provider === provider ? value.baseUrl : '',
+          model: value?.provider === provider ? value.model : provider === 'deepseek' ? 'deepseek-flash' : '' }));
       }}><option value="deepseek">DeepSeek 官方</option><option value="compatible">OpenAI 兼容接口</option></select></label>
       {compatible ? <>
         <label>Base URL<input required type="url" placeholder="https://api.example.com/v1" value={form.baseUrl}
           onChange={event => edit('baseUrl', event.target.value)}/></label>
         <label>模型 ID<input required value={form.model} onChange={event => edit('model', event.target.value)}/></label>
-      </> : <div className="provider-note"><span>默认模型</span><code>deepseek-flash</code></div>}
+      </> : <label>模型<select value={form.model} onChange={event => edit('model', event.target.value)}>
+        <option value="deepseek-flash">DeepSeek Flash</option>
+        <option value="deepseek-v4-pro">DeepSeek V4 Pro</option>
+      </select></label>}
       <label>API Key<input type="password" autoComplete="off" required={!keepKey} value={form.key}
         placeholder={keepKey ? '已保存，留空继续使用' : '粘贴 API Key'} onChange={event => edit('key', event.target.value)}/></label>
+      <label className="check-row"><input type="checkbox" checked={form.makeDefault}
+        disabled={!defaultModelId || form.id === defaultModelId}
+        onChange={event => edit('makeDefault', event.target.checked)}/>设为默认模型</label>
       {status && <p className={failed ? 'error-text' : 'success-text'} role="status">{status}</p>}
       <div className="dialog-actions">
         <button type="button" className="secondary" disabled={busy} onClick={() => execute(false)}>测试连接</button>

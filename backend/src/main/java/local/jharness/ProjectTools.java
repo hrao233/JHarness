@@ -13,11 +13,18 @@ import java.nio.file.StandardOpenOption;
 import java.util.stream.Stream;
 
 public final class ProjectTools {
+    @FunctionalInterface
+    interface WriteApproval {
+        boolean allow(String operation, String path, String before, String after);
+    }
+
     private static final int MAX_FILE_BYTES = 64 * 1024;
     private final Path root;
+    private final WriteApproval approval;
 
-    ProjectTools(Path root) throws IOException {
+    ProjectTools(Path root, WriteApproval approval) throws IOException {
         this.root = root.toRealPath();
+        this.approval = approval;
         if (!Files.isDirectory(this.root)) {
             throw new IOException("请选择有效的项目文件夹。");
         }
@@ -61,6 +68,15 @@ public final class ProjectTools {
             }
             String edited = original.substring(0, start) + newText + original.substring(start + oldText.length());
             checkText(edited);
+            if (edited.equals(original)) {
+                return ToolResultBlock.success("文件内容相同，无需修改。");
+            }
+            if (!approval.allow("edit_file", root.relativize(file).toString(), oldText, newText)) {
+                return ToolResultBlock.error("此次编辑未获批准，文件未更改。");
+            }
+            if (!resolve(path).equals(file)) {
+                return ToolResultBlock.error("文件路径已发生变化，请重新读取后再编辑。");
+            }
             Path temporary = Files.createTempFile(file.getParent(), ".jharness-", ".tmp");
             try {
                 Files.writeString(temporary, edited, StandardCharsets.UTF_8);
@@ -88,7 +104,17 @@ public final class ProjectTools {
             }
             Path parent = resolve(root.relativize(candidate.getParent()).toString());
             checkText(content);
-            Files.writeString(parent.resolve(candidate.getFileName()), content, StandardCharsets.UTF_8,
+            Path file = parent.resolve(candidate.getFileName());
+            if (Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
+                return ToolResultBlock.error("无法创建文件。此路径已存在。");
+            }
+            if (!approval.allow("create_file", root.relativize(file).toString(), "", content)) {
+                return ToolResultBlock.error("此次创建未获批准。");
+            }
+            if (!resolve(root.relativize(candidate.getParent()).toString()).equals(parent)) {
+                return ToolResultBlock.error("父目录已发生变化，请重新确认后再创建。");
+            }
+            Files.writeString(file, content, StandardCharsets.UTF_8,
                     StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
             return ToolResultBlock.success("已创建 " + path);
         } catch (IOException | IllegalArgumentException e) {

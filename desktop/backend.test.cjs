@@ -16,7 +16,7 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
   await mkdir(projectPath);
   await writeFile(path.join(projectPath, 'README.md'), '# Fixture\r\nProject fact: ORCHID-27.\r\n');
   await writeFile(path.join(root, 'outside.txt'), 'untouched');
-  const steps = [
+  let steps = [
     ['read_file', { path: 'README.md' }, 'ORCHID-27'],
     ['edit_file', { path: 'README.md', old_text: '# Fixture\nProject fact: ORCHID-27.',
       new_text: '# Fixture\nProject fact: ORCHID-28.' }, '已编辑 README.md'],
@@ -79,11 +79,28 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
   }
   try {
     let call = launch();
-    assert.equal((await call('testModel', model)).model, 'fixture');
-    await call('chat', { ...context, ...model, runId: randomUUID(), message: '读并修改 README，然后创建 Note.java' });
-    for (let i = 0; i < 200 && !events.some(event => event.event === 'done'); i++) {
-      await new Promise(resolve => setTimeout(resolve, 100));
+    async function waitEvent(runId, type) {
+      for (let i = 0; i < 150; i++) {
+        const event = events.find(event => event.runId === runId && event.event === type);
+        if (event) return event;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      assert.fail(JSON.stringify(events));
     }
+    assert.equal((await call('testModel', model)).model, 'fixture');
+    const full = randomUUID();
+    await call('chat', { ...context, ...model, runId: full, permission: 'full', effort: 'high',
+      message: '读并修改 README，然后创建 Note.java',
+      parts: [{ label: '文件 · info.txt', kind: 'file', text: 'FILE-CONTEXT' },
+        { label: '插件 Skill · formatter', kind: 'plugin', text: 'SKILL-CONTEXT' },
+        { label: '图片 · fixture.png', kind: 'image', mime: 'image/png', image: 'iVBORw0KGgo=' }] });
+    await waitEvent(full, 'done');
+    assert.equal(events.some(event => event.runId === full && event.event === 'approval'), false);
+    const firstChat = requests.find(request => request.body.tools?.length).body;
+    assert.equal(firstChat.reasoning_effort, 'high');
+    assert.match(JSON.stringify(firstChat.messages), /FILE-CONTEXT/);
+    assert.match(JSON.stringify(firstChat.messages), /SKILL-CONTEXT/);
+    assert.match(JSON.stringify(firstChat.messages), /data:image\/png;base64,iVBORw0KGgo=/);
     assert.ok(events.some(event => event.event === 'tool-start' && event.data.name === 'read_file'),
       JSON.stringify(events));
     assert.ok(events.some(event => event.event === 'result' && event.data.text.includes('ORCHID-28')),
@@ -105,7 +122,45 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     call = launch();
     const history = await call('history', context);
     assert.deepEqual(history.map(message => message.role), ['user', 'assistant']);
+    assert.match(history[0].text, /info.txt/);
+    assert.match(history[0].text, /fixture.png/);
+    assert.doesNotMatch(history[0].text, /FILE-CONTEXT/);
     assert.match(history[1].text, /ORCHID-28/);
+
+    const ask = randomUUID();
+    steps = [['edit_file', { path: 'README.md', old_text: 'ORCHID-28', new_text: 'NOT-APPROVED' }]];
+    await call('chat', { ...context, sessionId: randomUUID(), ...model, runId: ask, permission: 'ask', message: '编辑' });
+    const edit = await waitEvent(ask, 'approval');
+    assert.equal(edit.data.path, 'README.md');
+    assert.equal(edit.data.after, 'NOT-APPROVED');
+    assert.equal(await call('approve', { runId: full, approvalId: edit.data.id, allow: true }), false);
+    assert.equal(await call('approve', { runId: ask, approvalId: edit.data.id, allow: false }), true);
+    await waitEvent(ask, 'done');
+    assert.match(await readFile(path.join(projectPath, 'README.md'), 'utf8'), /ORCHID-28/);
+
+    const assist = randomUUID();
+    steps = [
+      ['edit_file', { path: 'README.md', old_text: 'ORCHID-28', new_text: 'ORCHID-29' }],
+      ['create_file', { path: 'Approved.txt', content: 'approved' }],
+    ];
+    await call('chat', { ...context, sessionId: randomUUID(), ...model, runId: assist,
+      permission: 'assist', message: '修改并创建' });
+    const create = await waitEvent(assist, 'approval');
+    assert.equal(create.data.operation, 'create_file');
+    assert.match(await readFile(path.join(projectPath, 'README.md'), 'utf8'), /ORCHID-29/);
+    await assert.rejects(readFile(path.join(projectPath, 'Approved.txt')), { code: 'ENOENT' });
+    assert.equal(await call('approve', { runId: assist, approvalId: create.data.id, allow: true }), true);
+    await waitEvent(assist, 'done');
+    assert.equal(await readFile(path.join(projectPath, 'Approved.txt'), 'utf8'), 'approved');
+
+    const stopped = randomUUID();
+    steps = [['create_file', { path: 'Cancelled.txt', content: 'cancelled' }]];
+    await call('chat', { ...context, sessionId: randomUUID(), ...model, runId: stopped, permission: 'ask', message: '创建' });
+    const cancelled = await waitEvent(stopped, 'approval');
+    await call('stop', { runId: stopped });
+    await waitEvent(stopped, 'done');
+    assert.equal(await call('approve', { runId: stopped, approvalId: cancelled.data.id, allow: true }), false);
+    await assert.rejects(readFile(path.join(projectPath, 'Cancelled.txt')), { code: 'ENOENT' });
   } finally {
     if (child && child.exitCode === null) {
       const exited = once(child, 'exit');

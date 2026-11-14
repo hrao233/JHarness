@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ArrowUp, Check, ChevronDown, ChevronRight, FileText, FolderOpen, Hand, Image, Paperclip, Plus,
+import { ArrowUp, Check, ChevronDown, ChevronRight, FileText, FolderOpen, Hand, Image, Paperclip, Plus, TriangleAlert,
   Puzzle, ShieldAlert, ShieldCheck, Square, X, Zap } from 'lucide-react';
 
 const permissionOptions = [
@@ -15,7 +15,9 @@ export function Composer({ draft, setDraft, project, loading, run, send, stop, p
     availableParts, loadParts, addPart, permission, setPermission, models, modelId, model,
     defaultModelId, effort, setEffort, fast, setFast, selectModel, settings }) {
   const [menu, setMenu] = useState(null);
+  const [confirmFullAccess, setConfirmFullAccess] = useState(false);
   const box = useRef(null);
+  const permissionButton = useRef(null);
   const choice = permissionOptions.find(option => option.id === permission) || permissionOptions[1];
   const levels = model?.effortLevels || [];
   const tick = Math.max(0, levels.indexOf(effort));
@@ -55,7 +57,22 @@ export function Composer({ draft, setDraft, project, loading, run, send, stop, p
     void attach(kind);
   }
 
-  return <form className="composer" ref={box} onSubmit={event => { setMenu(null); void send(event); }}>
+  function choosePermission(id) {
+    setMenu(null);
+    if (id === 'full' && permission !== 'full') {
+      setConfirmFullAccess(true);
+    } else {
+      setPermission(id);
+    }
+  }
+
+  function finishFullAccess(confirmed) {
+    if (confirmed) setPermission('full');
+    setConfirmFullAccess(false);
+    permissionButton.current?.focus();
+  }
+
+  return <><form className="composer" ref={box} onSubmit={event => { setMenu(null); void send(event); }}>
     {!!parts.length && <div className="attachment-list">{parts.map(part => {
       const Icon = partIcons[part.kind];
       return <span className="attachment" key={part.id || part.kind + part.source} title={part.source || part.name}>
@@ -93,7 +110,7 @@ export function Composer({ draft, setDraft, project, loading, run, send, stop, p
           </div>}
         </div>
         <div className="menu-anchor">
-          <button type="button" className="compose-button permission-button" disabled={!!run}
+          <button type="button" ref={permissionButton} className="compose-button permission-button" disabled={!!run}
             aria-expanded={menu === 'permission'} onClick={() => toggle('permission')}>
             <choice.Icon size={17}/>{choice.label}
           </button>
@@ -101,7 +118,7 @@ export function Composer({ draft, setDraft, project, loading, run, send, stop, p
             <div className="menu-label">应如何批准文件操作？</div>
             {permissionOptions.map(({ id, label, description, Icon }) =>
               <button type="button" className={'menu-row mode-' + id} key={id} aria-pressed={id === permission}
-                onClick={() => { setPermission(id); setMenu(null); }}>
+                onClick={() => choosePermission(id)}>
                 <Icon size={19}/><span className="menu-copy">{label}<small>{description}</small></span>
                 {id === permission && <Check size={18}/>}
               </button>)}
@@ -173,7 +190,31 @@ export function Composer({ draft, setDraft, project, loading, run, send, stop, p
           </button>}
       </div>
     </div>
-  </form>;
+  </form>
+  {confirmFullAccess && <FullAccessDialog finish={finishFullAccess}/>}
+  </>;
+}
+
+function FullAccessDialog({ finish }) {
+  const panel = useRef(null);
+  useEffect(() => { panel.current.showModal(); }, []);
+
+  function close(confirmed) {
+    panel.current.close();
+    finish(confirmed);
+  }
+
+  return <dialog ref={panel} className="dialog full-access-dialog"
+    aria-labelledby="full-access-title" aria-describedby="full-access-risk"
+    onCancel={event => { event.preventDefault(); close(false); }}>
+    <h2 id="full-access-title"><TriangleAlert size={22}/>要开启完全访问权限吗？</h2>
+    <p>开启后，JHarness 可在当前项目中创建或修改文件，无需逐次批准。</p>
+    <p id="full-access-risk">误操作或项目内容中的恶意指令可能导致文件被意外修改、原有内容被覆盖。你可以随时从输入栏切回其他审批模式。</p>
+    <div className="dialog-actions">
+      <button type="button" className="secondary" autoFocus onClick={() => close(false)}>取消</button>
+      <button type="button" className="confirm-full-access" onClick={() => close(true)}><TriangleAlert size={16}/>确认开启</button>
+    </div>
+  </dialog>;
 }
 
 export function ApprovalCard({ item, decide }) {

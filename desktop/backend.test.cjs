@@ -29,7 +29,9 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     ['edit_file', { path: 'README.md', old_text: 'ORCHID-27', new_text: 'changed' }, '原文必须'],
   ];
   const requests = [];
+  let backendLog = '';
   let websiteReads = 0;
+  let endless = false;
   let reviewResponses = [];
   const server = createServer(async (request, response) => {
     if (request.url === '/fixture-page') {
@@ -45,7 +47,7 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     const consolidating = body.messages.some(message => JSON.stringify(message.content).includes('New daily ledger entries to merge'));
     const results = body.messages.filter(message => message.role === 'tool');
     const toolAvailable = body.tools?.some(tool => tool.function?.name === 'read_file');
-    const step = steps[results.length];
+    const step = endless ? ['list_files', { path: '.' }] : steps[results.length];
     const delta = toolAvailable && step
       ? { role: 'assistant', tool_calls: [{ index: 0, id: 'call_' + results.length, type: 'function',
           function: { name: step[0], arguments: JSON.stringify(step[1]) } }] }
@@ -68,7 +70,7 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     child = spawn(path.join('runtime', 'bin', 'java.exe'),
       ['-jar', 'backend/target/jharness-backend.jar', data], { stdio: ['pipe', 'pipe', 'pipe'] });
     let stderr = '';
-    child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-7000); });
+    child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-14000); backendLog = stderr; });
     const pending = new Map();
     createInterface({ input: child.stdout }).on('line', line => {
       const message = JSON.parse(line);
@@ -109,6 +111,9 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
         { label: '插件 Skill · formatter', kind: 'plugin', text: 'SKILL-CONTEXT' },
         { label: '图片 · fixture.png', kind: 'image', mime: 'image/png', image: 'iVBORw0KGgo=' }] });
     await waitEvent(full, 'done');
+    assert.deepEqual(events.filter(event => event.runId === full && event.event === 'loop-phase')
+      .map(event => [event.data.step, event.data.phase]),
+      [...steps.flatMap((_, index) => [[index + 1, 'reasoning'], [index + 1, 'acting']]), [steps.length + 1, 'reasoning']]);
     assert.equal(events.some(event => event.runId === full && event.event === 'approval'), false);
     const firstChat = requests.find(request => request.body.tools?.length).body;
     assert.equal(firstChat.reasoning_effort, 'high');
@@ -303,7 +308,7 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     const maintained = await call('memoryList', context);
-    assert.match(await call('memoryRead', { ...context, name: maintained.daily[0] }), /AUTO-FACT-198/);
+    assert.match(await call('memoryRead', { ...context, name: maintained.daily[0] }), /AUTO-FACT-198/, backendLog);
     assert.match(maintained.summary, /已整理/);
     assert.deepEqual(maintained.archive, ['2000-01-01.md']);
     assert.match(await call('memoryRead', { ...context, name: '2000-01-01.md', archive: true }), /OLD-LEDGER-18/);
@@ -320,6 +325,14 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     await waitEvent(web, 'done');
     assert.equal(websiteReads, 1);
     assert.match(JSON.stringify(requests.at(-1).body.messages.filter(message => message.role === 'tool')), /TEST-WEB-PAGE/);
+
+    const limited = randomUUID();
+    endless = true;
+    await call('chat', { ...context, sessionId: randomUUID(), ...model, runId: limited,
+      permission: 'full', message: '测试循环上限' });
+    await waitEvent(limited, 'done');
+    assert.equal(events.filter(event => event.runId === limited && event.event === 'tool-start').length, 18);
+    assert.match((await waitEvent(limited, 'result')).data.text, /步数上限/);
 
     for (const effort of ['default', 'none', 'low', 'high', 'max']) {
       await call('testModel', { ...model, provider: 'deepseek', model: 'deepseek-flash', effort });

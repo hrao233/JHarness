@@ -2,6 +2,8 @@
 
 Windows 本地项目助手。桌面窗口由 Electron 和 React 提供，Java 后端使用 AgentScope Core 和 Harness。应用通过进程管道传输 JSON 行和流式事件。
 
+JHarness 的 `AgentLoop` 驱动每轮模型请求和工具执行，直到模型提交最终回复、达到执行上限或用户取消。`ReAct` 接入 AgentScope 的模型、工具注册表、上下文中间件和会话日志。会话显示当前步骤，工具结果在进入下一次模型请求前写入日志。
+
 ## 使用
 
 双击 `release/win-unpacked/JHarness.exe`。在「设置」填写 API Key 并测试连接。DeepSeek 官方预填 `deepseek-flash`。自定义 OpenAI 兼容接口需要填写 Base URL（例如 `https://example.com/v1`）和模型 ID。

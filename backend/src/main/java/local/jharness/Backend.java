@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.AgentResultEvent;
+import io.agentscope.core.event.CustomEvent;
 import io.agentscope.core.event.TextBlockDeltaEvent;
 import io.agentscope.core.event.ToolCallDeltaEvent;
 import io.agentscope.core.event.ToolCallStartEvent;
@@ -290,7 +291,7 @@ public final class Backend {
         try {
             Path workspace = workspace(params);
             Path project = Path.of(required(params, "projectPath")).toRealPath();
-            RuntimeContext context = context(params);
+            RuntimeContext context = RuntimeContext.builder(context(params)).runId(runId).build();
             Msg message = userMessage(params);
             var model = model(params);
             var tools = new Toolkit();
@@ -346,7 +347,9 @@ public final class Backend {
                                 if (autoMemory) memory.attachMaintenance(builder, auxiliary);
                                 return builder.build();
                             },
-                            agent -> agent.streamEvents(message, context), HarnessAgent::close)
+                            agent -> new ReAct(agent.getDelegate()).run(message, context,
+                                    store(workspace).open(new SessionKey(USER_ID, AGENT_ID, context.getSessionId()), context)),
+                            HarnessAgent::close)
                     .subscribeOn(Schedulers.boundedElastic())
                     .doFinally(signal -> {
                         runs.remove(runId);
@@ -436,8 +439,10 @@ public final class Backend {
     }
 
     private void publish(String runId, AgentEvent value) {
-        if (value instanceof TextBlockDeltaEvent e) {
-            event(runId, "text", Map.of("delta", e.getDelta()));
+        if (value instanceof CustomEvent e && List.of("loop-phase", "step-reply").contains(e.getName())) {
+            event(runId, e.getName(), e.getValue());
+        } else if (value instanceof TextBlockDeltaEvent e) {
+            event(runId, "text", Map.of("delta", e.getDelta(), "replyId", e.getReplyId()));
         } else if (value instanceof ToolCallStartEvent e) {
             event(runId, "tool-start", Map.of("toolId", e.getToolCallId(), "name", e.getToolCallName()));
         } else if (value instanceof ToolCallDeltaEvent e) {
@@ -549,6 +554,9 @@ public final class Backend {
     private static String describe(Throwable error) {
         for (Throwable current = error; current != null; current = current.getCause()) {
             String text = String.valueOf(current.getMessage()).toLowerCase(Locale.ROOT);
+            if (text.contains("explicit reconciliation required")) {
+                return "此会话有中断前已提交但结果未确认的工具调用。为避免重复执行，请先检查工作区，再在新会话继续。";
+            }
             if (text.contains("401") || text.contains("403")) return "服务商拒绝了请求，请检查 API Key 和权限。";
             if (text.contains("404") || text.contains("model_not_found")) return "找不到模型或接口，请检查模型 ID 和 Base URL。";
             if (text.contains("429")) return "服务商限流，请稍后重试。";

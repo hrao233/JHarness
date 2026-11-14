@@ -26,6 +26,7 @@ function App() {
   const [approvals, setApprovals] = useState([]);
   const [collapsed, setCollapsed] = useState({});
   const [run, setRun] = useState(null);
+  const [phase, setPhase] = useState(null);
   const [notice, setNotice] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [showSidebar, setShowSidebar] = useState(true);
@@ -92,6 +93,7 @@ function App() {
       if (event === 'done') {
         running.current = null;
         setRun(null);
+        setPhase(null);
         setApprovals([]);
         return;
       }
@@ -109,13 +111,22 @@ function App() {
         return;
       }
       if (selection.current !== current.selection) return;
+      if (event === 'loop-phase') {
+        current.step = data.step;
+        return setPhase(data);
+      }
+      const step = current.step;
       setItems(previous => {
-        if (event === 'text' || event === 'result') {
-          const index = previous.findLastIndex(item => item.role === 'assistant' && item.runId === current.id);
-          if (index < 0) return [...previous, { id: data.id, role: 'assistant', runId: current.id, text: data.text || data.delta }];
+        if (event === 'text' || event === 'result' || event === 'step-reply') {
+          const index = previous.findLastIndex(item => item.role === 'assistant' && item.runId === current.id
+            && item.step === step);
+          if (event === 'step-reply' && !data.text) return previous;
+          if (index < 0) return [...previous, { id: data.id, replyId: data.replyId, role: 'assistant',
+            runId: current.id, step, text: data.text || data.delta }];
           const item = previous[index];
           return previous.map((value, i) => i === index
-            ? { ...item, id: data.id ?? item.id, text: event === 'result' ? data.text : item.text + data.delta }
+            ? { ...item, id: data.id ?? item.id, replyId: data.replyId ?? item.replyId,
+              text: event !== 'text' ? data.text : data.replyId === item.replyId ? item.text + data.delta : data.delta }
             : value);
         }
         if (event === 'tool-start') {
@@ -318,7 +329,9 @@ function App() {
         <ChevronRight size={15}/><strong>{session?.title || '新会话'}</strong></div>
       </header>
       <Conversation key={session?.id || project?.id || 'empty'} items={items} sessionId={session?.id}
-        status={!!run && !approvals.length && !items.some(item => item.role === 'assistant' && item.runId === run)}
+        status={run && !approvals.length ? (phase
+          ? '第 ' + phase.step + ' / ' + phase.limit + ' 步 · ' + (phase.phase === 'acting' ? '执行工具' : '请求模型')
+          : '正在准备…') : null}
         copy={copy} quote={run || loading ? null : quote} saved={bookmarks} onSave={saveBookmark}
         run={run} jump={jump} scroll={scroll}>
           {!items.length && !loading && <div className="welcome">

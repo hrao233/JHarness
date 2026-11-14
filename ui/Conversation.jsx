@@ -129,7 +129,7 @@ export function Conversation({ items, sessionId, children, status, copy, quote, 
             bookmark={saved.find(value => value.sessionId === sessionId && (value.messageId
               ? value.messageId === item.id : value.turn === turn && value.role === item.role && value.text === item.text))}
             copy={copy} quote={quote} onSave={onSave} canSave={!!item.id && !run}/>)}
-        {status && <p className="muted" role="status">正在处理…</p>}
+        {status && <p className="muted" role="status">{status}</p>}
       </div>
     </div>
     {!!prompts.length && !atBottom && <button className="latest" title="跳到最新消息" aria-label="跳到最新消息"

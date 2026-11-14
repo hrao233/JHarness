@@ -1,0 +1,178 @@
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { ArrowDown, Bookmark, Check, Copy, Ellipsis, FileText, Quote } from 'lucide-react';
+import Markdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+
+export function Conversation({ items, sessionId, children, status, copy, quote, saved, onSave, run, jump, scroll }) {
+  const rail = useRef(null);
+  const thread = useRef(null);
+  const follow = useRef(true);
+  const target = useRef(null);
+  const [active, setActive] = useState(0);
+  const [atBottom, setAtBottom] = useState(true);
+  const [preview, setPreview] = useState(null);
+  let turn = 0;
+  const rows = items.map((item, index) => {
+    if (item.role === 'user') turn++;
+    return { item, turn, index };
+  });
+  const prompts = rows.filter(({ item }) => item.role === 'user');
+
+  function update() {
+    const pane = scroll.current;
+    if (!pane) return;
+    const bottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 12;
+    follow.current = bottom;
+    setAtBottom(bottom);
+    const markers = pane.querySelectorAll('[data-prompt]');
+    let position = 0;
+    if (target.current?.top === pane.scrollTop) position = target.current.turn;
+    else if (bottom) position = markers.length;
+    else {
+      let low = 0;
+      let high = markers.length;
+      while (low < high) {
+        const mid = (low + high) >>> 1;
+        if (markers[mid].offsetTop <= pane.scrollTop + 44) low = mid + 1;
+        else high = mid;
+      }
+      position = markers.length ? Math.max(low, 1) : 0;
+    }
+    if (target.current?.top !== pane.scrollTop) target.current = null;
+    setActive(position);
+  }
+
+  function goBottom() {
+    const pane = scroll.current;
+    if (!pane) return;
+    target.current = null;
+    pane.scrollTop = pane.scrollHeight;
+    update();
+  }
+
+  function goTo(turn) {
+    const pane = scroll.current;
+    const prompt = pane?.querySelector('[data-prompt="' + turn + '"]');
+    if (!prompt) return;
+    pane.scrollTop = prompt.offsetTop - 20;
+    target.current = { turn, top: pane.scrollTop };
+    update();
+  }
+
+  useLayoutEffect(() => {
+    if (follow.current) goBottom();
+    else update();
+  }, [items, status]);
+
+  useLayoutEffect(() => {
+    const pane = scroll.current;
+    if (!pane) return;
+    const observer = new ResizeObserver(() => {
+      if (follow.current && !target.current) goBottom();
+      else update();
+    });
+    observer.observe(pane);
+    observer.observe(thread.current);
+    return () => observer.disconnect();
+  }, []);
+
+  useLayoutEffect(() => {
+    const list = rail.current;
+    const mark = list?.querySelector('[aria-current="step"]');
+    if (!mark) return;
+    if (mark.offsetTop < list.scrollTop) list.scrollTop = mark.offsetTop;
+    if (mark.offsetTop + mark.offsetHeight > list.scrollTop + list.clientHeight) {
+      list.scrollTop = mark.offsetTop + mark.offsetHeight - list.clientHeight;
+    }
+  }, [active, prompts.length]);
+
+  useEffect(() => {
+    if (jump?.turn === 'latest') goBottom();
+    else if (jump) goTo(jump.turn);
+  }, [jump]);
+
+  return <div className="conversation">
+    {!!prompts.length && <div className="timeline-wrap">
+      <nav className="timeline" ref={rail} aria-label="对话时间线"
+        onKeyDown={event => {
+          const step = { ArrowDown: 1, ArrowUp: -1 }[event.key];
+          if (!step) return;
+          const buttons = Array.from(rail.current.querySelectorAll('button'));
+          const next = buttons[buttons.indexOf(event.target) + step];
+          if (!next) return;
+          event.preventDefault();
+          next.focus({ preventScroll: true });
+          next.click();
+        }}>
+        {prompts.map(({ item, turn }) => <button type="button" className="timeline-mark" key={turn}
+          aria-current={active === turn ? 'step' : undefined} aria-label={'跳转到用户消息 ' + turn}
+          onMouseEnter={event => setPreview({ turn, y: event.currentTarget.getBoundingClientRect().top })}
+          onMouseLeave={() => setPreview(null)}
+          onFocus={event => setPreview({ turn, y: event.currentTarget.getBoundingClientRect().top })}
+          onBlur={() => setPreview(null)}
+          onClick={() => goTo(turn)}><span/></button>)}
+      </nav>
+      {preview && <div className="timeline-preview" aria-hidden="true" style={{ top: Math.min(preview.y, window.innerHeight - 118) }}>
+        <b>第 {preview.turn} 轮</b><span>{prompts[preview.turn - 1]?.item.text.replace(/\s+/g, ' ').slice(0, 100)}</span>
+      </div>}
+    </div>}
+    <div className="scroll" ref={scroll} onScroll={update}>
+      <div className="thread" ref={thread}>
+        {children}
+        {rows.map(({ item, turn, index }) => item.role === 'tool'
+          ? <details className="tool" key={item.id || index}><summary><FileText size={15}/>{item.name}<small>{item.status}</small></summary>
+            {item.args && <pre>{item.args}</pre>}{item.output && <pre>{item.output}</pre>}</details>
+          : <Message key={sessionId + ':' + index} item={item} turn={turn}
+            bookmark={saved.find(value => value.sessionId === sessionId && value.turn === turn
+              && value.role === item.role && value.text === item.text)}
+            copy={copy} quote={quote} onSave={onSave} streaming={item.role === 'assistant' && item.runId === run}/>)}
+        {status && <p className="muted" role="status">正在处理…</p>}
+      </div>
+    </div>
+    {!!prompts.length && !atBottom && <button className="latest" title="跳到最新消息" aria-label="跳到最新消息"
+      onClick={goBottom}><ArrowDown size={17}/></button>}
+  </div>;
+}
+
+function Message({ item, turn, bookmark, copy, quote, onSave, streaming }) {
+  const [copied, setCopied] = useState(false);
+  const reset = useRef(null);
+  const menu = useRef(null);
+  const user = item.role === 'user';
+  useEffect(() => () => clearTimeout(reset.current), []);
+
+  async function copyMessage() {
+    if (!await copy(item.text)) return;
+    setCopied(true);
+    clearTimeout(reset.current);
+    reset.current = setTimeout(() => setCopied(false), 1600);
+  }
+
+  return <article className={'message ' + (user ? 'message-user' : 'message-assistant')}
+    data-prompt={user ? turn : undefined} aria-label={user ? '用户消息 ' + turn : '助手回复'}>
+    <div className={user ? 'user-msg' : 'assistant-msg'}>
+      {user ? item.text : <Markdown remarkPlugins={[remarkGfm]}
+        components={{ a: ({ children }) => <span>{children}</span>, img: () => null }}>{item.text}</Markdown>}
+    </div>
+    <div className="message-actions">
+      <button type="button" aria-label={copied ? '已复制' : '复制消息'} title={copied ? '已复制' : '复制消息'}
+        onClick={copyMessage}>{copied ? <Check size={15}/> : <Copy size={15}/>}</button>
+      <button type="button" disabled={!quote} aria-label="引用到输入栏" title="引用到输入栏" onClick={() => quote(item.text)}><Quote size={15}/></button>
+      {!streaming && turn > 0 && <details ref={menu} className="message-menu" onBlur={event => {
+        if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false;
+      }} onKeyDown={event => {
+        if (event.key === 'Escape') {
+          event.currentTarget.open = false;
+          event.currentTarget.querySelector('summary').focus();
+        }
+      }}>
+        <summary aria-label="更多消息操作" title="更多消息操作"><Ellipsis size={17}/></summary>
+        <div className="message-popover">
+          <button type="button" onClick={() => { menu.current.open = false; void onSave({ item, turn, bookmark }); }}>
+            <Bookmark size={15}/>{bookmark ? '移出资料库' : '收藏到资料库'}
+          </button>
+        </div>
+      </details>}
+    </div>
+  </article>;
+}

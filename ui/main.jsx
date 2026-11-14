@@ -1,13 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import Markdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import { ChevronDown, ChevronRight, CircleHelp, FolderOpen, FolderPlus, MessageSquare, Plus, Settings, X, FileText } from 'lucide-react';
+import { ChevronDown, ChevronRight, CircleHelp, FolderOpen, FolderPlus, MessageSquare, Plus, X, FileText } from 'lucide-react';
 import { ApprovalCard, Composer } from './Composer.jsx';
+import { Conversation } from './Conversation.jsx';
+import { Navigation, NavigationPanel } from './Navigation.jsx';
 import './style.css';
 
 const api = window.jharness;
-const empty = { projects: [], models: [] };
+const empty = { projects: [], models: [], bookmarks: [] };
 const errText = error => String(error.message || error).replace(/^Error invoking remote method '[^']+': Error: /, '');
 const suggestions = ['读一下 README，解释这个项目的结构。', '这个项目有哪些主要模块？', '帮我找到项目的启动入口。'];
 
@@ -26,10 +26,14 @@ function App() {
   const [run, setRun] = useState(null);
   const [notice, setNotice] = useState('');
   const [showSettings, setShowSettings] = useState(false);
+  const [showSidebar, setShowSidebar] = useState(true);
+  const [panel, setPanel] = useState(null);
+  const [jump, setJump] = useState(null);
   const [loading, setLoading] = useState(false);
   const running = useRef(null);
   const selection = useRef(null);
   const scroll = useRef(null);
+  const bookmarks = data.bookmarks || [];
   const project = data.projects.find(value => value.id === selected?.project);
   const session = project?.sessions.find(value => value.id === selected?.session);
   const model = data.models.find(value => value.id === (modelId || data.defaultModelId));
@@ -55,6 +59,7 @@ function App() {
     setPerm(s?.permission || 'assist');
     setCollapsed(previous => ({ ...previous, [p.id]: false }));
     setItems([]);
+    setJump(null);
     setNotice('');
     setLoading(Boolean(s));
     if (!s) return;
@@ -110,11 +115,6 @@ function App() {
     });
   }, []);
 
-  useEffect(() => {
-    const pane = scroll.current;
-    if (pane) pane.scrollTop = pane.scrollHeight;
-  }, [items]);
-
   async function openProject() {
     try {
       const p = await api.openProject();
@@ -160,6 +160,48 @@ function App() {
     } catch (error) { setNotice(errText(error)); }
   }
 
+  async function copy(text) {
+    try {
+      await api.copy(text);
+      return true;
+    } catch (error) {
+      setNotice(errText(error));
+      return false;
+    }
+  }
+
+  function quote(text) {
+    if (run || loading || !project) return;
+    const quoted = text.split('\n').map(line => '> ' + line).join('\n');
+    setDraft(previous => ((previous ? previous + '\n\n' : '') + quoted + '\n\n').slice(0, 16000));
+    document.querySelector('.composer textarea')?.focus();
+  }
+
+  async function removeBookmark(id) {
+    try {
+      const bookmarks = await api.removeBookmark(id);
+      setData(previous => ({ ...previous, bookmarks }));
+    } catch (error) { setNotice(errText(error)); }
+  }
+
+  async function saveBookmark({ item, turn, bookmark }) {
+    if (bookmark) return removeBookmark(bookmark.id);
+    if (!session || !turn || item.role === 'assistant' && item.runId === run) return;
+    try {
+      const bookmarks = await api.bookmark({ projectId: project.id, sessionId: session.id,
+        turn, role: item.role, text: item.text });
+      setData(previous => ({ ...previous, bookmarks }));
+    } catch (error) { setNotice(errText(error)); }
+  }
+
+  async function openChat(projectId, sessionId, turn) {
+    const target = data.projects.find(value => value.id === projectId);
+    const chat = target?.sessions.find(value => value.id === sessionId);
+    if (!chat || run) return;
+    await select(target, chat);
+    if (turn && selection.current?.session === sessionId) setJump({ turn });
+  }
+
   async function decide(id, allow) {
     if (!run) return;
     try {
@@ -203,6 +245,7 @@ function App() {
       return;
     }
     reservation.submitting = false;
+    setJump({ turn: 'latest' });
     setDraft('');
     setParts([]);
     setModelId(modelId);
@@ -221,8 +264,11 @@ function App() {
     else api.stop(current.id).catch(error => setNotice(errText(error)));
   }
 
-  return <div className="app">
-    <aside className="sidebar">
+  return <div className={'app' + (showSidebar ? '' : ' sidebar-hidden')}>
+    <Navigation project={project} busy={!!run} showSidebar={showSidebar}
+      home={() => setShowSidebar(value => !value)} attachImage={() => attach('image')}
+      openPanel={setPanel} openSettings={() => setShowSettings(true)}/>
+    <aside className="sidebar" aria-label="项目和会话" hidden={!showSidebar}>
       <div className="brand"><span className="mark">J</span><strong>JHarness</strong></div>
       <button className="side-action" disabled={!!run} onClick={() => newSession(project)}><Plus size={17}/>新建会话</button>
       <button className="side-action" disabled={!!run} onClick={openProject}><FolderPlus size={17}/>打开项目</button>
@@ -251,14 +297,15 @@ function App() {
             onClick={() => select(p, s)}><MessageSquare size={14}/><span>{s.title}</span></button>)}
         </div>)}
       </div>
-      <button className="side-action settings" onClick={() => setShowSettings(true)}><Settings size={16}/>设置</button>
     </aside>
     <main>
       <header><div className="crumb"><span title={project?.directory}>{project?.name || '工作台'}</span>
         <ChevronRight size={15}/><strong>{session?.title || '新会话'}</strong></div>
       </header>
-      <div className="scroll" ref={scroll}>
-        <div className="thread">
+      <Conversation key={session?.id || project?.id || 'empty'} items={items} sessionId={session?.id}
+        status={!!run && !approvals.length && !items.some(item => item.role === 'assistant' && item.runId === run)}
+        copy={copy} quote={run || loading ? null : quote} saved={bookmarks} onSave={saveBookmark}
+        run={run} jump={jump} scroll={scroll}>
           {!items.length && !loading && <div className="welcome">
             <div className="welcome-icon"><MessageSquare size={24} strokeWidth={1.6}/></div>
             <h1>{project ? '想了解项目的什么？' : '打开一个项目'}</h1>
@@ -268,17 +315,7 @@ function App() {
               : <button className="primary" onClick={openProject}><FolderOpen size={16}/>选择文件夹</button>}
           </div>}
           {loading && <p className="muted">正在加载会话…</p>}
-          {items.map((item, index) => item.role === 'tool'
-            ? <details className="tool" key={item.id || index}><summary><FileText size={15}/>{item.name}<small>{item.status}</small></summary>
-                {item.args && <pre>{item.args}</pre>}{item.output && <pre>{item.output}</pre>}</details>
-            : <div key={index} className={item.role === 'user' ? 'user-msg' : 'assistant-msg'}>
-                {item.role === 'user' ? item.text : <Markdown remarkPlugins={[remarkGfm]}
-                  components={{ a: ({ children }) => <span>{children}</span>, img: () => null }}>{item.text}</Markdown>}
-              </div>)}
-          {run && !approvals.length && !items.some(item => item.role === 'assistant' && item.runId === run)
-            && <p className="muted" role="status">正在处理…</p>}
-        </div>
-      </div>
+      </Conversation>
       <div className="bottom"><div className="composer-wrap">
         {!!approvals.length && <div className="approvals">{approvals.map(item =>
           <ApprovalCard key={item.id} item={item} decide={decide}/>)}</div>}
@@ -292,6 +329,9 @@ function App() {
           selectModel={id => { setModelId(id); setEffort('default'); }} settings={() => setShowSettings(true)}/>
       </div></div>
     </main>
+    {panel && <NavigationPanel key={panel} panel={panel} close={() => setPanel(null)} projects={data.projects}
+      project={project} bookmarks={bookmarks} openChat={openChat} removeBookmark={removeBookmark}
+      copy={copy} addPart={part => appendParts([part])} busy={!!run} api={api} errorText={errText}/>}
     {showSettings && <ModelSettings models={data.models} defaultModelId={data.defaultModelId} selectedId={model?.id}
       close={() => setShowSettings(false)} onSave={({ savedModelId, ...state }) => {
         setData(state);

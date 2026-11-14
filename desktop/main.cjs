@@ -1,10 +1,12 @@
-const { app, BrowserWindow, dialog, ipcMain, safeStorage } = require('electron');
-const { spawn } = require('node:child_process');
+const { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage } = require('electron');
+const { execFile, spawn } = require('node:child_process');
+const { promisify } = require('node:util');
 const { randomUUID } = require('node:crypto');
 const { createInterface } = require('node:readline');
 const { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } = require('node:fs');
 const path = require('node:path');
 const { importAttachment, projectParts, label } = require('./context-parts.cjs');
+const git = promisify(execFile);
 
 let win;
 let backend;
@@ -78,7 +80,8 @@ function call(method, params = {}) {
 
 function publicSettings() {
   const models = settings.models.map(({ encryptedKey, ...model }) => ({ ...model, hasKey: Boolean(encryptedKey) }));
-  return { projects: settings.projects, models, defaultModelId: settings.defaultModelId };
+  return { projects: settings.projects, models, defaultModelId: settings.defaultModelId,
+    bookmarks: settings.bookmarks || [] };
 }
 
 function modelInput(input) {
@@ -109,6 +112,48 @@ function context(projectId, sessionId) {
 
 function register() {
   ipcMain.handle('jh:state', () => publicSettings());
+  ipcMain.handle('jh:copy', (_, text) => {
+    if (typeof text !== 'string') throw new Error('无法复制此内容。');
+    clipboard.writeText(text);
+  });
+  ipcMain.handle('jh:bookmark-add', (_, value) => {
+    context(value.projectId, value.sessionId);
+    const { projectId, sessionId, turn, role, text } = value;
+    if (!Number.isSafeInteger(turn) || turn < 1 || !['user', 'assistant'].includes(role)
+        || typeof text !== 'string' || !text.trim()) throw new Error('无法收藏此消息。');
+    const bookmarks = settings.bookmarks ||= [];
+    if (!bookmarks.some(item => item.sessionId === sessionId && item.turn === turn && item.role === role && item.text === text)) {
+      bookmarks.unshift({ id: randomUUID(), projectId, sessionId, turn, role, text });
+      persist();
+    }
+    return bookmarks;
+  });
+  ipcMain.handle('jh:bookmark-remove', (_, id) => {
+    settings.bookmarks = (settings.bookmarks || []).filter(item => item.id !== id);
+    persist();
+    return settings.bookmarks;
+  });
+  ipcMain.handle('jh:git-review', async (_, projectId) => {
+    const project = settings.projects.find(item => item.id === projectId);
+    if (!project) throw new Error('请先打开 Git 项目。');
+    const options = { cwd: project.directory, windowsHide: true, encoding: 'utf8',
+      maxBuffer: 1024 * 1024, timeout: 12000, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } };
+    const run = args => git('git', ['--no-pager', '-c', 'color.ui=false', '-c', 'core.fsmonitor=false', ...args], options)
+      .then(({ stdout }) => stdout);
+    try {
+      const [status, unstaged, staged] = await Promise.all([
+        run(['status', '--short', '--branch', '--untracked-files=normal', '--', '.']),
+        run(['diff', '--no-ext-diff', '--no-textconv', '--', '.']),
+        run(['diff', '--cached', '--no-ext-diff', '--no-textconv', '--', '.'])
+      ]);
+      return { status, unstaged, staged };
+    } catch (error) {
+      if (error.code === 'ENOENT') throw new Error('找不到 Git，请确认 Git 已安装且项目可访问。');
+      if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') throw new Error('项目差异超过 1 MiB。');
+      if (error.stderr?.includes('not a git repository')) throw new Error('当前目录没有 Git 仓库。');
+      throw new Error('无法读取当前项目的 Git 状态。');
+    }
+  });
   ipcMain.handle('jh:project', async () => {
     const result = await dialog.showOpenDialog(win, { title: '打开项目', properties: ['openDirectory'] });
     if (result.canceled) return null;
@@ -132,16 +177,18 @@ function register() {
   ipcMain.handle('jh:history', (_, project, session) => call('history', context(project, session)));
   ipcMain.handle('jh:attachment', async (_, projectId, kind) => {
     const project = settings.projects.find(item => item.id === projectId);
-    if (!project || !['file', 'folder'].includes(kind)) throw new Error('请选择项目和附件类型。');
+    if (!project || !['file', 'folder', 'image'].includes(kind)) throw new Error('请选择项目和附件类型。');
     const result = await dialog.showOpenDialog(win, {
-      title: kind === 'file' ? '添加文件' : '添加文件夹',
+      title: { file: '添加文件', folder: '添加文件夹', image: '添加图片' }[kind],
       defaultPath: project.directory,
-      properties: [kind === 'file' ? 'openFile' : 'openDirectory', 'multiSelections']
+      properties: [kind === 'folder' ? 'openDirectory' : 'openFile', 'multiSelections'],
+      ...(kind === 'image' && { filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg'] }] })
     });
     if (result.canceled) return [];
     if (result.filePaths.length > 8) throw new Error('每次最多选择 8 项。');
     const parts = await Promise.all(result.filePaths.map(target =>
-      importAttachment(target, kind, project.directory)));
+      importAttachment(target, kind === 'image' ? 'file' : kind, project.directory)));
+    if (kind === 'image' && parts.some(part => part.kind !== 'image')) throw new Error('请选择 PNG 或 JPEG 图片。');
     return parts.map(({ text, image, mime, ...part }) => {
       if (attachments.size >= 16) attachments.delete(attachments.keys().next().value);
       const id = randomUUID();

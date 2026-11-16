@@ -39,7 +39,9 @@ import java.util.concurrent.Executors;
 import local.jharness.agent.ConversationRuntime;
 import local.jharness.agent.DurableApprovalStore;
 import local.jharness.agent.DurableConversation;
+import local.jharness.agent.ProjectCheckpointStore;
 import local.jharness.agent.SessionArchive;
+import local.jharness.agent.TaskReportStore;
 import local.jharness.memory.ProjectMemory;
 import local.jharness.plugin.ExternalPluginManager;
 import local.jharness.search.SessionSearchIndex;
@@ -132,6 +134,13 @@ public final class Backend {
                 case "setExternalPluginEnabled" -> externalPlugins.setEnabled(
                         required(params, "pluginId"), params.path("enabled").asBoolean(false));
                 case "uninstallExternalPlugin" -> externalPlugins.uninstall(required(params, "pluginId"));
+                case "checkpoints" -> checkpointStore(params).list(params.path("sessionId").asText(""));
+                case "checkpoint" -> checkpointStore(params).get(identifier(params, "checkpointId"));
+                case "restoreCheckpoint" -> checkpointStore(params).restore(
+                        identifier(params, "checkpointId"));
+                case "taskReport" -> taskReport(params);
+                case "taskArtifact" -> new TaskReportStore(workspace(params)).artifact(
+                        identifier(params, "sessionId"), identifier(params, "artifactId"));
                 case "steer" -> durableConversations.steer(
                         identifier(params, "runId"), required(params, "message"));
                 case "approvals" -> listApprovals(params);
@@ -424,6 +433,17 @@ public final class Backend {
         return externalPlugins.install(Path.of(required(params, "directory")).toAbsolutePath().normalize());
     }
 
+    private ProjectCheckpointStore checkpointStore(JsonNode params) throws Exception {
+        return new ProjectCheckpointStore(
+                workspace(params), Path.of(required(params, "projectPath")).toRealPath());
+    }
+
+    private List<TaskReportStore.TaskReport> taskReport(JsonNode params) throws Exception {
+        String sessionId = identifier(params, "sessionId");
+        return new TaskReportStore(workspace(params)).reports(
+                sessionId, checkpointStore(params).list(sessionId));
+    }
+
     private Map<String, Boolean> answers(JsonNode params) {
         var answers = new LinkedHashMap<String, Boolean>();
         for (var entry : params.path("answers").properties()) {
@@ -585,6 +605,11 @@ public final class Backend {
     private static String describe(Throwable error) {
         for (Throwable current = error; current != null; current = current.getCause()) {
             String text = String.valueOf(current.getMessage()).toLowerCase(Locale.ROOT);
+            if ((current instanceof IllegalArgumentException || current instanceof IllegalStateException)
+                    && current.getMessage() != null
+                    && current.getMessage().codePoints().anyMatch(code -> code >= 0x4E00 && code <= 0x9FFF)) {
+                return current.getMessage();
+            }
             if (text.contains("explicit reconciliation required")) {
                 return "此会话有中断前已提交但结果未确认的工具调用。为避免重复执行，请先检查工作区，再在新会话继续。";
             }

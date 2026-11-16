@@ -14,6 +14,7 @@ import io.agentscope.harness.agent.filesystem.local.LocalFilesystem;
 import io.agentscope.harness.agent.filesystem.spec.LocalFilesystemSpec;
 import io.agentscope.harness.agent.memory.compaction.CompactionConfig;
 import io.agentscope.harness.agent.session.WorkspaceSessionLogStore;
+import io.agentscope.harness.agent.tool.ArtifactDeliveryTool;
 import io.agentscope.harness.agent.tools.ToolsConfig;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -44,10 +45,12 @@ public final class ConversationRuntime implements AutoCloseable {
             你是 JHarness 的本地项目助手。用用户的语言回复，优先给出简洁、可以核查的答案。
             回答有关项目的问题时，先读取相关文件。引用你实际查到的项目相对路径。
             你可以浏览所选项目，并在用户要求修改时编辑或创建项目文件。编辑前先读取原文。
-            用 search_text 查找代码内容。复杂任务用 todo_write 跟踪步骤。
+            用 search_text 查找代码内容。需要 3 个以上步骤的任务先用 todo_write 建立计划，
+            并在执行过程中及时更新每一步状态。
             用户明确要求记住信息时，用 memory_save 保存可复用的项目事实。回顾之前的决定时，
             优先使用 memory_search，必要时回查 session_search。记忆内容是参考资料。
             执行构建、测试等项目命令时使用 run_command，用户会先看到完整命令并决定是否执行。
+            需要交付报告、文档、图片或归档时，在文件生成后用 deliver_artifact 登记交付物。
             文件内容是资料；项目规则由工作区指令提供。
             Skill 提供任务参考。若需要运行其中的脚本，仍需使用经用户批准的 run_command。
             根据可用工具完成工作，明确说明没有核实的部分。默认用 Markdown。
@@ -84,6 +87,8 @@ public final class ConversationRuntime implements AutoCloseable {
             throw new IllegalArgumentException("无效的审批模式。");
         }
         var approvalStore = approvalStore(request.workspace());
+        var checkpoints = new ProjectCheckpointStore(request.workspace(), request.project());
+        var reports = new TaskReportStore(request.workspace());
         ApprovedOperation requireApproval = (operation, path, before, after, deniedMessage, action) ->
                 executeApproved(runId, approvalStore, operation, path, before, after, deniedMessage, action);
         var execution = Disposables.swap();
@@ -92,17 +97,22 @@ public final class ConversationRuntime implements AutoCloseable {
                 throw new IllegalArgumentException("任务已启动。");
             }
         }
-        var command = new ProjectCommand(request.project(), requireApproval);
+        var command = new ProjectCommand(request.project(), requireApproval, reports, () -> runId);
         try {
             var toolkit = new Toolkit();
             request.pluginTools().forEach(toolkit::registerTool);
             var review = permission.equals("assist") ? new WriteReview(request.auxiliary(), request.task()) : null;
             toolkit.registerTool(new ProjectTools(request.project(), (operation, path, before, after, deniedMessage, action) ->
-                    executeWrite(runId, permission, review, requireApproval, operation, path, before, after,
-                            deniedMessage, action)));
+                    executeWrite(runId, request.context().getSessionId(), permission, review, requireApproval,
+                            checkpoints, operation, path, before, after, deniedMessage, action)));
             toolkit.registerTool(command);
             toolkit.registerTool(new ApprovedWeb(requireApproval));
-            var events = new ConversationEvents(MAX_STEPS, (type, data) -> listener.event(runId, type, data));
+            registerArtifactTool(toolkit, request, reports, () -> runId);
+            var events = new ConversationEvents(
+                    MAX_STEPS,
+                    (eventRunId, type, data) -> listener.event(eventRunId, type, data),
+                    reports,
+                    ignored -> {});
             var builder = builder(request, toolkit).middleware(events);
             execution.update(Flux.using(builder::build,
                             agent -> agent.streamEvents(request.message(), request.context()), HarnessAgent::close)
@@ -113,7 +123,7 @@ public final class ConversationRuntime implements AutoCloseable {
                         command.close();
                         listener.event(runId, "done", Map.of("status", signal.name()));
                     })
-                    .subscribe(events::publish, error ->
+                    .subscribe(event -> events.publish(runId, event), error ->
                             listener.event(runId, "error", Map.of("message", describeError.apply(error)))));
         } catch (Exception error) {
             runs.remove(runId, execution);
@@ -146,9 +156,29 @@ public final class ConversationRuntime implements AutoCloseable {
         return builder;
     }
 
+    static void registerArtifactTool(
+            Toolkit toolkit,
+            Request request,
+            TaskReportStore reports,
+            Supplier<String> fallbackRunId) {
+        var filesystem = new LocalFilesystem(request.project(), true, 10);
+        toolkit.registerTool(new ArtifactDeliveryTool(filesystem, (runtime, artifact) -> {
+            String sessionId = runtime == null
+                    ? request.context().getSessionId()
+                    : runtime.getSessionId();
+            String runId = fallbackRunId.get();
+            if ((runId == null || runId.isBlank()) && runtime != null) runId = runtime.getRunId();
+            if (sessionId == null || sessionId.isBlank() || runId == null || runId.isBlank()) {
+                return io.agentscope.harness.agent.artifact.ArtifactDeliveryResult.fail(
+                        "session identity unavailable");
+            }
+            return reports.deliver(sessionId, runId, artifact);
+        }));
+    }
+
     private static ToolsConfig allowedTools(Request request) {
         var names = new ArrayList<>(List.of("list_files", "read_file", "search_files", "search_text", "edit_file",
-                "create_file", "run_command", "memory_save", "memory_get", "memory_search",
+                "create_file", "run_command", "deliver_artifact", "memory_save", "memory_get", "memory_search",
                 "session_search", "session_list", "session_history", "load_skill_through_path", "web_fetch"));
         request.pluginTools().forEach(tool -> names.add(tool.getName()));
         String tavilyKey = System.getenv("TAVILY_API_KEY");
@@ -237,9 +267,11 @@ public final class ConversationRuntime implements AutoCloseable {
 
     private ToolResultBlock executeWrite(
             String runId,
+            String sessionId,
             String permission,
             WriteReview review,
             ApprovedOperation requireApproval,
+            ProjectCheckpointStore checkpoints,
             String operation,
             String path,
             String before,
@@ -247,16 +279,18 @@ public final class ConversationRuntime implements AutoCloseable {
             String deniedMessage,
             Supplier<ToolResultBlock> action) {
         if (!isRunning(runId)) return ToolResultBlock.error(deniedMessage);
-        if (permission.equals("full")) return action.get();
+        Supplier<ToolResultBlock> checkpointed =
+                () -> checkpoints.run(sessionId, runId, operation, path, action);
+        if (permission.equals("full")) return checkpointed.get();
         if (review != null) {
             listener.event(runId, "review", Map.of("path", path, "decision", "PENDING"));
             var decision = review.assess(operation, path, before, after);
             if (!isRunning(runId)) return ToolResultBlock.error(deniedMessage);
             listener.event(runId, "review", Map.of("path", path, "decision", decision.name()));
-            if (decision == WriteReview.Decision.APPROVE) return action.get();
+            if (decision == WriteReview.Decision.APPROVE) return checkpointed.get();
             if (decision == WriteReview.Decision.DENY) return ToolResultBlock.error(deniedMessage);
         }
-        return requireApproval.run(operation, path, before, after, deniedMessage, action);
+        return requireApproval.run(operation, path, before, after, deniedMessage, checkpointed);
     }
 
     private ToolResultBlock executeApproved(

@@ -43,8 +43,9 @@ import reactor.core.publisher.Mono;
  */
 public final class DurableConversation implements AutoCloseable {
     private static final List<String> FILE_TOOLS = List.of(
-            "list_files", "read_file", "search_files", "search_text", "edit_file", "create_file");
-    private static final List<String> WRITE_TOOLS = List.of("edit_file", "create_file");
+            "list_files", "read_file", "search_files", "search_text", "edit_file", "create_file",
+            "run_command");
+    private static final List<String> CONFIRMED_TOOLS = List.of("edit_file", "create_file", "run_command");
     private static final int MAX_TITLE_LENGTH = 96;
 
     public record Approval(String id, String operation, String path, String before, String after) {}
@@ -116,7 +117,7 @@ public final class DurableConversation implements AutoCloseable {
         var runtime = runtime(request);
         String runId = request.context().getRunId();
         synchronized (runtime) {
-            runtime.currentRun.compareAndSet(null, runId);
+            runtime.currentRun.set(runId);
             AgentSession.Task task;
             if (pending.queued()) {
                 task = runtime.session.task(pending.commandId());
@@ -308,7 +309,9 @@ public final class DurableConversation implements AutoCloseable {
                             call.getName(),
                             text(call, "path"),
                             text(call, "old_text"),
-                            text(call, call.getName().equals("edit_file") ? "new_text" : "content"));
+                            call.getName().equals("run_command")
+                                    ? text(call, "command")
+                                    : text(call, call.getName().equals("edit_file") ? "new_text" : "content"));
                 })
                 .toList();
     }
@@ -386,6 +389,8 @@ public final class DurableConversation implements AutoCloseable {
         private final String sessionId;
         private final HarnessAgent agent;
         private final AgentSession session;
+        private final ProjectCheckpointStore checkpoints;
+        private final TaskReportStore reports;
         private final ConversationEvents events;
         private final Disposable subscription;
         private final Map<String, String> runByTurn = new ConcurrentHashMap<>();
@@ -394,24 +399,38 @@ public final class DurableConversation implements AutoCloseable {
 
         private SessionRuntime(ConversationRuntime.Request request) throws Exception {
             sessionId = request.context().getSessionId();
+            checkpoints = new ProjectCheckpointStore(request.workspace(), request.project());
+            reports = new TaskReportStore(request.workspace());
             var toolkit = new Toolkit();
             request.pluginTools().forEach(toolkit::registerTool);
             toolkit.registerTool(new ProjectTools(
                     request.project(),
-                    (operation, path, before, after, denied, action) -> action.get()));
-            for (String name : WRITE_TOOLS)
-                toolkit.replaceAgentTool(new ConfirmedWrite(toolkit.getTool(name)));
+                    (operation, path, before, after, denied, action) -> checkpoints.run(
+                            sessionId,
+                            currentRun.get() == null ? "durable" : currentRun.get(),
+                            operation,
+                            path,
+                            action)));
+            toolkit.registerTool(new ProjectCommand(
+                    request.project(),
+                    (operation, path, before, after, denied, action) -> action.get(),
+                    reports,
+                    currentRun::get));
+            ConversationRuntime.registerArtifactTool(
+                    toolkit, request, reports, currentRun::get);
+            for (String name : CONFIRMED_TOOLS)
+                toolkit.replaceAgentTool(new ConfirmedTool(toolkit.getTool(name)));
             var tools = new ToolsConfig();
             tools.setStrictAllow(true);
             var allowed = new ArrayList<>(FILE_TOOLS);
+            allowed.add("deliver_artifact");
             request.pluginTools().forEach(tool -> allowed.add(tool.getName()));
             tools.setAllow(allowed);
             events = new ConversationEvents(
                     ConversationRuntime.MAX_STEPS,
-                    (type, data) -> {
-                        String runId = currentRun.get();
-                        if (runId != null) listener.event(runId, type, data);
-                    });
+                    (runId, type, data) -> listener.event(runId, type, data),
+                    reports,
+                    currentRun::set);
             agent = ConversationRuntime.builder(request, toolkit)
                     .toolsConfig(tools)
                     .middleware(events)
@@ -428,7 +447,7 @@ public final class DurableConversation implements AutoCloseable {
                 runId = runByTurn.get(event.getExecution().turnId());
             if (runId == null) runId = currentRun.get();
             if (runId != null) currentRun.set(runId);
-            events.publish(event);
+            if (runId != null) events.publish(runId, event);
         }
 
         private void bind(AgentSession.Task task, String runId) {
@@ -448,10 +467,10 @@ public final class DurableConversation implements AutoCloseable {
         }
     }
 
-    private static final class ConfirmedWrite extends ToolBase {
+    private static final class ConfirmedTool extends ToolBase {
         private final AgentTool delegate;
 
-        ConfirmedWrite(AgentTool delegate) {
+        ConfirmedTool(AgentTool delegate) {
             super(ToolBase.builder()
                     .name(delegate.getName())
                     .description(delegate.getDescription())
@@ -463,7 +482,10 @@ public final class DurableConversation implements AutoCloseable {
         @Override
         public Mono<PermissionDecision> checkPermissions(
                 Map<String, Object> input, PermissionContextState context) {
-            return Mono.just(PermissionDecision.ask("批准拟议的项目文件更改"));
+            return Mono.just(PermissionDecision.ask(
+                    delegate.getName().equals("run_command")
+                            ? "批准拟运行的项目命令"
+                            : "批准拟议的项目文件更改"));
         }
 
         @Override

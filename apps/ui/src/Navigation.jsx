@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { BookOpen, Brain, Download, GitPullRequest, House, Images, ListChecks, Plus, Power, Puzzle, RefreshCw,
-  ScanText, Search, Settings, Trash2, X }
+import { BookOpen, Brain, CircleCheck, CircleDashed, ClipboardList, Download, ExternalLink,
+  FileBox, GitPullRequest, House, Images, ListChecks, Plus, Power, Puzzle, RefreshCw, RotateCcw,
+  ScanText, Search, Settings, SquareTerminal, Trash2, X }
   from 'lucide-react';
 
 export function Navigation({ showSidebar, home, attachImage, openPanel, openSettings, busy, project, session }) {
@@ -12,7 +13,9 @@ export function Navigation({ showSidebar, home, attachImage, openPanel, openSett
     { label: 'Skills 与插件', Icon: Puzzle, action: () => openPanel('plugins') },
     { label: '搜索会话', Icon: Search, action: () => openPanel('search') },
     { label: '任务中心', Icon: ListChecks, action: () => openPanel('tasks') },
+    { label: '任务报告', Icon: ClipboardList, action: () => openPanel('reports'), disabled: !session },
     { label: '上下文', Icon: ScanText, action: () => openPanel('context'), disabled: !session },
+    { label: '检查点', Icon: RotateCcw, action: () => openPanel('checkpoints'), disabled: !project },
     { label: '代码审查', Icon: GitPullRequest, action: () => openPanel('review'), disabled: !project }
   ];
   return <nav className="navigation-rail" aria-label="工作台导航">
@@ -25,7 +28,7 @@ export function Navigation({ showSidebar, home, attachImage, openPanel, openSett
 
 const titles = {
   library: '资料库', plugins: 'Skills 与插件', search: '搜索会话', tasks: '任务中心',
-  context: '上下文', review: '代码审查'
+  reports: '任务报告', context: '上下文', checkpoints: '检查点', review: '代码审查'
 };
 const taskStatus = {
   queued: '排队中', running: '运行中', suspended: '等待审批',
@@ -46,6 +49,11 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
   const [exportState, setExportState] = useState(null);
   const [externalPlugins, setExternalPlugins] = useState([]);
   const [pluginBusy, setPluginBusy] = useState('');
+  const [checkpoints, setCheckpoints] = useState(null);
+  const [checkpointDetail, setCheckpointDetail] = useState(null);
+  const [checkpointBusy, setCheckpointBusy] = useState('');
+  const [reports, setReports] = useState(null);
+  const [reportBusy, setReportBusy] = useState('');
   useEffect(() => { dialog.current.showModal(); }, []);
   useEffect(() => {
     if (panel !== 'plugins' && (panel !== 'review' || !project)) return;
@@ -93,6 +101,33 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
     setError('');
     api.context(project.id, session.id).then(value => {
       if (live) setContext(value);
+    }).catch(failure => {
+      if (live) setError(errorText(failure));
+    });
+    return () => { live = false; };
+  }, [api, errorText, panel, project?.id, session?.id, revision]);
+
+  useEffect(() => {
+    if (panel !== 'checkpoints' || !project) return;
+    let live = true;
+    setCheckpoints(null);
+    setCheckpointDetail(null);
+    setError('');
+    api.checkpoints(project.id, session?.id || '').then(value => {
+      if (live) setCheckpoints(value);
+    }).catch(failure => {
+      if (live) setError(errorText(failure));
+    });
+    return () => { live = false; };
+  }, [api, errorText, panel, project?.id, session?.id, revision]);
+
+  useEffect(() => {
+    if (panel !== 'reports' || !project || !session) return;
+    let live = true;
+    setReports(null);
+    setError('');
+    api.report(project.id, session.id).then(value => {
+      if (live) setReports(value);
     }).catch(failure => {
       if (live) setError(errorText(failure));
     });
@@ -170,6 +205,46 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
       setError(errorText(failure));
     } finally {
       setPluginBusy('');
+    }
+  }
+
+  async function openCheckpoint(checkpoint) {
+    setCheckpointBusy(checkpoint.id);
+    setCheckpointDetail(null);
+    setError('');
+    try {
+      setCheckpointDetail(await api.checkpoint(project.id, checkpoint.id));
+    } catch (failure) {
+      setError(errorText(failure));
+    } finally {
+      setCheckpointBusy('');
+    }
+  }
+
+  async function restoreCheckpoint(checkpoint) {
+    if (!confirm('恢复 ' + checkpoint.path + ' 到该检查点之前的内容？')) return;
+    setCheckpointBusy(checkpoint.id);
+    setError('');
+    try {
+      setCheckpointDetail(await api.restoreCheckpoint(project.id, checkpoint.id));
+      setRevision(value => value + 1);
+    } catch (failure) {
+      setError(errorText(failure));
+    } finally {
+      setCheckpointBusy('');
+    }
+  }
+
+  async function openArtifact(artifact) {
+    if (!project || !session) return;
+    setReportBusy(artifact.id);
+    setError('');
+    try {
+      await api.openArtifact(project.id, session.id, artifact.id);
+    } catch (failure) {
+      setError(errorText(failure));
+    } finally {
+      setReportBusy('');
     }
   }
 
@@ -288,6 +363,120 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
           </div>
         </> : <p className="muted">当前会话还没有模型请求记录。</p>}
       </div>}
+    </>}
+    {panel === 'reports' && <>
+      <div className="review-head"><span>{session?.title || '当前会话'}的任务报告</span>
+        <button type="button" className="secondary" onClick={() => setRevision(value => value + 1)}>
+          <RefreshCw size={15}/>刷新
+        </button>
+      </div>
+      {!reports && !error && <p className="muted">正在读取任务报告…</p>}
+      {reports?.length === 0 && <p className="muted">当前会话还没有任务报告。</p>}
+      {!!reports?.length && <div className="task-report-list">
+        {reports.map((report, index) => <details className="task-report" key={report.runId} open={index === 0}>
+          <summary>
+            <span><strong>任务 {report.runId.slice(0, 8)}</strong>
+              <small>{new Date(report.updatedAt).toLocaleString()}</small></span>
+            <span className="report-counts">
+              {report.plan?.steps?.length || 0} 步 · {report.commands.length} 条命令 ·
+              {' '}{report.artifacts.length} 个交付物 · {report.checkpoints.length} 项改动
+            </span>
+          </summary>
+          {report.plan ? <section className="report-section">
+            <div className="report-section-head"><strong>执行计划</strong><small>第 {report.plan.revision} 版</small></div>
+            <ol className="report-plan">
+              {report.plan.steps.map((step, stepIndex) => {
+                const Icon = step.status === 'completed' ? CircleCheck
+                  : CircleDashed;
+                return <li className={'plan-' + step.status} key={stepIndex}>
+                  <Icon size={16}/><span>{step.content}</span>
+                  {step.priority && <small>{step.priority}</small>}
+                </li>;
+              })}
+            </ol>
+          </section> : <p className="muted report-section">这次任务没有记录执行计划。</p>}
+          <section className="report-section">
+            <div className="report-section-head"><strong>命令与验证</strong><small>{report.commands.length} 条</small></div>
+            {report.commands.length === 0 && <p className="muted">没有运行项目命令。</p>}
+            {report.commands.map(command => <article className="command-evidence" key={command.id}>
+              <div className="command-evidence-head">
+                <SquareTerminal size={16}/>
+                <code>{command.command}</code>
+                <span className={'command-outcome outcome-' + command.outcome.toLowerCase()}>
+                  {command.outcome === 'SUCCEEDED' ? '成功'
+                    : command.outcome === 'FAILED' ? '失败' : '结果未知'}
+                </span>
+              </div>
+              <small>
+                {command.exitCode === null ? '无退出码' : '退出码 ' + command.exitCode}
+                {' · '}{command.durationMs} ms
+                {command.outputTruncated ? ' · 输出已截断' : ''}
+              </small>
+              {command.output && <details className="command-output">
+                <summary>查看输出</summary><pre>{command.output}</pre>
+              </details>}
+            </article>)}
+          </section>
+          <section className="report-section">
+            <div className="report-section-head"><strong>交付物</strong><small>{report.artifacts.length} 个</small></div>
+            {report.artifacts.length === 0 && <p className="muted">没有登记交付物。</p>}
+            {report.artifacts.map(artifact => <div className="artifact-row" key={artifact.id}>
+              <FileBox size={17}/>
+              <span><strong>{artifact.fileName}</strong>
+                <small>{artifact.description || artifact.sourcePath} · {artifact.size} 字节</small></span>
+              <button type="button" className="secondary" disabled={!!reportBusy}
+                onClick={() => openArtifact(artifact)}><ExternalLink size={15}/>打开</button>
+            </div>)}
+          </section>
+          <section className="report-section">
+            <div className="report-section-head"><strong>文件改动</strong><small>{report.checkpoints.length} 项</small></div>
+            {report.checkpoints.length === 0 && <p className="muted">没有通过 JHarness 写入项目文件。</p>}
+            {report.checkpoints.map(checkpoint => <div className="report-checkpoint" key={checkpoint.id}>
+              <RotateCcw size={15}/><code>{checkpoint.path}</code>
+              <span>{checkpoint.operation}</span>
+              <small>{checkpoint.status}</small>
+            </div>)}
+          </section>
+        </details>)}
+      </div>}
+    </>}
+    {panel === 'checkpoints' && <>
+      <div className="review-head"><span>{project?.name || '项目'} 的文件检查点</span>
+        <button type="button" className="secondary" onClick={() => setRevision(value => value + 1)}>
+          <RefreshCw size={15}/>刷新
+        </button>
+      </div>
+      <div className="checkpoint-list">
+        {!checkpoints && !error && <p className="muted">正在读取检查点…</p>}
+        {checkpoints?.map(checkpoint => <button type="button" className="checkpoint-row" key={checkpoint.id}
+          aria-pressed={checkpointDetail?.id === checkpoint.id} disabled={!!checkpointBusy}
+          onClick={() => openCheckpoint(checkpoint)}>
+          <RotateCcw size={16}/>
+          <span className="menu-copy"><strong>{checkpoint.path}</strong>
+            <small>{checkpoint.operation} · {new Date(checkpoint.createdAt).toLocaleString()}</small></span>
+          <span className={'task-state state-' + checkpoint.status.toLowerCase()}>{checkpoint.status}</span>
+        </button>)}
+        {checkpoints?.length === 0 && <p className="muted">
+          {session ? '当前会话还没有文件检查点。' : '当前项目还没有文件检查点。'}
+        </p>}
+      </div>
+      {checkpointDetail && <section className="checkpoint-detail">
+        <div className="checkpoint-detail-head">
+          <div><strong>{checkpointDetail.path}</strong>
+            <small>{checkpointDetail.operation} · {checkpointDetail.status}</small></div>
+          <button type="button" className="secondary"
+            disabled={checkpointDetail.status !== 'SUCCESS' || !!checkpointBusy}
+            onClick={() => restoreCheckpoint(checkpointDetail)}>
+            <RotateCcw size={15}/>恢复此文件
+          </button>
+        </div>
+        <div className="checkpoint-diff">
+          <div><span>修改前</span><pre>{checkpointDetail.before?.exists
+            ? checkpointDetail.before.text : '（文件不存在）'}</pre></div>
+          <div><span>修改后</span><pre>{checkpointDetail.after?.exists
+            ? checkpointDetail.after.text : '（文件不存在）'}</pre></div>
+        </div>
+      </section>}
     </>}
     {panel === 'plugins' && <>
       <div className="review-head"><span>项目资源与已安装工具</span>

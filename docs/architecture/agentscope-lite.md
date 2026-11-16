@@ -251,6 +251,42 @@ Each declared tool is registered as a normal Core tool whose implementation send
 by request timeout, and return stderr diagnostics separately from protocol output.
 The process boundary limits crashes and protocol interference; it is not an OS sandbox.
 
+### File checkpoints
+
+Every `edit_file` or `create_file` execution captures a checkpoint in the project's JHarness data
+workspace:
+
+1. snapshot the target before execution;
+2. persist a `RUNNING` checkpoint;
+3. execute the already-approved write;
+4. snapshot the target again and persist `SUCCESS` or `ERROR`.
+
+The project directory remains the working source. Checkpoints are separate JSON records containing
+the relative path, session/run/operation identity and bounded 64 KiB text snapshots. Restore verifies
+that the current file hash still equals the checkpoint's post-write hash. A mismatch stops the
+restore, preserving edits made after the Agent stopped. Symbolic-link targets and paths outside the
+project are rejected.
+
+### Task reports and artifacts
+
+`TaskReportStore` projects durable, user-reviewable evidence for each session/run:
+
+- `todo_write` arguments are validated and stored as the latest full plan revision;
+- `run_command` writes a receipt with exit code, producer outcome, duration and bounded output;
+- `deliver_artifact` copies a file from the sandboxed project filesystem into the application data
+  directory under the owning session/run, recording its source path, size and SHA-256;
+- project write checkpoints are merged into the same report by session and run identity.
+
+Plans, command receipts and artifact metadata live under `task-reports/<session>/<run>/` in the JHarness
+data workspace. Artifact bytes live under `artifacts/<session>/<run>/<artifact>/`. The source project
+is never used as the artifact store. Artifact names are plain file names, contents are capped at
+32 MiB, duplicate names require an explicit force replacement, and only metadata-relative paths
+owned by the selected session are exposed to Electron.
+
+The report schema is an append-oriented projection, not a second execution log. The session journal
+remains authoritative for task and tool state; deleting report projections does not make an
+uncertain side effect safe to retry.
+
 ### Session search projection
 
 Session recall uses a rebuildable SQLite FTS5 database under the local data

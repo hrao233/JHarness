@@ -1,4 +1,4 @@
-const { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage, shell } = require('electron');
 const { execFile, spawn } = require('node:child_process');
 const { promisify } = require('node:util');
 const { randomUUID } = require('node:crypto');
@@ -260,6 +260,31 @@ function register() {
   });
   ipcMain.handle('jh:history', (_, project, session) => call('history', context(project, session)));
   ipcMain.handle('jh:context', (_, project, session) => call('context', context(project, session)));
+  ipcMain.handle('jh:checkpoints', (_, projectId, sessionId = '') => {
+    const project = settings.projects.find(item => item.id === projectId);
+    if (!project) throw new Error('找不到项目。');
+    return call('checkpoints', { projectId, projectPath: project.directory, sessionId });
+  });
+  ipcMain.handle('jh:checkpoint', (_, projectId, checkpointId) => {
+    const project = settings.projects.find(item => item.id === projectId);
+    if (!project) throw new Error('找不到项目。');
+    return call('checkpoint', { projectId, projectPath: project.directory, checkpointId });
+  });
+  ipcMain.handle('jh:restore-checkpoint', (_, projectId, checkpointId) => {
+    const project = settings.projects.find(item => item.id === projectId);
+    if (!project) throw new Error('找不到项目。');
+    return call('restoreCheckpoint', { projectId, projectPath: project.directory, checkpointId });
+  });
+  ipcMain.handle('jh:report', (_, projectId, sessionId) =>
+    call('taskReport', context(projectId, sessionId)));
+  ipcMain.handle('jh:open-artifact', async (_, projectId, sessionId, artifactId) => {
+    const selected = context(projectId, sessionId);
+    const artifact = await call('taskArtifact', { ...selected, artifactId });
+    if (!existsSync(artifact.filePath)) throw new Error('交付物文件已被移动或删除。');
+    const error = await shell.openPath(artifact.filePath);
+    if (error) throw new Error('无法打开交付物：' + error);
+    return true;
+  });
   ipcMain.handle('jh:export-session', async (_, projectId, sessionId, format, title) => {
     const selected = context(projectId, sessionId);
     if (!['markdown', 'json'].includes(format)) throw new Error('不支持的导出格式。');
@@ -511,6 +536,28 @@ async function smokeInterruptedApproval() {
     () => contextDialog.innerText.includes('当前会话还没有模型请求记录'),
     'Context empty state did not load');
   result.context = contextDialog.innerText;
+  contextDialog.querySelector('.dialog-head button').click();
+  const reportButton = [...document.querySelectorAll('button')]
+    .find(button => button.title === '任务报告');
+  if (!reportButton) throw new Error('Task report entry missing');
+  reportButton.click();
+  const reportDialog = await waitFor(
+    () => document.querySelector('dialog.nav-reports'), 'Task report dialog did not open');
+  await waitFor(
+    () => reportDialog.innerText.includes('当前会话还没有任务报告'),
+    'Task report empty state did not load');
+  result.reports = reportDialog.innerText;
+  reportDialog.querySelector('.dialog-head button').click();
+  const checkpointButton = [...document.querySelectorAll('button')]
+    .find(button => button.title === '检查点');
+  if (!checkpointButton) throw new Error('Checkpoint entry missing');
+  checkpointButton.click();
+  const checkpointDialog = await waitFor(
+    () => document.querySelector('dialog.nav-checkpoints'), 'Checkpoint dialog did not open');
+  await waitFor(
+    () => checkpointDialog.innerText.includes('当前会话还没有文件检查点'),
+    'Checkpoint empty state did not load');
+  result.checkpoints = checkpointDialog.innerText;
   return result;
 }
 

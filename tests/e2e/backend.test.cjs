@@ -156,7 +156,7 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     assert.ok(requests.every(request => request.path === '/v1/chat/completions' && request.auth === 'Bearer fixture-key'));
     assert.ok(requests.filter(request => request.body.tools?.length).every(request =>
       request.body.tools.every(tool => ['read_file', 'list_files', 'search_files', 'search_text', 'edit_file',
-        'create_file', 'run_command', 'todo_write', 'memory_save', 'memory_get', 'memory_search',
+        'create_file', 'run_command', 'deliver_artifact', 'todo_write', 'memory_save', 'memory_get', 'memory_search',
         'session_search', 'session_list', 'session_history', 'load_skill_through_path', 'web_fetch',
         'web_search'].includes(tool.function.name))));
     assert.ok(['todo_write', 'memory_save', 'memory_search', 'memory_get', 'session_search',
@@ -355,7 +355,8 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
       ['run_command', { command: "[IO.File]::WriteAllText([IO.Path]::Combine((Get-Location).Path, 'denied.txt'), 'unexpected')" }],
       ['run_command', { command }],
     ];
-    await call('chat', { ...context, sessionId: randomUUID(), ...model, runId: terminal,
+    const commandContext = { ...context, sessionId: randomUUID() };
+    await call('chat', { ...commandContext, ...model, runId: terminal,
       permission: 'full', message: '运行项目命令' });
     const denied = await waitEvent(terminal, 'approval');
     assert.equal(denied.data.operation, 'run_command');
@@ -373,6 +374,12 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     await call('approve', { runId: terminal, approvalId: commandApproval.data.id, allow: true });
     await waitEvent(terminal, 'done');
     assert.equal(await readFile(path.join(projectPath, 'command.txt'), 'utf8'), 'approved');
+    const commandReport = (await call('taskReport', commandContext))
+      .find(item => item.runId === terminal);
+    assert.equal(commandReport.commands.length, 1);
+    assert.equal(commandReport.commands[0].exitCode, 7);
+    assert.equal(commandReport.commands[0].outcome, 'FAILED');
+    assert.match(commandReport.commands[0].output, /完成/);
     const commandResults = JSON.stringify(requests.at(-1).body.messages.filter(message => message.role === 'tool'));
     assert.match(commandResults, /命令未获批准/);
     assert.match(commandResults, /退出码 7/);
@@ -519,12 +526,44 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     assert.equal(await readFile(durablePath, 'utf8'), 'DURABLE-STEP approved');
     assert.deepEqual(await call('task', durable), {});
     assert.equal(requests.length, resumeRequestStart + 1);
+    const durableCheckpoint = (await call('checkpoints', durable))
+      .find(item => item.path === 'Durable.txt');
+    assert.equal(durableCheckpoint.beforeExists, true);
+    assert.equal(durableCheckpoint.afterExists, true);
+    const durableCheckpointDetail = await call('checkpoint', {
+      ...durable, checkpointId: durableCheckpoint.id
+    });
+    assert.equal(durableCheckpointDetail.before.text, 'DURABLE-STEP');
+    assert.equal(durableCheckpointDetail.after.text, 'DURABLE-STEP approved');
     const resumedMessages = requests[resumeRequestStart].body.messages;
     assert.equal(resumedMessages.filter(message => message.role === 'user'
       && !String(message.content).includes('<HARNESS_CONTEXT>')).length, 1);
     assert.match(JSON.stringify(resumedMessages.filter(message => message.role === 'tool')), /已编辑 Durable\.txt/);
     assert.deepEqual((await call('history', durable)).map(message => [message.role, message.turn, message.text]),
       [['user', 1, durableMessage], ['assistant', 1, '**ORCHID-28**']]);
+
+    const durableCommandContext = { ...context, sessionId: randomUUID() };
+    const durableCommandSteps = steps;
+    steps = [['run_command', { command: "Write-Output 'DURABLE-COMMAND-9'" }]];
+    const durableCommandRun = randomUUID();
+    await call('chat', { ...durableCommandContext, ...model, runId: durableCommandRun,
+      permission: 'durable', message: '在可续跑任务中运行命令' });
+    assert.equal((await waitEvent(durableCommandRun, 'done')).data.status, 'suspended');
+    const durableCommandTask = await call('task', durableCommandContext);
+    assert.equal(durableCommandTask.approvals.length, 1);
+    assert.equal(durableCommandTask.approvals[0].operation, 'run_command');
+    assert.match(durableCommandTask.approvals[0].after, /DURABLE-COMMAND-9/);
+    const durableCommandResume = randomUUID();
+    await call('resumeTask', { ...durableCommandContext, ...model,
+      turnId: durableCommandTask.turnId, runId: durableCommandResume,
+      answers: { [durableCommandTask.approvals[0].id]: true } });
+    assert.equal((await waitEvent(durableCommandResume, 'done')).data.status, 'completed');
+    const durableCommandReport = (await call('taskReport', durableCommandContext))
+      .find(item => item.runId === durableCommandResume);
+    assert.equal(durableCommandReport.commands.length, 1);
+    assert.equal(durableCommandReport.commands[0].exitCode, 0);
+    assert.match(durableCommandReport.commands[0].output, /DURABLE-COMMAND-9/);
+    steps = durableCommandSteps;
 
     const cancelContext = { ...context, sessionId: randomUUID() };
     const cancelRun = randomUUID();
@@ -576,6 +615,69 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     assert.equal((await waitEvent(steerRun, 'done')).data.status, 'completed');
     assert.ok(requests.slice(steerRequestStart).some(request =>
       JSON.stringify(request.body.messages).includes('STEER-TOKEN-77')));
+
+    const checkpointContext = { ...context, sessionId: randomUUID() };
+    const checkpointPath = path.join(projectPath, 'Checkpoint.txt');
+    await writeFile(checkpointPath, 'CHECKPOINT-BEFORE');
+    const checkpointOriginalSteps = steps;
+    steps = [['edit_file', {
+      path: 'Checkpoint.txt', old_text: 'CHECKPOINT-BEFORE', new_text: 'CHECKPOINT-AFTER'
+    }]];
+    const checkpointRun = randomUUID();
+    await call('chat', { ...checkpointContext, ...model, runId: checkpointRun,
+      permission: 'full', message: '修改检查点文件' });
+    await waitEvent(checkpointRun, 'done');
+    const checkpointSummary = (await call('checkpoints', checkpointContext))
+      .find(item => item.path === 'Checkpoint.txt');
+    const checkpoint = await call('checkpoint', {
+      ...checkpointContext, checkpointId: checkpointSummary.id
+    });
+    assert.equal(checkpoint.status, 'SUCCESS');
+    assert.equal(checkpoint.before.text, 'CHECKPOINT-BEFORE');
+    assert.equal(checkpoint.after.text, 'CHECKPOINT-AFTER');
+    await writeFile(checkpointPath, 'USER-LATER-EDIT');
+    await assert.rejects(call('restoreCheckpoint', {
+      ...checkpointContext, checkpointId: checkpoint.id
+    }), /避免覆盖后续编辑/);
+    await writeFile(checkpointPath, 'CHECKPOINT-AFTER');
+    assert.equal((await call('restoreCheckpoint', {
+      ...checkpointContext, checkpointId: checkpoint.id
+    })).status, 'RESTORED');
+    assert.equal(await readFile(checkpointPath, 'utf8'), 'CHECKPOINT-BEFORE');
+    steps = checkpointOriginalSteps;
+
+    const reportContext = { ...context, sessionId: randomUUID() };
+    const reportRun = randomUUID();
+    const reportOriginalSteps = steps;
+    steps = [
+      ['todo_write', { todos: [
+        { content: '创建交付物', status: 'completed', priority: 'high' },
+        { content: '验证命令结果', status: 'in_progress', priority: 'medium' }
+      ] }, '1 open todo(s):'],
+      ['create_file', { path: 'Report.md', content: '# REPORT-EVIDENCE' }, '已创建 Report.md'],
+      ['deliver_artifact', {
+        filePath: 'Report.md', fileName: 'report.md', description: 'Evidence report'
+      }, 'Delivered Report.md']
+    ];
+    await call('chat', { ...reportContext, ...model, runId: reportRun,
+      permission: 'full', message: '生成并验证任务交付物' });
+    await waitEvent(reportRun, 'done');
+    const report = (await call('taskReport', reportContext))
+      .find(item => item.runId === reportRun);
+    assert.equal(report.plan.revision, 1);
+    assert.deepEqual(report.plan.steps.map(step => [step.content, step.status]), [
+      ['创建交付物', 'completed'], ['验证命令结果', 'in_progress']
+    ]);
+    assert.equal(report.commands.length, 0);
+    assert.equal(report.artifacts.length, 1);
+    assert.equal(report.artifacts[0].fileName, 'report.md');
+    assert.equal(report.artifacts[0].description, 'Evidence report');
+    assert.ok(report.checkpoints.some(item => item.path === 'Report.md'));
+    const artifact = await call('taskArtifact', {
+      ...reportContext, artifactId: report.artifacts[0].id
+    });
+    assert.equal(await readFile(artifact.filePath, 'utf8'), '# REPORT-EVIDENCE');
+    steps = reportOriginalSteps;
 
     const malformed = randomUUID();
     steps = [['create_file', {}, '', '{"path":"Malformed.txt","content":']];

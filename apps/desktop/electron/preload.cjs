@@ -6,6 +6,11 @@ contextBridge.exposeInMainWorld('jharness', {
   newSession: project => ipcRenderer.invoke('jh:session', project),
   history: (project, session) => ipcRenderer.invoke('jh:history', project, session),
   context: (project, session) => ipcRenderer.invoke('jh:context', project, session),
+  checkpoints: (project, session = '') => ipcRenderer.invoke('jh:checkpoints', project, session),
+  checkpoint: (project, id) => ipcRenderer.invoke('jh:checkpoint', project, id),
+  restoreCheckpoint: (project, id) => ipcRenderer.invoke('jh:restore-checkpoint', project, id),
+  report: (project, session) => ipcRenderer.invoke('jh:report', project, session),
+  openArtifact: (project, session, id) => ipcRenderer.invoke('jh:open-artifact', project, session, id),
   exportSession: (project, session, format, title) =>
     ipcRenderer.invoke('jh:export-session', project, session, format, title),
   forkSession: (project, session, messageId) =>

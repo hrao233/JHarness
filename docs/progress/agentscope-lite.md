@@ -156,6 +156,24 @@ payloads and existing downstream imports stay compatible.
 - Added an optional Edge/Chrome DevTools Protocol plugin with status, tab listing,
   HTTP(S) navigation, visible-text extraction and Bing search. An E2E fixture
   validates its HTTP DevTools protocol against a local mock endpoint.
+- Added conflict-aware file checkpoints around normal and durable project writes.
+  Each checkpoint stores bounded before/after snapshots and tool status. The
+  desktop can inspect diffs and restore one file only when its current hash
+  matches the post-write snapshot.
+- Added checkpoint tests for edits, created-file deletion, paths outside the
+  project, user edits after a checkpoint, durable task writes and packaged UI
+  empty state.
+- Added `TaskReportStore` and a desktop task-report view keyed by session/run.
+  Reports merge the latest `todo_write` plan, shell receipts, delivered artifacts
+  and file checkpoints.
+- Shell results now carry structured `ToolExecutionDetails` and persisted command
+  receipts with exit code, outcome, duration and bounded output. The same evidence
+  path is used after suspending and resuming a durable command approval.
+- Registered `deliver_artifact` against a project-rooted, sandboxed filesystem.
+  Artifact bytes are stored under JHarness application data with plain-name,
+  session ownership and 32 MiB bounds. The desktop can open a registered artifact.
+- Extended E2E coverage for task plans, artifact delivery and opening metadata,
+  command evidence, checkpoint/report correlation and durable command resume.
 
 ## Lightweight Runtime
 
@@ -188,15 +206,17 @@ npm run package:win
 
 Last verified on 2026-11-16:
 
-- `mvn -B -T1C clean verify`: 5082 tests, 0 failures, 0 errors;
+- `mvn -B -T1C clean verify`: 5086 tests, 0 failures, 0 errors, 56 skipped;
 - `npm test`: 5 tests, 0 failures;
 - `npm run build:ui`: success;
 - `npm run package:win`: success, including `PACKAGED_GUI_SMOKE_OK`;
-- shaded backend JAR: 22,523,560 bytes (21.5 MiB).
+- shaded backend JAR: 22,559,249 bytes (21.5 MiB).
 
 The cross-process Node test launches the shaded backend JAR with the bundled
 Java runtime and verifies model requests, tool permissions, streaming events,
 workspace edits, memory, web approval, cancellation and session recovery.
+It also verifies plan persistence, command receipts, artifact metadata and bytes,
+checkpoint/report correlation, and command approval across a durable resume.
 
 ## Follow-up Work
 
@@ -211,6 +231,10 @@ workspace edits, memory, web approval, cancellation and session recovery.
 - M5 now has desktop integration for process-isolated tool plugins. Capability-
   level RPC, public SDK packaging, model/context/storage plugin slots and upgrade
   compatibility remain.
+- M4 now has a reviewable project-work slice: task plans, command/test receipts,
+  artifacts, file checkpoints, diffs and safe per-file restore. Worktree
+  isolation, acceptance-criteria verification and multi-file transactional
+  restore remain.
 - M6 now configures the JDK 17 `jlink` compression flag and runs Node integration
   tests after building the bundled runtime. Clean Windows runner and release
   verification remain pending.

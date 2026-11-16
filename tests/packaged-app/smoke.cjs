@@ -56,6 +56,8 @@ async function verifyInterruptedApproval(data) {
   assert.match(smoke.text, /等待批准时中断/);
   assert.doesNotMatch(smoke.text, /批准这一次/);
   assert.match(smoke.context, /当前会话还没有模型请求记录/);
+  assert.match(smoke.reports, /当前会话还没有任务报告/);
+  assert.match(smoke.checkpoints, /当前会话还没有文件检查点/);
   const records = JSON.parse(await readFile(approvalsFile, 'utf8'));
   assert.deepEqual(records, [{ ...record, status: 'DISMISSED', interruptedFrom: 'PENDING' }]);
   await assert.rejects(stat(path.join(directory, record.path)), { code: 'ENOENT' });

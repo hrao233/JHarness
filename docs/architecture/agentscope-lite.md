@@ -267,6 +267,19 @@ that the current file hash still equals the checkpoint's post-write hash. A mism
 restore, preserving edits made after the Agent stopped. Symbolic-link targets and paths outside the
 project are rejected.
 
+Whole-run restore groups successful checkpoints by path. For each path, the earliest `before`
+snapshot is the restore target and the latest `after` snapshot is the expected current state. The
+preview checks every path before the first mutation. Any missing, changed, oversized or type-changed
+file is reported as a conflict and blocks the entire run. Repeated writes to one path count as one
+file and preserve the original pre-run content.
+
+Before applying a multi-file restore, the backend writes a `RUNNING` change-set record containing
+the selected paths. Files are then replaced through same-directory temporary files and atomic
+renames where supported. If a later write fails, files already applied are restored to their
+recorded post-run snapshots in reverse order. The final audit record becomes `RESTORED` or `ERROR`;
+all checkpoints in a restored path group become `RESTORED` so the same change set cannot be replayed.
+This is a guarded multi-file operation, not a filesystem-wide atomic transaction.
+
 ### Task reports and artifacts
 
 `TaskReportStore` projects durable, user-reviewable evidence for each session/run:

@@ -138,6 +138,12 @@ public final class Backend {
                 case "checkpoint" -> checkpointStore(params).get(identifier(params, "checkpointId"));
                 case "restoreCheckpoint" -> checkpointStore(params).restore(
                         identifier(params, "checkpointId"));
+                case "previewChangeSet" -> checkpointStore(params).previewRun(
+                        identifier(params, "sessionId"), identifier(params, "runId"));
+                case "restoreChangeSet" -> checkpointStore(params).restoreRun(
+                        identifier(params, "sessionId"), identifier(params, "runId"));
+                case "changeSets" -> checkpointStore(params).changeSets(
+                        identifier(params, "sessionId"), identifier(params, "runId"));
                 case "taskReport" -> taskReport(params);
                 case "taskArtifact" -> new TaskReportStore(workspace(params)).artifact(
                         identifier(params, "sessionId"), identifier(params, "artifactId"));

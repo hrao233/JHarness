@@ -69,6 +69,63 @@ class ProjectCheckpointStoreTest {
         assertFalse(Files.exists(file));
     }
 
+    @Test
+    void previewsAndRestoresAWholeRunWithoutOverwritingLaterUserEdits() throws Exception {
+        Path project = Files.createDirectories(temporary.resolve("project-run"));
+        Path workspace = Files.createDirectories(temporary.resolve("workspace-run"));
+        Path first = project.resolve("first.txt");
+        Path second = project.resolve("second.txt");
+        Path created = project.resolve("created.txt");
+        write(first, "FIRST-BEFORE");
+        write(second, "SECOND-BEFORE");
+        var store = new ProjectCheckpointStore(workspace, project);
+        String sessionId = UUID.randomUUID().toString();
+        String runId = UUID.randomUUID().toString();
+
+        store.run(sessionId, runId, "edit_file", "first.txt", () -> {
+            write(first, "FIRST-MIDDLE");
+            return ToolResultBlock.success("edited");
+        });
+        store.run(sessionId, runId, "edit_file", "first.txt", () -> {
+            write(first, "FIRST-AFTER");
+            return ToolResultBlock.success("edited");
+        });
+        store.run(sessionId, runId, "edit_file", "second.txt", () -> {
+            write(second, "SECOND-AFTER");
+            return ToolResultBlock.success("edited");
+        });
+        store.run(sessionId, runId, "create_file", "created.txt", () -> {
+            write(created, "CREATED");
+            return ToolResultBlock.success("created");
+        });
+
+        var preview = store.previewRun(sessionId, runId);
+        assertTrue(preview.canRestore());
+        assertEquals(4, preview.checkpointCount());
+        assertEquals(3, preview.files().size());
+        assertEquals(2, preview.files().stream()
+                .filter(file -> file.path().equals("first.txt"))
+                .findFirst().orElseThrow().checkpointCount());
+
+        write(second, "USER-EDIT");
+        var conflicted = store.previewRun(sessionId, runId);
+        assertFalse(conflicted.canRestore());
+        assertEquals(java.util.List.of("second.txt"), conflicted.conflicts());
+        assertThrows(IllegalStateException.class, () -> store.restoreRun(sessionId, runId));
+        assertEquals("FIRST-AFTER", Files.readString(first));
+        assertTrue(Files.exists(created));
+
+        write(second, "SECOND-AFTER");
+        var restored = store.restoreRun(sessionId, runId);
+        assertEquals(ProjectCheckpointStore.ChangeSetStatus.RESTORED, restored.status());
+        assertEquals("FIRST-BEFORE", Files.readString(first));
+        assertEquals("SECOND-BEFORE", Files.readString(second));
+        assertFalse(Files.exists(created));
+        assertEquals(1, store.changeSets(sessionId, runId).size());
+        assertThrows(IllegalArgumentException.class,
+                () -> store.restoreRun(sessionId, runId));
+    }
+
     private static void write(Path file, String text) {
         try {
             Files.writeString(file, text, StandardCharsets.UTF_8);

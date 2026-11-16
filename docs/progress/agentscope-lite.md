@@ -174,6 +174,16 @@ payloads and existing downstream imports stay compatible.
   session ownership and 32 MiB bounds. The desktop can open a registered artifact.
 - Extended E2E coverage for task plans, artifact delivery and opening metadata,
   command evidence, checkpoint/report correlation and durable command resume.
+- Added whole-run file restore. Successful checkpoints are grouped by path, the
+  earliest before snapshot and latest after hash form the restore contract, and
+  every target is preflighted before the first mutation. Any later user edit
+  blocks the complete change set.
+- Persisted `RUNNING`, `RESTORED` and `ERROR` change-set audit records. A partial
+  filesystem failure rolls applied files back to their post-run snapshots in
+  reverse order. Checkpoint timestamps are monotonic so repeated writes to one
+  path retain the correct order across restarts.
+- Added unit and E2E coverage for repeated writes, created-file deletion,
+  conflict-wide refusal and successful three-file restore.
 
 ## Lightweight Runtime
 
@@ -206,11 +216,11 @@ npm run package:win
 
 Last verified on 2026-11-16:
 
-- `mvn -B -T1C clean verify`: 5086 tests, 0 failures, 0 errors, 56 skipped;
+- `mvn -B -T1C clean verify`: 5087 tests, 0 failures, 0 errors, 56 skipped;
 - `npm test`: 5 tests, 0 failures;
 - `npm run build:ui`: success;
 - `npm run package:win`: success, including `PACKAGED_GUI_SMOKE_OK`;
-- shaded backend JAR: 22,559,249 bytes (21.5 MiB).
+- shaded backend JAR: 22,570,723 bytes (21.5 MiB).
 
 The cross-process Node test launches the shaded backend JAR with the bundled
 Java runtime and verifies model requests, tool permissions, streaming events,
@@ -232,9 +242,9 @@ checkpoint/report correlation, and command approval across a durable resume.
   level RPC, public SDK packaging, model/context/storage plugin slots and upgrade
   compatibility remain.
 - M4 now has a reviewable project-work slice: task plans, command/test receipts,
-  artifacts, file checkpoints, diffs and safe per-file restore. Worktree
-  isolation, acceptance-criteria verification and multi-file transactional
-  restore remain.
+  artifacts, file checkpoints, diffs, safe per-file restore and guarded
+  whole-run restore. Worktree isolation and acceptance-criteria verification
+  remain.
 - M6 now configures the JDK 17 `jlink` compression flag and runs Node integration
   tests after building the bundled runtime. Clean Windows runner and release
   verification remain pending.

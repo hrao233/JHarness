@@ -54,6 +54,9 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
   const [checkpointBusy, setCheckpointBusy] = useState('');
   const [reports, setReports] = useState(null);
   const [reportBusy, setReportBusy] = useState('');
+  const [changeSet, setChangeSet] = useState(null);
+  const [changeSetBusy, setChangeSetBusy] = useState('');
+  const [changeSetNotice, setChangeSetNotice] = useState('');
   useEffect(() => { dialog.current.showModal(); }, []);
   useEffect(() => {
     if (panel !== 'plugins' && (panel !== 'review' || !project)) return;
@@ -125,6 +128,7 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
     if (panel !== 'reports' || !project || !session) return;
     let live = true;
     setReports(null);
+    setChangeSet(null);
     setError('');
     api.report(project.id, session.id).then(value => {
       if (live) setReports(value);
@@ -133,6 +137,11 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
     });
     return () => { live = false; };
   }, [api, errorText, panel, project?.id, session?.id, revision]);
+
+  useEffect(() => {
+    setChangeSet(null);
+    setChangeSetNotice('');
+  }, [panel, project?.id, session?.id]);
 
   const needle = query.trim().toLowerCase();
   useEffect(() => {
@@ -245,6 +254,41 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
       setError(errorText(failure));
     } finally {
       setReportBusy('');
+    }
+  }
+
+  async function previewChangeSet(runId) {
+    if (!project || !session) return;
+    setChangeSetBusy(runId);
+    setChangeSetNotice('');
+    setError('');
+    try {
+      setChangeSet(await api.previewChangeSet(project.id, session.id, runId));
+    } catch (failure) {
+      setError(errorText(failure));
+    } finally {
+      setChangeSetBusy('');
+    }
+  }
+
+  async function restoreChangeSet(preview) {
+    if (!project || !session || !preview.canRestore) return;
+    if (!confirm('将 ' + preview.files.length + ' 个文件恢复到本次任务开始前？')) return;
+    setChangeSetBusy(preview.runId);
+    setError('');
+    setChangeSetNotice('');
+    try {
+      await api.restoreChangeSet(project.id, session.id, preview.runId);
+      setChangeSet(null);
+      setChangeSetNotice({
+        runId: preview.runId,
+        message: '已恢复本次任务改动的 ' + preview.files.length + ' 个文件。'
+      });
+      setRevision(value => value + 1);
+    } catch (failure) {
+      setError(errorText(failure));
+    } finally {
+      setChangeSetBusy('');
     }
   }
 
@@ -436,6 +480,39 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
               <span>{checkpoint.operation}</span>
               <small>{checkpoint.status}</small>
             </div>)}
+            {report.checkpoints.some(checkpoint => checkpoint.status === 'SUCCESS')
+              && <div className="change-set-toolbar">
+              <button type="button" className="secondary" disabled={!!changeSetBusy}
+                onClick={() => previewChangeSet(report.runId)}>
+                <RotateCcw size={15}/>预览整组恢复
+              </button>
+              {changeSetNotice?.runId === report.runId && <span className="success-text" role="status">
+                {changeSetNotice.message}
+              </span>}
+            </div>}
+            {changeSet?.runId === report.runId && <div className="change-set-preview">
+              <div className="report-section-head">
+                <strong>{changeSet.files.length} 个文件</strong>
+                <small>{changeSet.canRestore ? '可以安全恢复' : '存在后续修改'}</small>
+              </div>
+              {changeSet.files.map(file => <div className="change-set-file" key={file.path}>
+                <code>{file.path}</code>
+                <small>{file.checkpointCount} 次写入</small>
+                <span className={file.matchesAfter ? 'state-ready' : 'state-conflict'}>
+                  {file.matchesAfter ? '未再修改' : '与任务结束时不同'}
+                </span>
+              </div>)}
+              {changeSet.conflicts.length > 0 && <p className="error-text" role="alert">
+                以下文件在任务结束后又被修改或删除，整组恢复不会覆盖它们：
+                {changeSet.conflicts.join('、')}
+              </p>}
+              <div className="change-set-actions">
+                <button type="button" className="secondary"
+                  onClick={() => setChangeSet(null)}>收起</button>
+                <button type="button" className="primary" disabled={!changeSet.canRestore || !!changeSetBusy}
+                  onClick={() => restoreChangeSet(changeSet)}>恢复整组改动</button>
+              </div>
+            </div>}
           </section>
         </details>)}
       </div>}

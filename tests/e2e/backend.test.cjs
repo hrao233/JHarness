@@ -646,6 +646,57 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     assert.equal(await readFile(checkpointPath, 'utf8'), 'CHECKPOINT-BEFORE');
     steps = checkpointOriginalSteps;
 
+    const changeSetContext = { ...context, sessionId: randomUUID() };
+    const changeSetOriginalSteps = steps;
+    const changeA = path.join(projectPath, 'ChangeA.txt');
+    const changeB = path.join(projectPath, 'ChangeB.txt');
+    const changeC = path.join(projectPath, 'ChangeC.txt');
+    await writeFile(changeA, 'CHANGE-A-BEFORE');
+    await writeFile(changeB, 'CHANGE-B-BEFORE');
+    steps = [
+      ['edit_file', {
+        path: 'ChangeA.txt', old_text: 'CHANGE-A-BEFORE', new_text: 'CHANGE-A-AFTER'
+      }],
+      ['edit_file', {
+        path: 'ChangeB.txt', old_text: 'CHANGE-B-BEFORE', new_text: 'CHANGE-B-AFTER'
+      }],
+      ['create_file', { path: 'ChangeC.txt', content: 'CHANGE-C-CREATED' }]
+    ];
+    const changeSetRun = randomUUID();
+    await call('chat', { ...changeSetContext, ...model, runId: changeSetRun,
+      permission: 'full', message: '修改多个文件并验证整组恢复' });
+    await waitEvent(changeSetRun, 'done');
+    const changePreview = await call('previewChangeSet', {
+      ...changeSetContext, runId: changeSetRun
+    });
+    assert.equal(changePreview.files.length, 3);
+    assert.equal(changePreview.canRestore, true);
+    assert.deepEqual(changePreview.files.map(item => item.path).sort(),
+      ['ChangeA.txt', 'ChangeB.txt', 'ChangeC.txt']);
+    await writeFile(changeB, 'CHANGE-B-USER');
+    const conflictedPreview = await call('previewChangeSet', {
+      ...changeSetContext, runId: changeSetRun
+    });
+    assert.equal(conflictedPreview.canRestore, false);
+    assert.deepEqual(conflictedPreview.conflicts, ['ChangeB.txt']);
+    await assert.rejects(call('restoreChangeSet', {
+      ...changeSetContext, runId: changeSetRun
+    }), /整组恢复已取消/);
+    assert.equal(await readFile(changeA, 'utf8'), 'CHANGE-A-AFTER');
+    assert.equal(await readFile(changeC, 'utf8'), 'CHANGE-C-CREATED');
+    await writeFile(changeB, 'CHANGE-B-AFTER');
+    const changeSet = await call('restoreChangeSet', {
+      ...changeSetContext, runId: changeSetRun
+    });
+    assert.equal(changeSet.status, 'RESTORED');
+    assert.equal(await readFile(changeA, 'utf8'), 'CHANGE-A-BEFORE');
+    assert.equal(await readFile(changeB, 'utf8'), 'CHANGE-B-BEFORE');
+    await assert.rejects(readFile(changeC, 'utf8'), { code: 'ENOENT' });
+    assert.equal((await call('changeSets', {
+      ...changeSetContext, runId: changeSetRun
+    }))[0].status, 'RESTORED');
+    steps = changeSetOriginalSteps;
+
     const reportContext = { ...context, sessionId: randomUUID() };
     const reportRun = randomUUID();
     const reportOriginalSteps = steps;

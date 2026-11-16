@@ -9,6 +9,12 @@ contextBridge.exposeInMainWorld('jharness', {
   checkpoints: (project, session = '') => ipcRenderer.invoke('jh:checkpoints', project, session),
   checkpoint: (project, id) => ipcRenderer.invoke('jh:checkpoint', project, id),
   restoreCheckpoint: (project, id) => ipcRenderer.invoke('jh:restore-checkpoint', project, id),
+  previewChangeSet: (project, session, runId) =>
+    ipcRenderer.invoke('jh:preview-change-set', project, session, runId),
+  restoreChangeSet: (project, session, runId) =>
+    ipcRenderer.invoke('jh:restore-change-set', project, session, runId),
+  changeSets: (project, session, runId) =>
+    ipcRenderer.invoke('jh:change-sets', project, session, runId),
   report: (project, session) => ipcRenderer.invoke('jh:report', project, session),
   openArtifact: (project, session, id) => ipcRenderer.invoke('jh:open-artifact', project, session, id),
   exportSession: (project, session, format, title) =>

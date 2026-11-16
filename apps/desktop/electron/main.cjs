@@ -275,6 +275,12 @@ function register() {
     if (!project) throw new Error('找不到项目。');
     return call('restoreCheckpoint', { projectId, projectPath: project.directory, checkpointId });
   });
+  ipcMain.handle('jh:preview-change-set', (_, projectId, sessionId, runId) =>
+    call('previewChangeSet', { ...context(projectId, sessionId), runId }));
+  ipcMain.handle('jh:restore-change-set', (_, projectId, sessionId, runId) =>
+    call('restoreChangeSet', { ...context(projectId, sessionId), runId }));
+  ipcMain.handle('jh:change-sets', (_, projectId, sessionId, runId) =>
+    call('changeSets', { ...context(projectId, sessionId), runId }));
   ipcMain.handle('jh:report', (_, projectId, sessionId) =>
     call('taskReport', context(projectId, sessionId)));
   ipcMain.handle('jh:open-artifact', async (_, projectId, sessionId, artifactId) => {

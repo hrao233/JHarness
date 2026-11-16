@@ -300,5 +300,17 @@ h1{margin:0;font-weight:650;letter-spacing:-.045em;font-size:30px}
 .artifact-row .secondary{flex:none;padding:4px 7px;font-size:12px}
 .report-checkpoint code{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px}
 .report-checkpoint>span{flex:none;color:var(--muted);font-size:11px}
+.change-set-toolbar{display:flex;align-items:center;gap:8px;margin-top:7px;padding-top:7px;border-top:1px dashed #ecece7}
+.change-set-toolbar .secondary{flex:none;padding:5px 8px;font-size:12px}
+.change-set-toolbar .success-text{font-size:11px}
+.change-set-preview{margin-top:7px;border-top:1px solid #ecece7;padding-top:8px}
+.change-set-file{display:flex;align-items:center;gap:7px;padding:5px 0;border-top:1px dashed #f0f0eb;min-width:0}
+.change-set-file:first-of-type{border-top:0}
+.change-set-file code{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px}
+.change-set-file small{margin-left:auto;color:var(--muted);font-size:11px}
+.change-set-file>span{flex:none;padding:2px 5px;border-radius:4px;font-size:10px}
+.state-ready{background:#e8f1e9;color:#315c42}
+.state-conflict{background:#f5e9e4;color:#7b392b}
+.change-set-actions{display:flex;justify-content:flex-end;gap:7px;margin-top:8px}
 @media(max-width:900px){.app{grid-template-columns:50px 200px minmax(0,1fr)}.thread{padding-right:17px}.bottom{padding-inline:17px}}
-@media(max-width:620px){.nav-dialog{width:calc(100vw - 16px);padding:16px}.task-report>summary{align-items:flex-start}.report-counts{max-width:44%}.command-evidence-head{align-items:flex-start;flex-wrap:wrap}.command-outcome{margin-left:23px}.artifact-row{align-items:flex-start}.artifact-row .secondary{width:34px;justify-content:center;font-size:0}.artifact-row .secondary svg{width:16px}}
+@media(max-width:620px){.nav-dialog{width:calc(100vw - 16px);padding:16px}.task-report>summary{align-items:flex-start}.report-counts{max-width:44%}.command-evidence-head{align-items:flex-start;flex-wrap:wrap}.command-outcome{margin-left:23px}.artifact-row{align-items:flex-start}.artifact-row .secondary{width:34px;justify-content:center;font-size:0}.artifact-row .secondary svg{width:16px}.change-set-toolbar{align-items:flex-start;flex-wrap:wrap}.change-set-file{align-items:flex-start;flex-wrap:wrap}.change-set-file small{margin-left:23px}.change-set-actions{flex-wrap:wrap}}

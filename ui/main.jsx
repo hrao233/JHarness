@@ -130,12 +130,17 @@ function App() {
         }
         if (event === 'tool-start') {
           return [...previous, { role: 'tool', id: current.id + ':' + step + ':' + data.toolId, toolId: data.toolId,
-            runId: current.id, name: data.name, status: '执行中', args: '', output: '' }];
+            runId: current.id, name: data.name, status: '待执行', args: '', output: '' }];
         }
         const toolIndex = previous.findLastIndex(item => item.role === 'tool'
           && item.runId === current.id && item.toolId === data.toolId);
+        if (event === 'tool-execution' && toolIndex < 0) {
+          return [...previous, { role: 'tool', id: current.id + ':' + step + ':' + data.toolId, toolId: data.toolId,
+            runId: current.id, name: data.name, status: '执行中', args: '', output: '' }];
+        }
         return previous.map((item, index) => {
           if (index !== toolIndex) return item;
+          if (event === 'tool-execution') return { ...item, status: '执行中' };
           if (event === 'tool-args') return { ...item, args: (item.args + data.delta).slice(0, 16000) };
           if (event === 'tool-output') return { ...item, output: (item.output + data.delta).slice(0, 16000) };
           if (event === 'tool-end') return { ...item, status: data.status };

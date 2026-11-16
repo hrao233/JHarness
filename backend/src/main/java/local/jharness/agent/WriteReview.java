@@ -1,4 +1,4 @@
-package local.jharness;
+package local.jharness.agent;
 
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;

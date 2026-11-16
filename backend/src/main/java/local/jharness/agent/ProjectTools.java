@@ -1,4 +1,4 @@
-package local.jharness;
+package local.jharness.agent;
 
 import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.tool.Tool;

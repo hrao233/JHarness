@@ -2,7 +2,7 @@
 
 Windows 本地项目助手。桌面窗口由 Electron 和 React 提供，Java 后端使用 AgentScope Core 和 Harness。应用通过进程管道传输 JSON 行和流式事件。
 
-正常会话由仓库内完整的 AgentScope `ReActAgent.java` 驱动。它负责模型与工具循环、工具调用恢复、终止条件和步数用尽后的总结。JHarness 在循环中增加了桌面进度事件，模型、工具注册和会话日志继续由 AgentScope Core 与 Harness 提供。
+会话通过 AgentScope Harness 执行，Core 负责推理、工具调度、终止与步数用尽后的总结。JHarness 通过中间件和原生事件接收进度，并配置本地工具、审批和项目记忆。
 
 ## 使用
 
@@ -42,7 +42,16 @@ Agent 可以浏览目录、按名称查找、读取、编辑和新建项目内�
 mvn -T1C -pl agentscope-harness,agentscope-extensions/agentscope-extensions-model/agentscope-extensions-model-openai -am -DskipTests install
 ```
 
-`backend/src/main/java/io/agentscope/core/ReActAgent.java` 来自该 AgentScope Java 源码，保留版权声明及 [Apache-2.0 许可证](backend/third-party/agentscope/LICENSE)。后端构建以该源码编译的类为准，包括它的内部类。更新 AgentScope 构件时需同步核对这份源码与 Core/Harness 的接口。
+后端源码统一位于 `local.jharness` 包。根包的 `Backend` 是桌面 JSON 管道入口，`agent` 包负责组装会话、审批、本地工具与事件转发，`memory` 包负责项目记忆。ReAct 实现通过 Maven 的 Core 依赖进入运行包。
+
+| 能力 | JHarness 的入口 |
+| --- | --- |
+| 会话启动、取消、历史和检查点 | `ConversationRuntime` 使用 `HarnessAgent.streamEvents` 和项目的 Session Log，界面读已提交消息。 |
+| 流式推理、工具调度、参数错误处理和步数上限总结 | Core 执行，`ConversationEvents` 通过推理／执行中间件和原生事件把状态映射到桌面。 |
+| 项目工具、审批和自动审查 | `agent` 注册 JHarness 的工具与审批回调，Core 通过工具注册表调度。 |
+| Skill、上下文压缩和跨会话记忆 | `ConversationRuntime` 配置 Harness，`ProjectMemory` 接入项目的长期记忆和日记。 |
+
+当前桌面入口使用直接会话流。结构化输出、备用模型、原生外部工具回填以及 `AgentSession` 的持久任务队列需要各自的应用入口。
 
 然后在 JHarness 根目录运行：
 

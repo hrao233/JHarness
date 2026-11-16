@@ -50,7 +50,7 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     const step = endless ? ['list_files', { path: '.' }] : steps[results.length];
     const delta = toolAvailable && step
       ? { role: 'assistant', tool_calls: [{ index: 0, id: 'call_' + results.length, type: 'function',
-          function: { name: step[0], arguments: JSON.stringify(step[1]) } }] }
+          function: { name: step[0], arguments: step[3] ?? JSON.stringify(step[1]) } }] }
       : { role: 'assistant', content: reviewing ? reviewResponses.shift()
         : extracting ? '- AUTO-FACT-198' : consolidating ? '- AUTO-FACT-198（已整理）'
         : toolAvailable ? '**ORCHID-28**' : endless ? 'FIXTURE-LIMIT-SUMMARY' : 'OK' };
@@ -114,6 +114,8 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     assert.deepEqual(events.filter(event => event.runId === full && event.event === 'loop-phase')
       .map(event => [event.data.step, event.data.phase]),
       [...steps.flatMap((_, index) => [[index + 1, 'reasoning'], [index + 1, 'acting']]), [steps.length + 1, 'reasoning']]);
+    assert.deepEqual(events.filter(event => event.runId === full && event.event === 'tool-execution')
+      .map(event => event.data.name), steps.map(step => step[0]));
     assert.equal(events.some(event => event.runId === full && event.event === 'approval'), false);
     const firstChat = requests.find(request => request.body.tools?.length).body;
     assert.equal(firstChat.reasoning_effort, 'high');
@@ -325,6 +327,16 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     await waitEvent(web, 'done');
     assert.equal(websiteReads, 1);
     assert.match(JSON.stringify(requests.at(-1).body.messages.filter(message => message.role === 'tool')), /TEST-WEB-PAGE/);
+
+    const malformed = randomUUID();
+    steps = [['create_file', {}, '', '{"path":"Malformed.txt","content":']];
+    await call('chat', { ...context, sessionId: randomUUID(), ...model, runId: malformed,
+      permission: 'full', message: '测试损坏的工具参数' });
+    await waitEvent(malformed, 'done');
+    assert.equal((await waitEvent(malformed, 'tool-end')).data.status, 'ERROR');
+    assert.match((await waitEvent(malformed, 'tool-output')).data.delta, /valid JSON object/);
+    assert.match((await waitEvent(malformed, 'result')).data.text, /ORCHID-28/);
+    await assert.rejects(readFile(path.join(projectPath, 'Malformed.txt')), { code: 'ENOENT' });
 
     const limited = randomUUID();
     endless = true;

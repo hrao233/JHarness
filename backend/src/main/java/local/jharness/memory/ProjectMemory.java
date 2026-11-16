@@ -1,4 +1,4 @@
-package local.jharness;
+package local.jharness.memory;
 
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.message.TextBlock;
@@ -28,9 +28,9 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
-final class ProjectMemory {
-    static final String SUMMARY = "MEMORY.md";
-    static final String DAILY_ROUTE = "memory/";
+public final class ProjectMemory {
+    private static final String SUMMARY = "MEMORY.md";
+    private static final String DAILY_ROUTE = "memory/";
     private static final String EXTRACTION = MemoryFlushManager.DEFAULT_FLUSH_PROMPT + """
 
             Keep only durable project decisions, conventions, preferences and useful task state.
@@ -43,22 +43,18 @@ final class ProjectMemory {
     private final WorkspaceManager manager;
     private final LocalFilesystem files;
 
-    ProjectMemory(Path workspace) throws IOException {
+    public ProjectMemory(Path workspace) throws IOException {
         this.workspace = workspace;
         this.ledgers = Files.createDirectories(workspace.resolve("memory"));
         this.files = new LocalFilesystem(workspace, true, 4);
         this.manager = new WorkspaceManager(workspace, files, null);
     }
 
-    LocalFilesystem summaryFilesystem() {
-        return files;
-    }
-
-    LocalFilesystem ledgerFilesystem() {
-        return new LocalFilesystem(ledgers, true, 4);
-    }
-
-    void attachMaintenance(HarnessAgent.Builder builder, Model model) {
+    public void configure(HarnessAgent.Builder builder, Model model, boolean autoMemory) {
+        builder.filesystemRoute(SUMMARY, files)
+                .filesystemRoute(DAILY_ROUTE, new LocalFilesystem(ledgers, true, 4))
+                .disableMemoryHooks();
+        if (!autoMemory) return;
         var gate = new LocalPeriodicGate();
         PeriodicGate projectGate = (name, gap) -> gate.tryClaim(workspace + ":" + name, gap);
         builder.middleware(new MemoryFlushMiddleware(manager, model, EXTRACTION,
@@ -68,7 +64,7 @@ final class ProjectMemory {
                 IsolationScope.USER, projectGate));
     }
 
-    Map<String, Object> list(RuntimeContext context) throws IOException {
+    public Map<String, Object> list(RuntimeContext context) throws IOException {
         return Map.of("summary", manager.readMemoryMd(context), "daily", filenames(ledgers),
                 "archive", filenames(ledgers.resolve("archive")));
     }
@@ -86,12 +82,12 @@ final class ProjectMemory {
         return name.matches("\\d{4}-\\d{2}-\\d{2}\\.md");
     }
 
-    String read(RuntimeContext context, String name, boolean archive) {
+    public String read(RuntimeContext context, String name, boolean archive) {
         if (!isDailyFile(name)) throw new IllegalArgumentException("无效的记忆文件名。");
         return manager.readMemoryFileUtf8(context, DAILY_ROUTE + (archive ? "archive/" : "") + name);
     }
 
-    String search(RuntimeContext context, String query) {
+    public String search(RuntimeContext context, String query) {
         if (query.length() > 200) throw new IllegalArgumentException("记忆搜索最多 200 字符。");
         return new MemorySearchTool(manager).memorySearch(context, query).getOutput().stream()
                 .filter(TextBlock.class::isInstance).map(TextBlock.class::cast).map(TextBlock::getText)
@@ -99,7 +95,7 @@ final class ProjectMemory {
                 .orElse("");
     }
 
-    void update(RuntimeContext context, String expected, String text) throws IOException {
+    public void update(RuntimeContext context, String expected, String text) throws IOException {
         if (!MemoryBackgroundTasks.awaitQuiescence(4, TimeUnit.SECONDS)) {
             throw new IOException("记忆正在整理，请稍后重试。");
         }

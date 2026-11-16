@@ -10,11 +10,14 @@ import io.agentscope.core.message.ImageBlock;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
 import io.agentscope.core.message.TextBlock;
+import io.agentscope.core.message.ToolResultBlock;
+import io.agentscope.core.message.ToolResultState;
 import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.model.ModelCreationContext;
 import io.agentscope.core.model.ModelRegistry;
 import io.agentscope.core.session.SessionViews;
+import io.agentscope.core.session.SessionRecovery;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
@@ -25,12 +28,16 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import local.jharness.agent.ConversationRuntime;
+import local.jharness.agent.DurableApprovalStore;
+import local.jharness.agent.DurableConversation;
+import local.jharness.agent.SessionArchive;
 import local.jharness.memory.ProjectMemory;
 
 public final class Backend {
@@ -41,6 +48,8 @@ public final class Backend {
     private final Object bookmarkLock = new Object();
     private final Path dataDirectory;
     private final ConversationRuntime conversations = new ConversationRuntime(this::event, Backend::describe);
+    private final DurableConversation durableConversations =
+            new DurableConversation(this::event, Backend::describe);
 
     private record ChatMessage(String id, String role, String text, String timestamp, int turn) {}
     private record Bookmark(String id, String projectId, String sessionId, String messageId,
@@ -61,7 +70,7 @@ public final class Backend {
     }
 
     private void run() throws Exception {
-        var workers = Executors.newFixedThreadPool(2);
+        var workers = Executors.newFixedThreadPool(4);
         try (var reader = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
@@ -69,6 +78,7 @@ public final class Backend {
                 if (request.path("method").asText().equals("stop")) {
                     String runId = request.path("params").path("runId").asText();
                     conversations.stop(runId);
+                    durableConversations.stop(runId);
                     send(Map.of("id", request.path("id").asText(), "result", true));
                 } else {
                     workers.submit(() -> handle(request));
@@ -76,6 +86,7 @@ public final class Backend {
             }
         } finally {
             conversations.close();
+            durableConversations.close();
             workers.shutdownNow();
         }
     }
@@ -99,6 +110,16 @@ public final class Backend {
                 case "removeBookmark" -> removeBookmark(params);
                 case "importBookmarks" -> importBookmarks(params);
                 case "chat" -> startChat(params);
+                case "task" -> currentTask(params);
+                case "tasks" -> listTasks(params);
+                case "resumeTask" -> resumeTask(params);
+                case "cancelTask" -> cancelTask(params);
+                case "reconcileTask" -> reconcileTask(params);
+                case "context" -> sessionContext(params);
+                case "forkSession" -> forkSession(params);
+                case "exportSession" -> exportSession(params);
+                case "steer" -> durableConversations.steer(
+                        identifier(params, "runId"), required(params, "message"));
                 case "approvals" -> listApprovals(params);
                 case "dismissApproval" -> dismissApproval(params);
                 case "approve" -> conversations.approve(identifier(params, "runId"),
@@ -240,29 +261,164 @@ public final class Backend {
     }
 
     private boolean startChat(JsonNode params) throws Exception {
-        String runId = identifier(params, "runId");
-        var context = RuntimeContext.builder(context(params)).runId(runId).build();
-        var project = Path.of(required(params, "projectPath")).toRealPath();
-        var message = userMessage(params);
-        var model = model(params);
         String permission = params.path("permission").asText("assist");
-        boolean autoMemory = params.path("autoMemory").asBoolean();
-        Model auxiliary = autoMemory || permission.equals("assist") ? model(params, true) : model;
-        conversations.start(new ConversationRuntime.Request(workspace(params), project, context, message,
-                required(params, "message"), model, auxiliary, autoMemory, permission));
+        var request = request(params, permission, true);
+        if (permission.equals("durable")) durableConversations.submit(request);
+        else conversations.start(request);
         return true;
     }
 
-    private List<local.jharness.agent.DurableApprovalStore.ApprovalRecord> listApprovals(
-            JsonNode params) throws Exception {
-        var store = new local.jharness.agent.DurableApprovalStore(workspace(params));
-        store.recoverInterrupted();
-        return store.list();
+    private boolean resumeTask(JsonNode params) throws Exception {
+        durableConversations.resume(
+                request(params, "durable", false), identifier(params, "turnId"), answers(params));
+        return true;
+    }
+
+    private Object currentTask(JsonNode params) throws Exception {
+        return DurableConversation.task(
+                ConversationRuntime.openSession(workspace(params), context(params)));
+    }
+
+    private List<Map<String, Object>> listTasks(JsonNode params) throws Exception {
+        var result = new ArrayList<Map<String, Object>>();
+        for (var session : params.path("sessions")) {
+            String projectId = identifier(session, "projectId");
+            String sessionId = identifier(session, "sessionId");
+            var sessionContext = RuntimeContext.builder()
+                    .userId(USER_ID)
+                    .sessionId(sessionId)
+                    .build();
+            var log = ConversationRuntime.openSession(workspace(session), sessionContext);
+            for (var task : DurableConversation.taskList(log)) {
+                if (!task.actionable()) continue;
+                var value = new LinkedHashMap<String, Object>();
+                value.put("projectId", projectId);
+                value.put("sessionId", sessionId);
+                value.put("projectName", session.path("projectName").asText(""));
+                value.put("sessionTitle", session.path("title").asText(""));
+                value.put("commandId", task.commandId());
+                value.put("turnId", task.turnId());
+                value.put("status", task.status());
+                value.put("title", task.title());
+                value.put("approvals", task.approvals());
+                value.put("uncertain", task.uncertain());
+                value.put("uncertainCalls", task.uncertainCalls());
+                result.add(value);
+            }
+        }
+        return result;
+    }
+
+    private boolean cancelTask(JsonNode params) throws Exception {
+        return DurableConversation.cancel(
+                ConversationRuntime.openSession(workspace(params), context(params)),
+                identifier(params, "turnId"));
+    }
+
+    private boolean reconcileTask(JsonNode params) throws Exception {
+        var log = ConversationRuntime.openSession(workspace(params), context(params));
+        var outcomes = new LinkedHashMap<String, ToolResultBlock>();
+        for (var entry : params.path("outcomes").properties()) {
+            String toolCallId = entry.getKey();
+            if (toolCallId.isBlank() || toolCallId.length() > 200)
+                throw new IllegalArgumentException("工具核对标识无效。");
+            String state = entry.getValue().asText();
+            boolean success;
+            if (state.equals("success")) success = true;
+            else if (state.equals("error")) success = false;
+            else throw new IllegalArgumentException("请选择每项工具操作的核对结果。");
+            String name = DurableConversation.toolCallName(log, toolCallId);
+            outcomes.put(
+                    toolCallId,
+                    ToolResultBlock.of(
+                                    toolCallId,
+                                    name,
+                                    TextBlock.builder()
+                                            .text(success
+                                                    ? "用户核对：该工具操作已在重启前完成。"
+                                                    : "用户核对：该工具操作未完成。")
+                                            .build())
+                            .withState(success ? ToolResultState.SUCCESS : ToolResultState.ERROR));
+        }
+        if (outcomes.isEmpty()) throw new IllegalArgumentException("没有可核对的工具操作。");
+        SessionRecovery.reconcile(log, outcomes, "user_verified_after_interruption");
+        durableConversations.resume(
+                request(params, "durable", false),
+                identifier(params, "turnId"),
+                answers(params));
+        return true;
+    }
+
+    private SessionArchive.ContextSnapshot sessionContext(JsonNode params) throws Exception {
+        String sessionId = identifier(params, "sessionId");
+        return SessionArchive.inspect(
+                ConversationRuntime.openSession(workspace(params), context(params)),
+                sessionId);
+    }
+
+    private SessionArchive.ForkResult forkSession(JsonNode params) throws Exception {
+        String sourceSessionId = identifier(params, "sessionId");
+        String branchSessionId = identifier(params, "branchSessionId");
+        String messageId = params.path("messageId").asText("");
+        if (messageId.length() > 240)
+            throw new IllegalArgumentException("无效的消息标识。");
+        var source = ConversationRuntime.openSession(workspace(params), context(params));
+        var branchContext = RuntimeContext.builder()
+                .userId(USER_ID)
+                .sessionId(branchSessionId)
+                .build();
+        var target = ConversationRuntime.openSession(workspace(params), branchContext);
+        return SessionArchive.fork(
+                source, target, branchSessionId, sourceSessionId, messageId);
+    }
+
+    private SessionArchive.ExportDocument exportSession(JsonNode params) throws Exception {
+        return SessionArchive.export(
+                ConversationRuntime.openSession(workspace(params), context(params)),
+                identifier(params, "sessionId"),
+                params.path("title").asText(""),
+                params.path("format").asText("markdown"));
+    }
+
+    private Map<String, Boolean> answers(JsonNode params) {
+        var answers = new LinkedHashMap<String, Boolean>();
+        for (var entry : params.path("answers").properties()) {
+            if (!entry.getValue().isBoolean())
+                throw new IllegalArgumentException("审批选择无效。");
+            String answerId = entry.getKey();
+            if (answerId.isBlank() || answerId.length() > 200)
+                throw new IllegalArgumentException("审批选择无效。");
+            answers.put(answerId, entry.getValue().booleanValue());
+        }
+        return answers;
+    }
+
+    private ConversationRuntime.Request request(
+            JsonNode params, String permission, boolean requireInput) throws Exception {
+        if (!List.of("ask", "assist", "full", "durable").contains(permission))
+            throw new IllegalArgumentException("无效的审批模式。");
+        String runId = identifier(params, "runId");
+        var runtimeContext = RuntimeContext.builder(context(params)).runId(runId).build();
+        var project = Path.of(required(params, "projectPath")).toRealPath();
+        String task = requireInput ? required(params, "message") : "";
+        var message = requireInput
+                ? userMessage(params)
+                : Msg.builder().role(MsgRole.USER)
+                        .content(TextBlock.builder().text("").build()).build();
+        var model = model(params);
+        boolean autoMemory = params.path("autoMemory").asBoolean();
+        Model auxiliary =
+                autoMemory || permission.equals("assist") ? model(params, true) : model;
+        return new ConversationRuntime.Request(workspace(params), project, runtimeContext, message,
+                task, model, auxiliary, autoMemory, permission);
+    }
+
+    private List<DurableApprovalStore.ApprovalRecord> listApprovals(JsonNode params) throws Exception {
+        return conversations.listApprovals(workspace(params));
     }
 
     private boolean dismissApproval(JsonNode params) throws Exception {
-        return new local.jharness.agent.DurableApprovalStore(workspace(params))
-                .dismiss(identifier(params, "approvalId"));
+        return conversations.dismissApproval(workspace(params), identifier(params, "approvalId"));
     }
 
     private Msg userMessage(JsonNode params) {
@@ -364,7 +520,10 @@ public final class Backend {
     }
 
     private static String identifier(JsonNode params, String field) {
-        String value = required(params, field);
+        return requireIdentifier(required(params, field));
+    }
+
+    private static String requireIdentifier(String value) {
         if (!value.matches("[a-f0-9-]{36}")) {
             throw new IllegalArgumentException("无效的项目、会话或任务标识。");
         }

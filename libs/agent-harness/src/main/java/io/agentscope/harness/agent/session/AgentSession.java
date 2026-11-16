@@ -49,6 +49,7 @@ import java.util.concurrent.TimeUnit;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Sinks;
 import reactor.core.scheduler.Schedulers;
 
 /**
@@ -73,6 +74,7 @@ public final class AgentSession implements AutoCloseable {
     private final SessionKey key;
     private final SessionLog log;
     private final SessionInbox inbox;
+    private final Sinks.Many<AgentEvent> events = Sinks.many().multicast().directBestEffort();
     private Disposable dispatcher;
     private AgentRun<AgentEvent> active;
     private String activeCommand;
@@ -113,6 +115,11 @@ public final class AgentSession implements AutoCloseable {
 
     public String executionError() {
         return error;
+    }
+
+    /** Observe live execution events. Subscriptions do not start or control the durable task. */
+    public Flux<AgentEvent> events() {
+        return events.asFlux();
     }
 
     /** Start dispatching durable queued tasks, for example after application restart. */
@@ -454,7 +461,7 @@ public final class AgentSession implements AutoCloseable {
                             }
                         })
                 .subscribe(
-                        event -> {},
+                        events::tryEmitNext,
                         failure -> {
                             error = failure.getMessage();
                             if (!closed
@@ -519,5 +526,6 @@ public final class AgentSession implements AutoCloseable {
                 run.cancel();
             }
         }
+        events.tryEmitComplete();
     }
 }

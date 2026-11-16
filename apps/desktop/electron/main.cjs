@@ -10,7 +10,7 @@ const git = promisify(execFile);
 
 let win;
 let backend;
-let activeRun;
+const activeRuns = new Set();
 let settings;
 let settingsFile;
 let quitting = false;
@@ -56,7 +56,7 @@ function startBackend(directory) {
     let message;
     try { message = JSON.parse(line); } catch { return; }
     if (message.event) {
-      if (message.event === 'done' && activeRun === message.runId) activeRun = undefined;
+      if (message.event === 'done') activeRuns.delete(message.runId);
       if (win && !win.isDestroyed()) win.webContents.send('jh:event', message);
       return;
     }
@@ -76,11 +76,13 @@ function startBackend(directory) {
       request.reject(new Error('Java 后端已退出。请重新打开 JHarness。'));
     }
     pending.clear();
-    if (activeRun && win && !win.isDestroyed()) {
-      win.webContents.send('jh:event', { runId: activeRun, event: 'error', data: { message: 'Java 后端已退出。' } });
-      win.webContents.send('jh:event', { runId: activeRun, event: 'done', data: {} });
+    for (const runId of activeRuns) {
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('jh:event', { runId, event: 'error', data: { message: 'Java 后端已退出。' } });
+        win.webContents.send('jh:event', { runId, event: 'done', data: {} });
+      }
     }
-    activeRun = undefined;
+    activeRuns.clear();
   }
   backend.once('error', fail);
   backend.once('exit', fail);
@@ -154,6 +156,25 @@ function context(projectId, sessionId) {
   return { projectId, sessionId, projectPath: project.directory };
 }
 
+function taskSessions() {
+  return settings.projects.flatMap(project => project.sessions.map(session => ({
+    projectId: project.id,
+    sessionId: session.id,
+    projectName: project.name,
+    title: session.title
+  })));
+}
+
+function conversationModel(options) {
+  const profile = settings.models.find(item => item.id === (options.modelId || settings.defaultModelId));
+  if (!profile) throw new Error('请先在设置中添加模型。');
+  const model = modelInput(profile);
+  const effort = resolveEffort(model, options.effort);
+  const fast = options.fast === true;
+  if (fast && !model.fastTier) throw new Error('当前模型未配置快速模式。');
+  return { model, effort, fast };
+}
+
 function register() {
   ipcMain.handle('jh:state', () => publicSettings());
   ipcMain.handle('jh:memory', (_, projectId, operation, input = {}) => {
@@ -162,7 +183,7 @@ function register() {
     if (operation === 'list') return call('memoryList', { projectId });
     if (operation === 'read') return call('memoryRead', { projectId, name: input.name, archive: input.archive === true });
     if (operation === 'search') return call('memorySearch', { projectId, query: input.query });
-    if (activeRun) throw new Error('请在当前任务结束后修改记忆设置。');
+    if (activeRuns.size) throw new Error('请在当前任务结束后修改记忆设置。');
     if (operation === 'update') return call('memoryUpdate', { projectId, text: input.text, expected: input.expected });
     if (operation === 'auto') {
       project.autoMemory = input.enabled === true;
@@ -238,6 +259,51 @@ function register() {
     return session;
   });
   ipcMain.handle('jh:history', (_, project, session) => call('history', context(project, session)));
+  ipcMain.handle('jh:context', (_, project, session) => call('context', context(project, session)));
+  ipcMain.handle('jh:export-session', async (_, projectId, sessionId, format, title) => {
+    const selected = context(projectId, sessionId);
+    if (!['markdown', 'json'].includes(format)) throw new Error('不支持的导出格式。');
+    const exported = await call('exportSession', {
+      ...selected,
+      format,
+      title: typeof title === 'string' ? title.slice(0, 200) : ''
+    });
+    const result = await dialog.showSaveDialog(win, {
+      title: '导出会话',
+      defaultPath: path.join(app.getPath('documents'), exported.filename),
+      filters: [format === 'markdown'
+        ? { name: 'Markdown', extensions: ['md'] }
+        : { name: 'JSON', extensions: ['json'] }]
+    });
+    if (result.canceled || !result.filePath) return null;
+    writeFileSync(result.filePath, exported.content, 'utf8');
+    return {
+      path: result.filePath,
+      format: exported.format,
+      messages: exported.messages,
+      events: exported.events
+    };
+  });
+  ipcMain.handle('jh:fork-session', async (_, projectId, sessionId, messageId) => {
+    const selected = context(projectId, sessionId);
+    const project = settings.projects.find(item => item.id === projectId);
+    const source = project.sessions.find(item => item.id === sessionId);
+    const branchSessionId = randomUUID();
+    await call('forkSession', { ...selected, branchSessionId, messageId });
+    const branch = {
+      id: branchSessionId,
+      title: (source.title === '新会话' ? '会话' : source.title) + ' · 分叉',
+      modelId: source.modelId || '',
+      effort: source.effort || '',
+      fast: source.fast === true,
+      permission: source.permission || 'assist',
+      branchOf: sessionId,
+      updatedAt: Date.now()
+    };
+    project.sessions.unshift(branch);
+    persist();
+    return branch;
+  });
   ipcMain.handle('jh:attachment', async (_, projectId, kind) => {
     const project = settings.projects.find(item => item.id === projectId);
     if (!project || !['file', 'folder', 'image'].includes(kind)) throw new Error('请选择项目和附件类型。');
@@ -282,19 +348,13 @@ function register() {
     return { ...publicSettings(), savedModelId: id };
   });
   ipcMain.handle('jh:chat', async (_, projectId, sessionId, message, runId, options = {}) => {
-    if (activeRun) throw new Error('已有会话正在运行。');
     const selected = context(projectId, sessionId);
-    const profile = settings.models.find(item => item.id === (options.modelId || settings.defaultModelId));
-    if (!profile) throw new Error('请先在设置中添加模型。');
-    const model = modelInput(profile);
-    const effort = resolveEffort(model, options.effort);
-    const fast = options.fast === true;
-    if (fast && !model.fastTier) throw new Error('当前模型未配置快速模式。');
-    const permission = ['ask', 'assist', 'full'].includes(options.permission) ? options.permission : 'assist';
+    const { model, effort, fast } = conversationModel(options);
+    const permission = ['ask', 'assist', 'full', 'durable'].includes(options.permission) ? options.permission : 'assist';
     if (typeof message !== 'string' || !message.trim() || message.length > 16000) {
       throw new Error('请输入 16,000 字符以内的消息。');
     }
-    activeRun = runId;
+    activeRuns.add(runId);
     try {
       const requested = Array.isArray(options.parts) ? options.parts : [];
       if (requested.length > 8) throw new Error('每条消息最多附加 8 项。');
@@ -319,13 +379,172 @@ function register() {
       for (const part of requested) attachments.delete(part.id);
       return session.title;
     } catch (error) {
-      if (activeRun === runId) activeRun = undefined;
+      activeRuns.delete(runId);
       throw error;
     }
   });
+  ipcMain.handle('jh:task', (_, projectId, sessionId) => call('task', context(projectId, sessionId)));
+  ipcMain.handle('jh:tasks', () => call('tasks', { sessions: taskSessions() }));
+  ipcMain.handle('jh:steer', (_, runId, message) => {
+    if (typeof message !== 'string' || !message.trim() || message.length > 16000) {
+      throw new Error('补充指令需要在 16,000 字符以内。');
+    }
+    return call('steer', { runId, message });
+  });
+  ipcMain.handle('jh:queue-task', async (_, projectId, sessionId, message, runId, options = {}) => {
+    const selected = context(projectId, sessionId);
+    const { model, effort, fast } = conversationModel(options);
+    if (typeof message !== 'string' || !message.trim() || message.length > 16000) {
+      throw new Error('请输入 16,000 字符以内的消息。');
+    }
+    const autoMemory = settings.projects.find(item => item.id === projectId).autoMemory === true;
+    activeRuns.add(runId);
+    try {
+      await call('chat', { ...selected, ...model, message, runId, parts: [], permission: 'durable', effort,
+        autoMemory, serviceTier: fast ? model.fastTier : '' });
+      const session = settings.projects.find(item => item.id === projectId).sessions
+        .find(item => item.id === sessionId);
+      if (session.title === '新会话') session.title = message.trim().replace(/\s+/g, ' ').slice(0, 40);
+      Object.assign(session, { modelId: options.modelId || '', effort, fast, permission: 'durable', updatedAt: Date.now() });
+      persist();
+      return true;
+    } catch (error) {
+      activeRuns.delete(runId);
+      throw error;
+    }
+  });
+  ipcMain.handle('jh:resume-task', async (_, projectId, sessionId, turnId, runId, answers = {}, options = {}) => {
+    const selected = context(projectId, sessionId);
+    if (!answers || typeof answers !== 'object' || Array.isArray(answers)
+      || Object.values(answers).some(answer => typeof answer !== 'boolean')) {
+      throw new Error('审批选择无效。');
+    }
+    const { model, effort, fast } = conversationModel(options);
+    const autoMemory = settings.projects.find(item => item.id === projectId).autoMemory === true;
+    activeRuns.add(runId);
+    try {
+      return await call('resumeTask', { ...selected, ...model, turnId, runId, answers, effort, autoMemory,
+        serviceTier: fast ? model.fastTier : '' });
+    } catch (error) {
+      activeRuns.delete(runId);
+      throw error;
+    }
+  });
+  ipcMain.handle('jh:reconcile-task', async (_, projectId, sessionId, turnId, runId,
+    answers = {}, outcomes = {}, options = {}) => {
+    const selected = context(projectId, sessionId);
+    if (!answers || typeof answers !== 'object' || Array.isArray(answers)
+      || Object.values(answers).some(answer => typeof answer !== 'boolean')) {
+      throw new Error('审批选择无效。');
+    }
+    if (!outcomes || typeof outcomes !== 'object' || Array.isArray(outcomes)
+      || Object.values(outcomes).some(outcome => !['success', 'error'].includes(outcome))) {
+      throw new Error('请逐项确认工具操作的核对结果。');
+    }
+    const { model, effort, fast } = conversationModel(options);
+    const autoMemory = settings.projects.find(item => item.id === projectId).autoMemory === true;
+    activeRuns.add(runId);
+    try {
+      return await call('reconcileTask', { ...selected, ...model, turnId, runId, answers, outcomes,
+        effort, autoMemory, serviceTier: fast ? model.fastTier : '' });
+    } catch (error) {
+      activeRuns.delete(runId);
+      throw error;
+    }
+  });
+  ipcMain.handle('jh:cancel-task', (_, projectId, sessionId, turnId) =>
+    call('cancelTask', { ...context(projectId, sessionId), turnId }));
   ipcMain.handle('jh:stop', (_, runId) => call('stop', { runId }));
   ipcMain.handle('jh:approve', (_, runId, approvalId, allow) =>
     call('approve', { runId, approvalId, allow: allow === true }));
+  ipcMain.handle('jh:list-interrupted-approvals', async (_, projectId) => {
+    if (!settings.projects.some(item => item.id === projectId)) throw new Error('找不到项目。');
+    const approvals = await call('approvals', { projectId });
+    return approvals.filter(item => item.status === 'INTERRUPTED');
+  });
+  ipcMain.handle('jh:dismiss-interrupted-approval', (_, projectId, approvalId) => {
+    if (!settings.projects.some(item => item.id === projectId)) throw new Error('找不到项目。');
+    return call('dismissApproval', { projectId, approvalId });
+  });
+}
+
+async function smokeInterruptedApproval() {
+  async function waitFor(check, message) {
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      const value = check();
+      if (value) return value;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    throw new Error(message);
+  }
+
+  const selector = 'details.interrupted-approvals';
+  const details = await waitFor(() => document.querySelector(selector), 'Interrupted approval did not render');
+  const summary = details.querySelector('summary');
+  summary.click();
+  const dismiss = [...details.querySelectorAll('button')].find(button => button.textContent.trim() === '清除记录');
+  if (!details.open || !dismiss) throw new Error('Interrupted approval details could not be opened');
+  const result = { heading: summary.innerText, text: details.innerText, url: location.href };
+  dismiss.click();
+  await waitFor(() => !document.querySelector(selector), 'Dismissed approval still renders');
+  const contextButton = [...document.querySelectorAll('button')]
+    .find(button => button.title === '上下文');
+  if (!contextButton) throw new Error('Context entry missing');
+  contextButton.click();
+  const contextDialog = await waitFor(
+    () => document.querySelector('dialog.nav-context'), 'Context dialog did not open');
+  await waitFor(
+    () => contextDialog.innerText.includes('当前会话还没有模型请求记录'),
+    'Context empty state did not load');
+  result.context = contextDialog.innerText;
+  return result;
+}
+
+async function smokeTaskCenter() {
+  async function waitFor(check, message) {
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      const value = check();
+      if (value) return value;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    throw new Error(message);
+  }
+  const button = await waitFor(() => document.querySelector('button[title="任务中心"]'), 'Task center entry missing');
+  button.click();
+  const dialog = await waitFor(() => document.querySelector('dialog.nav-tasks'), 'Task center did not open');
+  await waitFor(() => dialog.innerText.includes('没有运行中或等待处理的任务'), 'Task center did not load');
+  return {
+    title: document.title,
+    text: document.body.innerText,
+    taskCenter: dialog.innerText,
+    url: location.href
+  };
+}
+
+async function smokeRecoverableTask() {
+  async function waitFor(check, message) {
+    const deadline = Date.now() + 12000;
+    while (Date.now() < deadline) {
+      const value = check();
+      if (value) return value;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    throw new Error(message);
+  }
+  const task = await waitFor(
+    () => document.querySelector('section.recoverable-task'),
+    'Recoverable task did not render');
+  await waitFor(
+    () => task.innerText.includes('任务等待审批'),
+    'Recoverable task did not expose suspended state');
+  return {
+    title: document.title,
+    text: document.body.innerText,
+    task: task.innerText,
+    url: location.href
+  };
 }
 
 app.setName('JHarness');
@@ -366,10 +585,16 @@ else {
         console.error('JHARNESS_SMOKE_ERROR ' + code + ' ' + description);
         app.exit(1);
       });
-      win.webContents.on('did-finish-load', () => {
+      win.webContents.once('did-finish-load', () => {
+        const testApproval = process.argv.includes('--jharness-smoke-approval');
+        const testTask = process.argv.includes('--jharness-smoke-task');
+        const script = testApproval
+          ? `(${smokeInterruptedApproval.toString()})()`
+          : testTask
+            ? `(${smokeRecoverableTask.toString()})()`
+            : `(${smokeTaskCenter.toString()})()`;
         setTimeout(() => {
-          win.webContents.executeJavaScript(
-            '({ title: document.title, text: document.body.innerText, url: location.href })')
+          win.webContents.executeJavaScript(script)
             .then(result => {
               console.log('JHARNESS_SMOKE_OK ' + JSON.stringify(result));
               app.quit();
@@ -378,7 +603,7 @@ else {
               console.error('JHARNESS_SMOKE_ERROR ' + error.message);
               app.exit(1);
             });
-        }, 1200);
+        }, testApproval ? 0 : 1200);
       });
     }
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -399,7 +624,7 @@ app.on('before-quit', event => {
   event.preventDefault();
   quitting = true;
   const child = backend;
-  if (activeRun) call('stop', { runId: activeRun }).catch(() => {});
+  for (const runId of activeRuns) call('stop', { runId }).catch(() => {});
   child.stdin.end();
   const timer = setTimeout(() => { child.kill(); app.quit(); }, 1800);
   child.once('exit', () => { clearTimeout(timer); app.quit(); });

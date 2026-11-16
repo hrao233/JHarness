@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { BookOpen, Brain, GitPullRequest, House, Images, Puzzle, Search, Settings, X } from 'lucide-react';
+import { BookOpen, Brain, Download, GitPullRequest, House, Images, ListChecks, Puzzle, RefreshCw, ScanText, Search, Settings, X }
+  from 'lucide-react';
 
-export function Navigation({ showSidebar, home, attachImage, openPanel, openSettings, busy, project }) {
+export function Navigation({ showSidebar, home, attachImage, openPanel, openSettings, busy, project, session }) {
   const links = [
     { label: '首页', Icon: House, action: home, expanded: showSidebar },
     { label: '添加图片', Icon: Images, action: attachImage, disabled: !project || busy },
@@ -9,6 +10,8 @@ export function Navigation({ showSidebar, home, attachImage, openPanel, openSett
     { label: '项目记忆', Icon: Brain, action: () => openPanel('memory'), disabled: !project },
     { label: 'Skills 与插件', Icon: Puzzle, action: () => openPanel('plugins') },
     { label: '搜索会话', Icon: Search, action: () => openPanel('search') },
+    { label: '任务中心', Icon: ListChecks, action: () => openPanel('tasks') },
+    { label: '上下文', Icon: ScanText, action: () => openPanel('context'), disabled: !session },
     { label: '代码审查', Icon: GitPullRequest, action: () => openPanel('review'), disabled: !project }
   ];
   return <nav className="navigation-rail" aria-label="工作台导航">
@@ -19,10 +22,17 @@ export function Navigation({ showSidebar, home, attachImage, openPanel, openSett
   </nav>;
 }
 
-const titles = { library: '资料库', plugins: 'Skills 与插件', search: '搜索会话', review: '代码审查' };
+const titles = {
+  library: '资料库', plugins: 'Skills 与插件', search: '搜索会话', tasks: '任务中心',
+  context: '上下文', review: '代码审查'
+};
+const taskStatus = {
+  queued: '排队中', running: '运行中', suspended: '等待审批',
+  interrupted: '已中断', failed: '失败', completed: '已完成', cancelled: '已取消', rejected: '已拒绝'
+};
 
 export function NavigationPanel({ panel, close, projects, project, bookmarks, openChat, removeBookmark,
-    copy, addPart, busy, api, errorText }) {
+    copy, addPart, busy, api, errorText, session }) {
   const dialog = useRef(null);
   const [query, setQuery] = useState('');
   const [result, setResult] = useState(null);
@@ -30,6 +40,9 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
   const [error, setError] = useState('');
   const [revision, setRevision] = useState(0);
   const [diff, setDiff] = useState('unstaged');
+  const [tasks, setTasks] = useState(null);
+  const [context, setContext] = useState(null);
+  const [exportState, setExportState] = useState(null);
   useEffect(() => { dialog.current.showModal(); }, []);
   useEffect(() => {
     if (!project || (panel !== 'plugins' && panel !== 'review')) return;
@@ -41,6 +54,39 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
       .catch(error => { if (live) setError(errorText(error)); });
     return () => { live = false; };
   }, [panel, project?.id, revision]);
+
+  useEffect(() => {
+    if (panel !== 'tasks') return;
+    let live = true;
+    async function loadTasks() {
+      try {
+        const value = await api.tasks();
+        if (!live) return;
+        setTasks(value);
+        setError('');
+      } catch (failure) {
+        if (live) setError(errorText(failure));
+      }
+    }
+    setTasks(null);
+    setError('');
+    void loadTasks();
+    const timer = setInterval(loadTasks, 2000);
+    return () => { live = false; clearInterval(timer); };
+  }, [api, errorText, panel, revision]);
+
+  useEffect(() => {
+    if (panel !== 'context' || !project || !session) return;
+    let live = true;
+    setContext(null);
+    setError('');
+    api.context(project.id, session.id).then(value => {
+      if (live) setContext(value);
+    }).catch(failure => {
+      if (live) setError(errorText(failure));
+    });
+    return () => { live = false; };
+  }, [api, errorText, panel, project?.id, session?.id, revision]);
 
   const needle = query.trim().toLowerCase();
   useEffect(() => {
@@ -63,6 +109,19 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
       const chat = chats.find(({ p, s }) => p.id === match.projectId && s.id === match.sessionId);
       return chat ? [{ ...chat, ...match }] : [];
     }) : [];
+
+  async function exportContext(format) {
+    if (!project || !session) return;
+    setExportState({ busy: format, message: '' });
+    try {
+      const result = await api.exportSession(project.id, session.id, format, session.title);
+      setExportState(result
+        ? { busy: '', message: '已导出到 ' + result.path }
+        : { busy: '', message: '已取消导出。' });
+    } catch (failure) {
+      setExportState({ busy: '', error: errorText(failure) });
+    }
+  }
 
   return <dialog ref={dialog} className={'dialog nav-dialog nav-' + panel} aria-label={titles[panel]}
     onCancel={event => { event.preventDefault(); close(); }}>
@@ -97,6 +156,89 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
       </div>)}
       {!bookmarks.length && <p className="muted">可以从消息的「更多操作」收藏内容。</p>}
     </div>}
+    {panel === 'tasks' && <>
+      <div className="review-head"><span>运行中与等待处理</span>
+        <button type="button" className="secondary" onClick={() => setRevision(value => value + 1)}>
+          <RefreshCw size={15}/>刷新
+        </button>
+      </div>
+      <div className="nav-list task-list">
+        {!tasks && !error && <p className="muted">正在读取任务…</p>}
+        {tasks?.map(task => <button className="menu-row task-row" disabled={busy} key={task.turnId}
+          onClick={() => {
+            const target = projects.find(value => value.id === task.projectId);
+            const chat = target?.sessions.find(value => value.id === task.sessionId);
+            if (!chat) return;
+            close();
+            void openChat(task.projectId, task.sessionId);
+          }}>
+          <ListChecks size={17}/>
+          <span className="menu-copy">
+            <strong>{task.title || task.sessionTitle || '未命名任务'}</strong>
+            <small>{task.projectName || '项目'} · {task.sessionTitle || '会话'}</small>
+          </span>
+          <span className={'task-state state-' + task.status}>{taskStatus[task.status] || task.status}</span>
+          {!!task.approvals?.length && <span className="task-badge">{task.approvals.length}</span>}
+        </button>)}
+        {tasks?.length === 0 && <p className="muted">没有运行中或等待处理的任务。</p>}
+      </div>
+    </>}
+    {panel === 'context' && <>
+      <div className="review-head"><span>{session?.title || '当前会话'}</span>
+        <div className="context-actions">
+          <button type="button" className="secondary" disabled={!!exportState?.busy}
+            onClick={() => exportContext('markdown')}><Download size={15}/>Markdown</button>
+          <button type="button" className="secondary" disabled={!!exportState?.busy}
+            onClick={() => exportContext('json')}><Download size={15}/>JSON</button>
+          <button type="button" className="secondary" onClick={() => setRevision(value => value + 1)}>
+            <RefreshCw size={15}/>刷新
+          </button>
+        </div>
+      </div>
+      {exportState?.error && <p className="error-text" role="alert">{exportState.error}</p>}
+      {exportState?.message && <p className="success-text" role="status">{exportState.message}</p>}
+      {!context && !error && <p className="muted">正在读取上下文…</p>}
+      {context && <div className="context-view">
+        <div className="context-metrics">
+          <span><b>{context.transcriptMessages}</b>条原始消息</span>
+          <span><b>{context.compactionCount}</b>次压缩</span>
+          <span><b>{context.checkpointCount}</b>个检查点</span>
+          <span><b>{context.pendingInteractions}</b>项待处理</span>
+        </div>
+        {context.branch && <div className="context-note">
+          <span>分叉自会话 {context.branch.sourceSessionId.slice(0, 8)} 的第 {context.branch.sourceSeq} 条事件。</span>
+          <button type="button" className="secondary" onClick={() => {
+            const source = projects.find(value =>
+              value.sessions.some(chat => chat.id === context.branch.sourceSessionId));
+            if (!source) return;
+            close();
+            void openChat(source.id, context.branch.sourceSessionId);
+          }}>打开来源会话</button>
+        </div>}
+        {context.lastRequest ? <>
+          <div className="context-request">
+            <strong>{context.lastRequest.model || '最近模型请求'}</strong>
+            <small>{context.lastRequest.messageCount} 条消息 · {context.lastRequest.toolCount} 个工具 · {context.lastRequest.characters} 字符</small>
+          </div>
+          {context.lastRequest.tools?.length > 0 && <details className="context-details">
+            <summary>可用工具（{context.lastRequest.tools.length}）</summary>
+            <div className="context-tags">{context.lastRequest.tools.map(name => <code key={name}>{name}</code>)}</div>
+          </details>}
+          <div className="context-messages">
+            {context.lastRequest.messages.map((message, index) => <article className="context-message" key={index}>
+              <span className={'context-role role-' + message.role}>{message.role}</span>
+              {message.name && <code>{message.name}</code>}
+              <p>{message.preview}</p>
+              {message.items.length > 0 && <div className="context-items">
+                {message.items.map((item, itemIndex) => <span key={itemIndex}>
+                  <b>{item.kind}</b>{item.source}
+                </span>)}
+              </div>}
+            </article>)}
+          </div>
+        </> : <p className="muted">当前会话还没有模型请求记录。</p>}
+      </div>}
+    </>}
     {panel === 'plugins' && <div className="nav-list">
       {!project && <p className="muted">打开项目后查看项目的 Skills 与插件。</p>}
       {project && !result && !error && <p className="muted">正在读取项目…</p>}

@@ -1,6 +1,9 @@
 # AgentScope Lite 架构与迁移规划
 
-Status: Implemented through Phase 5; Phase 6 hardening tracked in progress
+The local runtime migration is implemented through Phase 5. Phase 6 results
+and follow-up work are recorded in the [migration progress](../progress/agentscope-lite.md).
+
+Product development beyond the migration follows the [JHarness maturity roadmap](../roadmap/jharness.md).
 
 Date: 2026-11-16
 
@@ -21,7 +24,7 @@ The target is a lightweight, locally focused Java harness with:
 The migration must not mix source extraction, repository restructuring and
 behavioral rewrites in one change.
 
-## 2. Product Boundary
+## 2. Initial Desktop Delivery Scope
 
 JHarness is a Windows desktop project assistant. The first release of
 AgentScope Lite is optimized for a single local user and a local project
@@ -50,7 +53,8 @@ Out of scope for the first release:
 - automatic loading of executable plugins from an opened project.
 
 The abstractions needed to add those capabilities later remain part of the
-plugin API. Their concrete vendor implementations do not ship by default.
+plugin API. The [maturity roadmap](../roadmap/jharness.md) tracks optional
+integrations beyond the initial desktop delivery.
 
 ## 3. Target Repository Layout
 
@@ -201,6 +205,41 @@ JHarness keeps AgentScope's permission and approval safety model. Pi does not
 provide a built-in security boundary for tool execution and must not be copied
 in that area.
 
+### Durable task control plane
+
+Desktop durable conversations use `AgentSession` as the execution boundary.
+The session log records the accepted command, turn, run, pending interactions
+and terminal status. The backend projects those facts into task views; it does
+not maintain a second task database.
+
+The control plane supports:
+
+- one active execution per session with later submissions parked as queued;
+- steering input bound to the active turn;
+- approval decisions encoded as session responses;
+- restart recovery from the committed session prefix;
+- cross-session task listing for the desktop task center.
+
+The Electron main process tracks multiple active run IDs because a queued task
+can begin after an earlier task settles. The React UI may focus on one run at a
+time, but task ownership and ordering remain in Java.
+
+### Session archive and branching
+
+`SessionArchive` provides two read/write views over committed journals:
+
+- context inspection reads the latest `request/prepared` fact and projects the
+  model name, message previews, tools, rendered `HARNESS_CONTEXT` items, pending
+  interactions, compaction facts and the most recent checkpoint;
+- branching creates a new journal with a single `migration/baseline` state built
+  from the selected source prefix, followed by a `presentation/hint` source
+  marker.
+
+A branch does not copy an unfinished run or wait for the source session to stop.
+Keeping only the transcript baseline avoids inheriting stale writer ownership,
+inbox commands or active tool state. The source session remains unchanged and
+continues to hold the complete raw history.
+
 ## 6. Session and Context Model
 
 The append-only session log is the source of truth. A database is a query and
@@ -303,7 +342,10 @@ The first release does not claim that in-process plugins are a security
 sandbox. External plugins require a separate process boundary in a later
 phase.
 
-## 10. Migration Phases
+## 10. AgentScope Lite Migration Phases
+
+Phase 0–6 document the runtime migration. Product maturity stages are tracked
+in the [JHarness maturity roadmap](../roadmap/jharness.md).
 
 ### Phase 0: Baseline and version control
 

@@ -23,12 +23,12 @@ jobs:
         run: npm ci
       - name: Run full Java verification
         run: mvn -B -T1C clean verify
-      - name: Run Node integration tests and startup budgets
-        run: npm test
       - name: Build bundled runtime
         shell: pwsh
         run: |
-          & "$env:JAVA_HOME\bin\jlink.exe" --add-modules java.se,jdk.unsupported,jdk.crypto.ec,jdk.charsets,jdk.zipfs --strip-debug --no-header-files --no-man-pages --compress=zip-6 --output runtime
+          & "$env:JAVA_HOME\bin\jlink.exe" --add-modules java.se,jdk.unsupported,jdk.crypto.ec,jdk.charsets,jdk.zipfs --strip-debug --no-header-files --no-man-pages --compress=2 --output runtime
+      - name: Run Node integration tests and startup budgets
+        run: npm test
       - name: Package Windows application
         run: npm run package:win
       - name: Recheck package budgets

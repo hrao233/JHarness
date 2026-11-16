@@ -32,7 +32,8 @@ public final class DurableApprovalStore {
             String before,
             String after,
             long createdAt,
-            Status status) {}
+            Status status,
+            Status interruptedFrom) {}
 
     private static final String FILE_NAME = "approvals.json";
     private final ObjectMapper json = new ObjectMapper();
@@ -76,47 +77,40 @@ public final class DurableApprovalStore {
                         before,
                         after,
                         Instant.now().toEpochMilli(),
-                        Status.PENDING);
+                        Status.PENDING,
+                        null);
         records.add(record);
         save(records);
         return record;
     }
 
-    public synchronized boolean decide(String id, boolean allow) throws IOException {
-        var records = new ArrayList<>(list());
-        for (int i = 0; i < records.size(); i++) {
-            var record = records.get(i);
-            if (record.id().equals(id) && record.status() == Status.PENDING) {
-                records.set(i, withStatus(record, allow ? Status.APPROVED : Status.DENIED));
-                save(records);
-                return true;
-            }
-        }
-        return false;
+    public boolean decide(String id, boolean allow) throws IOException {
+        return transition(id, allow ? Status.APPROVED : Status.DENIED, Status.PENDING);
     }
 
-    public synchronized boolean settle(String id, Status status) throws IOException {
+    public boolean complete(String id) throws IOException {
+        return transition(id, Status.COMPLETED, Status.APPROVED);
+    }
+
+    public boolean cancelPending(String id) throws IOException {
+        return transition(id, Status.CANCELLED, Status.PENDING);
+    }
+
+    public boolean cancelBeforeExecution(String id) throws IOException {
+        return transition(id, Status.CANCELLED, Status.PENDING, Status.APPROVED);
+    }
+
+    public boolean dismiss(String id) throws IOException {
+        return transition(id, Status.DISMISSED, Status.INTERRUPTED);
+    }
+
+    private synchronized boolean transition(String id, Status status, Status... allowed) throws IOException {
         var records = new ArrayList<>(list());
+        var previous = List.of(allowed);
         for (int i = 0; i < records.size(); i++) {
             var record = records.get(i);
-            if (record.id().equals(id) && record.status() == Status.PENDING) {
+            if (record.id().equals(id) && previous.contains(record.status())) {
                 records.set(i, withStatus(record, status));
-                save(records);
-                return true;
-            }
-        }
-        return false;
-    }
-
-    public synchronized boolean dismiss(String id) throws IOException {
-        var records = new ArrayList<>(list());
-        for (int i = 0; i < records.size(); i++) {
-            var record = records.get(i);
-            if (record.id().equals(id)
-                    && (record.status() == Status.INTERRUPTED
-                            || record.status() == Status.PENDING
-                            || record.status() == Status.APPROVED)) {
-                records.set(i, withStatus(record, Status.DISMISSED));
                 save(records);
                 return true;
             }
@@ -170,6 +164,7 @@ public final class DurableApprovalStore {
                 record.before(),
                 record.after(),
                 record.createdAt(),
-                status);
+                status,
+                status == Status.INTERRUPTED ? record.status() : record.interruptedFrom());
     }
 }

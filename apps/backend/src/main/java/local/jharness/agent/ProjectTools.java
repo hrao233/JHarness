@@ -13,16 +13,13 @@ import java.nio.file.StandardOpenOption;
 import java.util.stream.Stream;
 
 public final class ProjectTools {
-    @FunctionalInterface
-    interface WriteApproval {
-        boolean allow(String operation, String path, String before, String after);
-    }
-
     private static final int MAX_FILE_BYTES = 64 * 1024;
+    private static final String EDIT_FAILURE = "无法编辑此文件。请检查项目路径、UTF-8 编码和 64 KiB 大小限制。";
+    private static final String CREATE_FAILURE = "无法创建文件。请确认父目录存在、文件名未被占用，且内容不超过 64 KiB。";
     private final Path root;
-    private final WriteApproval approval;
+    private final ApprovedOperation approval;
 
-    ProjectTools(Path root, WriteApproval approval) throws IOException {
+    ProjectTools(Path root, ApprovedOperation approval) throws IOException {
         this.root = root.toRealPath();
         this.approval = approval;
         if (!Files.isDirectory(this.root)) {
@@ -71,9 +68,15 @@ public final class ProjectTools {
             if (edited.equals(original)) {
                 return ToolResultBlock.success("文件内容相同，无需修改。");
             }
-            if (!approval.allow("edit_file", root.relativize(file).toString(), oldText, newText)) {
-                return ToolResultBlock.error("此次编辑未获批准，文件未更改。");
-            }
+            return approval.run("edit_file", root.relativize(file).toString(), oldText, newText,
+                    "此次编辑未获批准，文件未更改。", () -> applyEdit(path, file, original, edited));
+        } catch (IOException | IllegalArgumentException e) {
+            return ToolResultBlock.error(EDIT_FAILURE);
+        }
+    }
+
+    private ToolResultBlock applyEdit(String path, Path file, String original, String edited) {
+        try {
             if (!resolve(path).equals(file)) {
                 return ToolResultBlock.error("文件路径已发生变化，请重新读取后再编辑。");
             }
@@ -89,7 +92,7 @@ public final class ProjectTools {
             }
             return ToolResultBlock.success("已编辑 " + path);
         } catch (IOException | IllegalArgumentException e) {
-            return ToolResultBlock.error("无法编辑此文件。请检查项目路径、UTF-8 编码和 64 KiB 大小限制。");
+            return ToolResultBlock.error(EDIT_FAILURE);
         }
     }
 
@@ -108,17 +111,23 @@ public final class ProjectTools {
             if (Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
                 return ToolResultBlock.error("无法创建文件。此路径已存在。");
             }
-            if (!approval.allow("create_file", root.relativize(file).toString(), "", content)) {
-                return ToolResultBlock.error("此次创建未获批准。");
-            }
-            if (!resolve(root.relativize(candidate.getParent()).toString()).equals(parent)) {
+            return approval.run("create_file", root.relativize(file).toString(), "", content,
+                    "此次创建未获批准。", () -> applyCreate(path, candidate, file, content));
+        } catch (IOException | IllegalArgumentException e) {
+            return ToolResultBlock.error(CREATE_FAILURE);
+        }
+    }
+
+    private ToolResultBlock applyCreate(String path, Path candidate, Path file, String content) {
+        try {
+            if (!resolve(root.relativize(candidate.getParent()).toString()).equals(file.getParent())) {
                 return ToolResultBlock.error("父目录已发生变化，请重新确认后再创建。");
             }
             Files.writeString(file, content, StandardCharsets.UTF_8,
                     StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
             return ToolResultBlock.success("已创建 " + path);
         } catch (IOException | IllegalArgumentException e) {
-            return ToolResultBlock.error("无法创建文件。请确认父目录存在、文件名未被占用，且内容不超过 64 KiB。");
+            return ToolResultBlock.error(CREATE_FAILURE);
         }
     }
 

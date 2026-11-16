@@ -1,9 +1,10 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { ArrowDown, Bookmark, Check, Copy, Ellipsis, FileText, Quote } from 'lucide-react';
+import { ArrowDown, Bookmark, Check, Copy, Ellipsis, FileText, GitBranch, Quote } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
-export function Conversation({ items, sessionId, children, status, copy, quote, saved, onSave, run, jump, scroll }) {
+export function Conversation({ items, sessionId, children, status, copy, quote, saved, onSave, onFork,
+    run, jump, scroll }) {
   const rail = useRef(null);
   const thread = useRef(null);
   const follow = useRef(true);
@@ -128,7 +129,7 @@ export function Conversation({ items, sessionId, children, status, copy, quote, 
           : <Message key={sessionId + ':' + index} item={item} turn={turn}
             bookmark={saved.find(value => value.sessionId === sessionId && (value.messageId
               ? value.messageId === item.id : value.turn === turn && value.role === item.role && value.text === item.text))}
-            copy={copy} quote={quote} onSave={onSave} canSave={!!item.id && !run}/>)}
+            copy={copy} quote={quote} onSave={onSave} onFork={onFork} canSave={!!item.id && !run}/>)}
         {status && <p className="muted" role="status">{status}</p>}
       </div>
     </div>
@@ -137,7 +138,7 @@ export function Conversation({ items, sessionId, children, status, copy, quote, 
   </div>;
 }
 
-function Message({ item, turn, bookmark, copy, quote, onSave, canSave }) {
+function Message({ item, turn, bookmark, copy, quote, onSave, onFork, canSave }) {
   const [copied, setCopied] = useState(false);
   const reset = useRef(null);
   const menu = useRef(null);
@@ -162,6 +163,8 @@ function Message({ item, turn, bookmark, copy, quote, onSave, canSave }) {
       <button type="button" aria-label={copied ? '已复制' : '复制消息'} title={copied ? '已复制' : '复制消息'}
         onClick={copyMessage}>{copied ? <Check size={15}/> : <Copy size={15}/>}</button>
       <button type="button" disabled={!quote} aria-label="引用到输入栏" title="引用到输入栏" onClick={() => quote(item.text)}><Quote size={15}/></button>
+      {canSave && onFork && <button type="button" aria-label="从这里分叉会话" title="从这里分叉会话"
+        onClick={() => onFork({ item, turn })}><GitBranch size={15}/></button>}
       {canSave && turn > 0 && <details ref={menu} className="message-menu" onBlur={event => {
         if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false;
       }} onKeyDown={event => {

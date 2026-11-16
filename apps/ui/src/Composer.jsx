@@ -1,19 +1,20 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ArrowUp, Check, ChevronDown, ChevronRight, FileText, FolderOpen, Hand, Image, Paperclip, Plus, TriangleAlert,
-  Puzzle, ShieldAlert, ShieldCheck, Square, X, Zap } from 'lucide-react';
+import { ArrowUp, Check, ChevronDown, ChevronRight, FileText, FolderOpen, Hand, History, Image, ListPlus, Paperclip, Plus,
+  TriangleAlert, Puzzle, ShieldAlert, ShieldCheck, Square, X, Zap } from 'lucide-react';
 
 const permissionOptions = [
   { id: 'ask', label: '请求批准', description: '每次修改或创建项目文件前询问', Icon: Hand },
   { id: 'assist', label: '帮我批准', description: '用当前模型单独审查拟议改动。审查不确定时由你决定', Icon: ShieldCheck },
+  { id: 'durable', label: '可续跑任务', description: '支持读取、编辑和创建项目文件。写入前由你批准，任务中断后可继续', Icon: History },
   { id: 'full', label: '完全访问权限', description: '允许项目内的可用文件操作，无需逐次批准', Icon: ShieldAlert }
 ];
 export const effortLabels = { none: '关闭', minimal: '最低', low: '低', medium: '中',
   high: '高', xhigh: '很高', max: '极高' };
 const partIcons = { file: FileText, folder: FolderOpen, image: Image, skill: FileText, plugin: Puzzle };
 
-export function Composer({ draft, setDraft, project, loading, run, send, stop, parts, remove, attach,
+export function Composer({ draft, setDraft, project, loading, sendBlocked, run, send, stop, parts, remove, attach,
     availableParts, loadParts, addPart, permission, setPermission, models, modelId, model,
-    defaultModelId, effort, setEffort, fast, setFast, selectModel, settings }) {
+    defaultModelId, effort, setEffort, fast, setFast, selectModel, settings, canSteer, queueTask }) {
   const [menu, setMenu] = useState(null);
   const [confirmFullAccess, setConfirmFullAccess] = useState(false);
   const box = useRef(null);
@@ -80,8 +81,11 @@ export function Composer({ draft, setDraft, project, loading, run, send, stop, p
         <button type="button" aria-label={'移除 ' + part.name} disabled={!!run} onClick={() => remove(part)}><X size={14}/></button>
       </span>;
     })}</div>}
-    <textarea rows="2" maxLength={16000} value={draft} placeholder={project ? '和 JHarness 一起工作' : '先打开项目文件夹'}
-      aria-label="消息" disabled={!project || loading} readOnly={!!run} onChange={event => setDraft(event.target.value)}
+    <textarea rows="2" maxLength={16000} value={draft}
+      placeholder={!project ? '先打开项目文件夹' : run ? '补充当前任务，或排队后续任务'
+        : '和 JHarness 一起工作'}
+      aria-label="消息" disabled={!project || loading} readOnly={!!run && !canSteer}
+      onChange={event => setDraft(event.target.value)}
       onKeyDown={event => {
         if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
           setMenu(null);
@@ -184,8 +188,16 @@ export function Composer({ draft, setDraft, project, loading, run, send, stop, p
             <button type="button" className="menu-row" onClick={() => { setMenu(null); settings(); }}><Plus size={17}/>管理模型</button>
           </div>}
         </div>
-        {run ? <button type="button" className="send" aria-label="停止" onClick={stop}><Square size={14}/></button>
-          : <button type="submit" className="send" aria-label="发送" disabled={!project || (!draft.trim() && !parts.length) || loading}>
+        {run ? <>
+          {canSteer && draft.trim() && <>
+            <button type="button" className="compose-button icon-button queue-task-button"
+              title="排队作为后续任务" aria-label="排队作为后续任务" onClick={queueTask}><ListPlus size={18}/></button>
+            <button type="submit" className="send" aria-label="补充当前任务"><ArrowUp size={20}/></button>
+          </>}
+          <button type="button" className="send" aria-label="停止" onClick={stop}><Square size={14}/></button>
+        </>
+          : <button type="submit" className="send" aria-label="发送"
+            disabled={!project || (!draft.trim() && !parts.length) || loading || sendBlocked}>
             <ArrowUp size={20}/>
           </button>}
       </div>
@@ -217,25 +229,131 @@ function FullAccessDialog({ finish }) {
   </dialog>;
 }
 
-export function ApprovalCard({ item, decide }) {
+export function InterruptedApprovals({ projectId, api, errorText }) {
+  const [records, setRecords] = useState([]);
+  const [loadError, setLoadError] = useState('');
+  const [dismissError, setDismissError] = useState('');
+  const [dismissing, setDismissing] = useState(null);
+  const [retry, setRetry] = useState(0);
+
+  useEffect(() => {
+    let mounted = true;
+    api.listInterruptedApprovals(projectId).then(value => {
+      if (mounted) setRecords(value);
+    }).catch(error => {
+      if (mounted) setLoadError(errorText(error));
+    });
+    return () => { mounted = false; };
+  }, [api, errorText, projectId, retry]);
+
+  async function dismiss(id) {
+    setDismissing(id);
+    setDismissError('');
+    try {
+      await api.dismissInterruptedApproval(projectId, id);
+      setRecords(previous => previous.filter(item => item.id !== id));
+    } catch (error) {
+      setDismissError(errorText(error));
+    } finally {
+      setDismissing(null);
+    }
+  }
+
+  if (loadError) return <div className="interrupted-approvals" role="alert">
+    无法读取中断的审批。{loadError}
+    <button type="button" className="secondary" onClick={() => { setLoadError(''); setRetry(value => value + 1); }}>重试</button>
+  </div>;
+  if (!records.length) return null;
+  return <details className="interrupted-approvals">
+    <summary>中断的审批（{records.length}）</summary>
+    {dismissError && <p className="error-text" role="alert">{dismissError}</p>}
+    <div className="interrupted-approval-list">
+      {records.map(item => <ApprovalCard key={item.id} item={item} dismiss={dismiss}
+        disabled={dismissing !== null} dismissing={dismissing === item.id}/>)}
+    </div>
+  </details>;
+}
+
+export function TaskRecovery({ task, blocked, canceling, resume, cancel }) {
+  const [answers, setAnswers] = useState({});
+  const [outcomes, setOutcomes] = useState({});
+  const { approvals = [], uncertain } = task;
+  const uncertainCalls = task.uncertainCalls || [];
+  const needsApproval = approvals.length > 0;
+  const approvalsReady = approvals.every(item => typeof answers[item.id] === 'boolean');
+  const outcomesReady = !uncertain || (uncertainCalls.length > 0
+    && uncertainCalls.every(item => ['success', 'error'].includes(outcomes[item.id])));
+  const canResume = approvalsReady && outcomesReady;
+  const title = uncertain ? '任务执行结果待核对'
+    : needsApproval ? '任务等待审批' : task.status === 'interrupted' ? '任务已中断' : '任务等待继续';
+
+  function choose(id, allow) {
+    setAnswers(previous => ({ ...previous, [id]: allow }));
+  }
+
+  return <section className="recoverable-task" aria-label={title}>
+    <div className="approval-title"><History size={18}/><strong>{title}</strong></div>
+    {uncertain && <div className="uncertain-calls">
+      <p className="muted">请先在项目中核对这些工具操作的结果，再选择实际状态。</p>
+      {uncertainCalls.map(item => <div className="uncertain-call" key={item.id}>
+        <span><code>{item.name}</code><small>{item.id}</small></span>
+        <div>
+          <button type="button" className="secondary" disabled={blocked} aria-pressed={outcomes[item.id] === 'error'}
+            onClick={() => setOutcomes(previous => ({ ...previous, [item.id]: 'error' }))}>未执行</button>
+          <button type="button" className="secondary" disabled={blocked} aria-pressed={outcomes[item.id] === 'success'}
+            onClick={() => setOutcomes(previous => ({ ...previous, [item.id]: 'success' }))}>已完成</button>
+        </div>
+      </div>)}
+    </div>}
+    {needsApproval && <div className="recoverable-task-approvals">
+      {approvals.map(item => <ApprovalCard key={item.id} item={item}>
+        <>
+          <button type="button" className="secondary" disabled={blocked} aria-pressed={answers[item.id] === false}
+            onClick={() => choose(item.id, false)}>拒绝</button>
+          <button type="button" className="secondary" disabled={blocked} aria-pressed={answers[item.id] === true}
+            onClick={() => choose(item.id, true)}>批准</button>
+        </>
+      </ApprovalCard>)}
+    </div>}
+    <div className="approval-actions recoverable-task-actions">
+      <button type="button" className="secondary" disabled={blocked || uncertain} onClick={cancel}>
+        {canceling ? '正在取消…' : '取消任务'}
+      </button>
+      <button type="button" className="primary" disabled={blocked || !canResume}
+        onClick={() => resume(
+          Object.fromEntries(approvals.map(item => [item.id, answers[item.id]])),
+          outcomes)}>
+        {uncertain ? '提交核对并继续' : needsApproval ? '提交决定并继续' : '继续任务'}
+      </button>
+    </div>
+  </section>;
+}
+
+export function ApprovalCard({ item, decide, dismiss, disabled, dismissing, children }) {
   const command = item.operation === 'run_command';
   const web = item.operation === 'web_fetch' || item.operation === 'web_search';
-  return <div className="approval-card" role="alert">
+  const interruption = item.interruptedFrom === 'PENDING' ? '等待批准时中断。'
+    : item.interruptedFrom === 'APPROVED' ? '已记录批准，执行结果待核对。' : '此记录已中断，执行结果待核对。';
+  return <div className="approval-card" role={!dismiss && children === undefined ? 'alert' : undefined}>
     <div className="approval-title"><ShieldAlert size={18}/><strong>{command ? '运行 PowerShell 命令'
       : web ? (item.operation === 'web_search' ? '搜索网页' : '读取网页')
       : item.operation === 'create_file' ? '创建文件' : '编辑文件'}</strong>
       {item.path && <code>{item.path}</code>}</div>
+    {dismiss && <p className="muted">{interruption}清除记录只会将其从此处移除。</p>}
     {command || web ? <>
-      <div>{command ? '命令以当前 Windows 用户权限运行，可以访问项目目录之外的资源。'
-        : '批准后，下面的地址或搜索内容将用于发起网络请求。'}</div>
-      <pre className="approval-command" tabIndex={0} aria-label={command ? '待批准的 PowerShell 命令' : '待批准的网络请求'}>{item.after}</pre>
+      {!dismiss && <div>{command ? '命令以当前 Windows 用户权限运行，可以访问项目目录之外的资源。'
+        : '批准后，下面的地址或搜索内容将用于发起网络请求。'}</div>}
+      <pre className="approval-command" tabIndex={0} aria-label={command ? 'PowerShell 命令' : '网络请求'}>{item.after}</pre>
     </> : <details><summary>查看变更内容</summary>
       {!!item.before && <pre className="before">{item.before}</pre>}
       <pre className="after">{item.after || '（移除选中的原文）'}</pre>
     </details>}
-    <div className="approval-actions">
+    {children !== null && <div className="approval-actions">{children ?? (dismiss ?
+      <button type="button" className="secondary" disabled={disabled} onClick={() => dismiss(item.id)}>
+        {dismissing ? '正在清除…' : '清除记录'}
+      </button> : <>
       <button className="secondary" onClick={() => decide(item.id, false)}>拒绝</button>
       <button className="primary" onClick={() => decide(item.id, true)}>批准这一次</button>
-    </div>
+    </>)}</div>}
   </div>;
 }

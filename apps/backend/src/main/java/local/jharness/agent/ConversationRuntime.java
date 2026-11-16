@@ -2,6 +2,7 @@ package local.jharness.agent;
 
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.message.Msg;
+import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.session.SessionKey;
 import io.agentscope.core.session.SessionLog;
@@ -17,6 +18,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -27,6 +29,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import local.jharness.memory.ProjectMemory;
 import reactor.core.Disposable;
 import reactor.core.Disposables;
@@ -35,7 +38,7 @@ import reactor.core.scheduler.Schedulers;
 
 public final class ConversationRuntime implements AutoCloseable {
     private static final String AGENT_ID = "jharness";
-    private static final int MAX_STEPS = 18;
+    static final int MAX_STEPS = 18;
     private static final String PROMPT = """
             你是 JHarness 的本地项目助手。用用户的语言回复，优先给出简洁、可以核查的答案。
             回答有关项目的问题时，先读取相关文件。引用你实际查到的项目相对路径。
@@ -65,6 +68,7 @@ public final class ConversationRuntime implements AutoCloseable {
     private final Function<Throwable, String> describeError;
     private final Map<String, Disposable.Swap> runs = new ConcurrentHashMap<>();
     private final Map<String, Approval> approvals = new ConcurrentHashMap<>();
+    private final Map<Path, DurableApprovalStore> approvalStores = new HashMap<>();
 
     public ConversationRuntime(Listener listener, Function<Throwable, String> describeError) {
         this.listener = listener;
@@ -77,39 +81,24 @@ public final class ConversationRuntime implements AutoCloseable {
         if (!List.of("ask", "assist", "full").contains(permission)) {
             throw new IllegalArgumentException("无效的审批模式。");
         }
+        var approvalStore = approvalStore(request.workspace());
+        ApprovedOperation requireApproval = (operation, path, before, after, deniedMessage, action) ->
+                executeApproved(runId, approvalStore, operation, path, before, after, deniedMessage, action);
         var execution = Disposables.swap();
         synchronized (runs) {
             if (runs.putIfAbsent(runId, execution) != null) {
                 throw new IllegalArgumentException("任务已启动。");
             }
         }
-        var approvalStore = new DurableApprovalStore(request.workspace());
-        var command = new ProjectCommand(request.project(), text ->
-                requestApproval(
-                        runId, approvalStore, "run_command", request.project().toString(), "", text));
+        var command = new ProjectCommand(request.project(), requireApproval);
         try {
-            approvalStore.recoverInterrupted();
             var toolkit = new Toolkit();
             var review = permission.equals("assist") ? new WriteReview(request.auxiliary(), request.task()) : null;
-            toolkit.registerTool(new ProjectTools(request.project(), (operation, path, before, after) ->
-                    allowWrite(
-                            runId,
-                            approvalStore,
-                            permission,
-                            review,
-                            operation,
-                            path,
-                            before,
-                            after)));
+            toolkit.registerTool(new ProjectTools(request.project(), (operation, path, before, after, deniedMessage, action) ->
+                    executeWrite(runId, permission, review, requireApproval, operation, path, before, after,
+                            deniedMessage, action)));
             toolkit.registerTool(command);
-            toolkit.registerTool(new ApprovedWeb((operation, value) ->
-                    requestApproval(
-                            runId,
-                            approvalStore,
-                            operation,
-                            operation.equals("web_search") ? "api.tavily.com" : "",
-                            "",
-                            value)));
+            toolkit.registerTool(new ApprovedWeb(requireApproval));
             var events = new ConversationEvents(MAX_STEPS, (type, data) -> listener.event(runId, type, data));
             var builder = builder(request, toolkit).middleware(events);
             execution.update(Flux.using(builder::build,
@@ -131,7 +120,7 @@ public final class ConversationRuntime implements AutoCloseable {
         }
     }
 
-    private static HarnessAgent.Builder builder(Request request, Toolkit toolkit) throws Exception {
+    static HarnessAgent.Builder builder(Request request, Toolkit toolkit) throws Exception {
         var builder = HarnessAgent.builder().name("JHarness").agentId(AGENT_ID)
                 .sysPrompt(PROMPT).model(request.model()).workspace(request.workspace())
                 .filesystem(new LocalFilesystemSpec().project(request.project()))
@@ -173,6 +162,26 @@ public final class ConversationRuntime implements AutoCloseable {
         return store(workspace).open(new SessionKey(context.getUserId(), AGENT_ID, context.getSessionId()), context);
     }
 
+    private synchronized DurableApprovalStore approvalStore(Path workspace) throws IOException {
+        Path key = workspace.toAbsolutePath().normalize();
+        var store = approvalStores.get(key);
+        if (store == null) {
+            store = new DurableApprovalStore(key);
+            // Recover previous-process approvals before any run can add records to this workspace.
+            store.recoverInterrupted();
+            approvalStores.put(key, store);
+        }
+        return store;
+    }
+
+    public List<DurableApprovalStore.ApprovalRecord> listApprovals(Path workspace) throws IOException {
+        return approvalStore(workspace).list();
+    }
+
+    public boolean dismissApproval(Path workspace, String id) throws IOException {
+        return approvalStore(workspace).dismiss(id);
+    }
+
     public <T> T whileIdle(Callable<T> action) throws Exception {
         synchronized (runs) {
             if (!runs.isEmpty()) throw new IllegalStateException("请在当前任务结束后编辑记忆。");
@@ -208,10 +217,7 @@ public final class ConversationRuntime implements AutoCloseable {
                 .forEach(entry -> {
                     var approval = entry.getValue();
                     try {
-                        approval.store()
-                                .settle(
-                                        entry.getKey(),
-                                        DurableApprovalStore.Status.CANCELLED);
+                        approval.store().cancelPending(entry.getKey());
                     } catch (IOException ignored) {
                         // A later startup recovery will surface the unresolved state.
                     }
@@ -224,28 +230,57 @@ public final class ConversationRuntime implements AutoCloseable {
         return execution != null && !execution.isDisposed();
     }
 
-    private boolean allowWrite(
+    private ToolResultBlock executeWrite(
             String runId,
-            DurableApprovalStore approvalStore,
             String permission,
             WriteReview review,
+            ApprovedOperation requireApproval,
             String operation,
             String path,
             String before,
-            String after) {
-        if (!isRunning(runId)) return false;
-        if (permission.equals("full")) return true;
+            String after,
+            String deniedMessage,
+            Supplier<ToolResultBlock> action) {
+        if (!isRunning(runId)) return ToolResultBlock.error(deniedMessage);
+        if (permission.equals("full")) return action.get();
         if (review != null) {
             listener.event(runId, "review", Map.of("path", path, "decision", "PENDING"));
             var decision = review.assess(operation, path, before, after);
-            if (!isRunning(runId)) return false;
+            if (!isRunning(runId)) return ToolResultBlock.error(deniedMessage);
             listener.event(runId, "review", Map.of("path", path, "decision", decision.name()));
-            if (decision != WriteReview.Decision.ASK) return decision == WriteReview.Decision.APPROVE;
+            if (decision == WriteReview.Decision.APPROVE) return action.get();
+            if (decision == WriteReview.Decision.DENY) return ToolResultBlock.error(deniedMessage);
         }
-        return requestApproval(runId, approvalStore, operation, path, before, after);
+        return requireApproval.run(operation, path, before, after, deniedMessage, action);
     }
 
-    private boolean requestApproval(
+    private ToolResultBlock executeApproved(
+            String runId,
+            DurableApprovalStore store,
+            String operation,
+            String path,
+            String before,
+            String after,
+            String deniedMessage,
+            Supplier<ToolResultBlock> action) {
+        String id = requestApproval(runId, store, operation, path, before, after);
+        if (id == null) return ToolResultBlock.error(deniedMessage);
+        if (!isRunning(runId)) {
+            cancelBeforeExecution(store, id);
+            return ToolResultBlock.error(deniedMessage);
+        }
+        var result = action.get();
+        if (!Thread.currentThread().isInterrupted()) {
+            try {
+                store.complete(id);
+            } catch (IOException error) {
+                listener.event(runId, "error", Map.of("message", "工具已返回，无法保存审批处理结果。"));
+            }
+        }
+        return result;
+    }
+
+    private String requestApproval(
             String runId,
             DurableApprovalStore store,
             String operation,
@@ -253,34 +288,39 @@ public final class ConversationRuntime implements AutoCloseable {
             String before,
             String after) {
         String id = UUID.randomUUID().toString();
+        boolean allowed = false;
         try {
             store.add(id, runId, operation, path, before, after);
             var approval = new Approval(runId, store, new CompletableFuture<>());
             approvals.put(id, approval);
-            if (!isRunning(runId)) return false;
+            if (!isRunning(runId)) return null;
             listener.event(runId, "approval", Map.of("id", id, "operation", operation, "path", path,
                     "before", before, "after", after));
-            return approval.decision().get(10, TimeUnit.MINUTES);
+            allowed = approval.decision().get(10, TimeUnit.MINUTES);
+            return allowed ? id : null;
         } catch (IOException error) {
             listener.event(
                     runId,
                     "error",
                     Map.of("message", "无法持久化审批请求，已拒绝执行有副作用的操作。"));
-            return false;
+            return null;
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
-            return false;
+            return null;
         } catch (ExecutionException | TimeoutException error) {
-            return false;
+            return null;
         } finally {
             approvals.remove(id);
-            try {
-                store.settle(id, DurableApprovalStore.Status.CANCELLED);
-            } catch (IOException ignored) {
-                // The persisted PENDING record will be marked INTERRUPTED on restart.
-            }
+            if (!allowed) cancelBeforeExecution(store, id);
             listener.event(runId, "approval-end", Map.of("id", id));
         }
     }
 
+    private static void cancelBeforeExecution(DurableApprovalStore store, String id) {
+        try {
+            store.cancelBeforeExecution(id);
+        } catch (IOException ignored) {
+            // A later startup recovery will surface the unresolved state.
+        }
+    }
 }

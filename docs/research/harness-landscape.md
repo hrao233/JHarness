@@ -5,6 +5,10 @@ Date: 2026-11-16
 This document records the architectural patterns reviewed for JHarness. It is
 input to design decisions, not a command to copy another project.
 
+[Hermes and Pi capability inventory](hermes-pi-capabilities.md) traces the
+features in the local snapshots to product entry points, implementations and
+test cases. It also maps the findings to the JHarness roadmap.
+
 ## AgentScope Java
 
 Role: Java reference for core/harness separation.

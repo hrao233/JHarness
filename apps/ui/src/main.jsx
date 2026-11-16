@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ChevronDown, ChevronRight, CircleHelp, FolderOpen, FolderPlus, MessageSquare, Plus, X, FileText } from 'lucide-react';
-import { ApprovalCard, Composer, effortLabels } from './Composer.jsx';
+import { ApprovalCard, Composer, InterruptedApprovals, TaskRecovery, effortLabels } from './Composer.jsx';
 import { Conversation } from './Conversation.jsx';
 import { Navigation, NavigationPanel } from './Navigation.jsx';
 import { MemoryPanel } from './MemoryPanel.jsx';
@@ -24,6 +24,10 @@ function App() {
   const [fast, setFast] = useState(false);
   const [modelId, setModelId] = useState('');
   const [approvals, setApprovals] = useState([]);
+  const [task, setTask] = useState(null);
+  const [taskPending, setTaskPending] = useState(false);
+  const [taskError, setTaskError] = useState('');
+  const [cancelingTask, setCancelingTask] = useState(false);
   const [collapsed, setCollapsed] = useState({});
   const [run, setRun] = useState(null);
   const [phase, setPhase] = useState(null);
@@ -51,6 +55,19 @@ function App() {
     return state;
   }
 
+  async function loadTask(target) {
+    setTaskPending(true);
+    setTaskError('');
+    try {
+      const result = await api.task(target.project, target.session);
+      if (selection.current === target) setTask(result.turnId ? result : null);
+    } catch (error) {
+      if (selection.current === target) setTaskError(errText(error));
+    } finally {
+      if (selection.current === target) setTaskPending(false);
+    }
+  }
+
   async function select(p, s) {
     if (selection.current?.project === p.id && selection.current?.session === s?.id) return;
     setParts([]);
@@ -67,8 +84,13 @@ function App() {
     setItems([]);
     setJump(null);
     setNotice('');
+    setTask(null);
+    setTaskError('');
+    setTaskPending(false);
+    setCancelingTask(false);
     setLoading(Boolean(s));
     if (!s) return;
+    void loadTask(next);
     try {
       const history = await api.history(p.id, s.id);
       if (selection.current === next) setItems(history);
@@ -95,6 +117,7 @@ function App() {
         setRun(null);
         setPhase(null);
         setApprovals([]);
+        if (data.status && selection.current === current.selection) void loadTask(current.selection);
         return;
       }
       if (event === 'approval') return setApprovals(previous => [...previous, data]);
@@ -226,6 +249,18 @@ function App() {
     } catch (error) { setNotice(errText(error)); }
   }
 
+  async function forkMessage({ item }) {
+    if (!project || !session || run || !item.id) return;
+    try {
+      const branch = await api.forkSession(project.id, session.id, item.id);
+      await refresh();
+      await select(project, branch);
+      setNotice('已从所选消息创建分叉会话。');
+    } catch (error) {
+      setNotice(errText(error));
+    }
+  }
+
   async function openChat(projectId, sessionId, anchor) {
     const target = data.projects.find(value => value.id === projectId);
     const chat = target?.sessions.find(value => value.id === sessionId);
@@ -245,10 +280,26 @@ function App() {
   async function send(event) {
     event?.preventDefault();
     const text = draft.trim() || (parts.length ? '请查看附加内容。' : '');
-    if (!text || running.current || loading) return;
+    if (!text || loading || task || taskPending || taskError) return;
     if (!model?.hasKey) return setShowSettings(true);
     if (!project) return openProject();
     setNotice('');
+    if (running.current) {
+      if (perm !== 'durable' || parts.length || !session) return;
+      const id = running.current.id;
+      try {
+        if (!await api.steer(id, text)) {
+          throw new Error('当前任务已停止接收补充指令。');
+        }
+        setItems(previous => [...previous, { id: crypto.randomUUID(), role: 'user', text, runId: id }]);
+        setDraft('');
+        setJump({ turn: 'latest' });
+      } catch (error) {
+        setNotice(errText(error));
+        void loadTask(selection.current);
+      }
+      return;
+    }
     let target = session;
     const id = crypto.randomUUID();
     const reservation = { id, selection: selection.current, submitting: true };
@@ -290,6 +341,28 @@ function App() {
     refresh().catch(error => setNotice(errText(error)));
   }
 
+  async function queueTask() {
+    const text = draft.trim();
+    const target = selection.current;
+    if (!text || !running.current || perm !== 'durable' || parts.length || loading
+      || !target?.session || !project) return;
+    if (!model?.hasKey) return setShowSettings(true);
+    const id = crypto.randomUUID();
+    setNotice('');
+    try {
+      if (!await api.queueTask(project.id, target.session, text, id,
+        { modelId, effort: effectiveEffort, fast: effectiveFast })) {
+        throw new Error('无法添加排队任务。');
+      }
+      setItems(previous => [...previous, { id, role: 'user', text, runId: id, queued: true }]);
+      setDraft('');
+      setJump({ turn: 'latest' });
+      refresh().catch(error => setNotice(errText(error)));
+    } catch (error) {
+      setNotice(errText(error));
+    }
+  }
+
   function stop() {
     const current = running.current;
     if (!current) return;
@@ -297,8 +370,58 @@ function App() {
     else api.stop(current.id).catch(error => setNotice(errText(error)));
   }
 
+  async function resumeTask(answers, outcomes = {}) {
+    const target = selection.current;
+    if (!target?.session || !task || running.current || taskPending || taskError || cancelingTask) return;
+    if (task.uncertain && !Object.keys(outcomes).length) return;
+    if (!model?.hasKey) return setShowSettings(true);
+    const id = crypto.randomUUID();
+    const reservation = { id, selection: target, submitting: true };
+    running.current = reservation;
+    setRun(id);
+    setNotice('');
+    try {
+      const options = { modelId, effort: effectiveEffort, fast: effectiveFast };
+      const result = task.uncertain
+        ? await api.reconcileTask(target.project, target.session, task.turnId, id, answers, outcomes, options)
+        : await api.resumeTask(target.project, target.session, task.turnId, id, answers, options);
+      if (result === false) {
+        throw new Error('任务状态已更新，请查看当前任务。');
+      }
+      reservation.submitting = false;
+      setJump({ turn: 'latest' });
+      if (reservation.stopRequested && running.current === reservation) await api.stop(id);
+    } catch (error) {
+      if (running.current === reservation && reservation.submitting) {
+        running.current = null;
+        setRun(null);
+        if (selection.current === target) void loadTask(target);
+      }
+      if (selection.current === target) setNotice(errText(error));
+    }
+  }
+
+  async function cancelTask() {
+    const target = selection.current;
+    if (!target?.session || !task || task.uncertain || running.current || taskPending || taskError || cancelingTask) return;
+    setCancelingTask(true);
+    setNotice('');
+    try {
+      if (!await api.cancelTask(target.project, target.session, task.turnId)) {
+        throw new Error('任务状态已更新，请查看当前任务。');
+      }
+    } catch (error) {
+      if (selection.current === target) setNotice(errText(error));
+    } finally {
+      if (selection.current === target) {
+        setCancelingTask(false);
+        void loadTask(target);
+      }
+    }
+  }
+
   return <div className={'app' + (showSidebar ? '' : ' sidebar-hidden')}>
-    <Navigation project={project} busy={!!run} showSidebar={showSidebar}
+    <Navigation project={project} session={session} busy={!!run} showSidebar={showSidebar}
       home={() => setShowSidebar(value => !value)} attachImage={() => attach('image')}
       openPanel={setPanel} openSettings={() => setShowSettings(true)}/>
     <aside className="sidebar" aria-label="项目和会话" hidden={!showSidebar}>
@@ -341,6 +464,7 @@ function App() {
             + ({ acting: '执行工具', reasoning: '请求模型', summary: '整理本轮结果' }[phase.phase] || '执行中')
           : '正在准备…') : null}
         copy={copy} quote={run || loading ? null : quote} saved={bookmarks} onSave={saveBookmark}
+        onFork={run || loading ? null : forkMessage}
         run={run} jump={jump} scroll={scroll}>
           {!items.length && !loading && <div className="welcome">
             <div className="welcome-icon"><MessageSquare size={24} strokeWidth={1.6}/></div>
@@ -355,9 +479,16 @@ function App() {
       <div className="bottom"><div className="composer-wrap">
         {!!approvals.length && <div className="approvals">{approvals.map(item =>
           <ApprovalCard key={item.id} item={item} decide={decide}/>)}</div>}
+        {!run && task && <TaskRecovery key={task.turnId} task={task} canceling={cancelingTask}
+          blocked={taskPending || !!taskError || cancelingTask} resume={resumeTask} cancel={cancelTask}/>}
+        {taskError && <div className="notice" role="alert">无法读取任务状态。{taskError}
+          <button type="button" onClick={() => loadTask(selection.current)}>重试</button></div>}
+        {project && <InterruptedApprovals key={project.id} projectId={project.id} api={api} errorText={errText}/>}
         {notice && <div className="notice" role="alert"><CircleHelp size={16}/>{notice}
           <button aria-label="关闭提示" onClick={() => setNotice('')}><X size={15}/></button></div>}
-        <Composer draft={draft} setDraft={setDraft} project={project} loading={loading} run={run} send={send} stop={stop}
+        <Composer draft={draft} setDraft={setDraft} project={project} loading={loading}
+          sendBlocked={!!task || taskPending || !!taskError} run={run} send={send} stop={stop}
+          canSteer={!!run && perm === 'durable' && !parts.length} queueTask={queueTask}
           parts={parts} remove={part => setParts(previous => previous.filter(value => value !== part))}
           attach={attach} availableParts={availableParts} loadParts={loadParts} addPart={part => appendParts([part])}
           permission={perm} setPermission={setPerm} models={data.models} modelId={modelId} model={model}
@@ -369,7 +500,7 @@ function App() {
       api={api} close={() => setPanel(null)} onAuto={enabled => setData(previous => ({ ...previous,
         projects: previous.projects.map(p => p.id === project.id ? { ...p, autoMemory: enabled } : p) }))}/>}
     {panel && panel !== 'memory' && <NavigationPanel key={panel} panel={panel} close={() => setPanel(null)} projects={data.projects}
-      project={project} bookmarks={bookmarks} openChat={openChat} removeBookmark={removeBookmark}
+      project={project} session={session} bookmarks={bookmarks} openChat={openChat} removeBookmark={removeBookmark}
       copy={copy} addPart={part => appendParts([part])} busy={!!run} api={api} errorText={errText}/>}
     {showSettings && <ModelSettings models={data.models} defaultModelId={data.defaultModelId} selectedId={model?.id}
       close={() => setShowSettings(false)} onSave={({ savedModelId, ...state }) => {

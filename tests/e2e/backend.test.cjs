@@ -32,17 +32,30 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
   const requests = [];
   let backendLog = '';
   let websiteReads = 0;
+  let stalledReads = 0;
   let endless = false;
+  let holdForSteer = false;
+  let releaseHeldModel;
   let reviewResponses = [];
   const server = createServer(async (request, response) => {
     if (request.url === '/fixture-page') {
       websiteReads++;
       return response.end('TEST-WEB-PAGE');
     }
+    if (request.url === '/in-flight-page') {
+      stalledReads++;
+      server.emit('in-flight-read');
+      return;
+    }
     let raw = '';
     for await (const chunk of request) raw += chunk;
     const body = JSON.parse(raw);
     requests.push({ path: request.url, auth: request.headers.authorization, body });
+    if (holdForSteer) {
+      holdForSteer = false;
+      server.emit('model-held');
+      await new Promise(resolve => { releaseHeldModel = resolve; });
+    }
     const reviewing = body.messages.some(message => JSON.stringify(message.content).includes('review one proposed project file write'));
     const extracting = body.messages.some(message => JSON.stringify(message.content).includes('memory extraction assistant'));
     const consolidating = body.messages.some(message => JSON.stringify(message.content).includes('New daily ledger entries to merge'));
@@ -56,7 +69,7 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
         : extracting ? '- AUTO-FACT-198' : consolidating ? '- AUTO-FACT-198（已整理）'
         : toolAvailable ? '**ORCHID-28**' : endless ? 'FIXTURE-LIMIT-SUMMARY' : 'OK' };
     response.writeHead(200, { 'content-type': 'text/event-stream' });
-    response.end('data: ' + JSON.stringify({ id: 'chatcmpl-test', object: 'chat.completion.chunk',
+    response.end('data: ' + JSON.stringify({ id: 'chatcmpl-' + randomUUID(), object: 'chat.completion.chunk',
       created: 1, model: 'fixture', choices: [{ index: 0, delta,
         finish_reason: delta.tool_calls ? 'tool_calls' : 'stop' }] }) + '\n\ndata: [DONE]\n\n');
   });
@@ -104,6 +117,10 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
         await new Promise(resolve => setTimeout(resolve, 100));
       }
       assert.fail(JSON.stringify(events));
+    }
+    async function approvalRecord(approvalId) {
+      const records = await call('approvals', { projectId: context.projectId });
+      return records.find(item => item.id === approvalId);
     }
     assert.equal((await call('testModel', model)).model, 'fixture');
     const full = randomUUID();
@@ -158,9 +175,59 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     assert.match(history[0].text, /fixture.png/);
     assert.doesNotMatch(history[0].text, /FILE-CONTEXT/);
     assert.match(history[1].text, /ORCHID-28/);
+    const contextSnapshot = await call('context', context);
+    assert.ok(contextSnapshot.asOfSeq >= history.length);
+    assert.ok(contextSnapshot.transcriptMessages >= 2);
+    assert.equal(contextSnapshot.uncertainToolCalls, 0);
+    assert.ok(contextSnapshot.lastRequest?.messageCount > 0);
+    assert.ok(contextSnapshot.lastRequest.tools.includes('read_file'));
+    assert.equal(contextSnapshot.branch, null);
+    const markdownExport = await call('exportSession', { ...context, format: 'markdown', title: 'Fixture history' });
+    assert.equal(markdownExport.format, 'markdown');
+    assert.match(markdownExport.content, /# Fixture history/);
+    assert.match(markdownExport.content, /ORCHID-28/);
+    const jsonExport = await call('exportSession', { ...context, format: 'json', title: 'Fixture history' });
+    const exportedDocument = JSON.parse(jsonExport.content);
+    assert.equal(exportedDocument.sessionId, context.sessionId);
+    assert.ok(exportedDocument.events.length >= contextSnapshot.asOfSeq);
+    assert.ok(exportedDocument.events.some(event => event.type === 'request/prepared'));
+    await assert.rejects(call('exportSession', { ...context, format: 'zip', title: 'Fixture history' }));
+    const branchSessionId = randomUUID();
+    const branchContext = { ...context, sessionId: branchSessionId };
+    const fork = await call('forkSession', { ...context, branchSessionId, messageId: history[1].id });
+    assert.equal(fork.branchSessionId, branchSessionId);
+    assert.equal(fork.sourceSessionId, context.sessionId);
+    assert.equal(fork.sourceMessageId, history[1].id);
+    assert.ok(fork.events >= 2);
+    assert.deepEqual((await call('history', branchContext)).map(message => [message.role, message.text]),
+      [['user', history[0].text], ['assistant', history[1].text]]);
+    assert.equal((await call('context', branchContext)).branch.sourceSessionId, context.sessionId);
+    const originalSteps = steps;
+    steps = [];
+    const branchRun = randomUUID();
+    await call('chat', { ...branchContext, ...model, runId: branchRun,
+      permission: 'full', message: '继续分叉会话' });
+    assert.ok((await waitEvent(branchRun, 'done')).data.status);
+    const continuedBranch = await call('history', branchContext);
+    assert.ok(continuedBranch.length > 2);
+    assert.equal(continuedBranch.at(-1).role, 'assistant');
+    steps = originalSteps;
     const search = await call('searchSessions', { query: 'orchid-28', sessions: [{ ...context, title: 'Fixture' }] });
     assert.equal(search[0].messageId, history[1].id);
     assert.match(search[0].excerpt, /ORCHID-28/);
+    const chineseSearch = await call('searchSessions', {
+      query: '读并修改', sessions: [{ ...context, title: 'Fixture' }]
+    });
+    assert.equal(chineseSearch[0].messageId, history[0].id);
+    const attachmentSearch = await call('searchSessions', {
+      query: 'fixture.png', sessions: [{ ...context, title: 'Fixture' }]
+    });
+    assert.equal(attachmentSearch[0].messageId, history[0].id);
+    const branchSearch = await call('searchSessions', {
+      query: 'orchid-28',
+      sessions: [{ ...context, title: 'Fixture' }, { ...branchContext, title: 'Fixture branch' }]
+    });
+    assert.ok(branchSearch.some(match => match.sessionId === branchSessionId));
     assert.deepEqual(await call('searchSessions', {
       query: 'FILE-CONTEXT', sessions: [{ ...context, title: 'Fixture' }]
     }), []);
@@ -187,6 +254,8 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     const edit = await waitEvent(ask, 'approval');
     assert.equal(edit.data.path, 'README.md');
     assert.equal(edit.data.after, 'NOT-APPROVED');
+    assert.equal((await approvalRecord(edit.data.id)).status, 'PENDING');
+    assert.equal(await call('dismissApproval', { projectId: context.projectId, approvalId: edit.data.id }), false);
     assert.equal(await call('approve', { runId: full, approvalId: edit.data.id, allow: true }), false);
     assert.equal(await call('approve', { runId: ask, approvalId: edit.data.id, allow: false }), true);
     await waitEvent(ask, 'done');
@@ -239,6 +308,8 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     const recoveredApprovals = await call('approvals', { projectId: context.projectId });
     const recovered = recoveredApprovals.find(item => item.id === interruptedApproval.data.id);
     assert.equal(recovered.status, 'INTERRUPTED');
+    assert.equal(recovered.interruptedFrom, 'PENDING');
+    assert.equal(recoveredApprovals.find(item => item.id === create.data.id).status, 'COMPLETED');
     assert.equal(await call('approve', { runId: interrupted,
       approvalId: interruptedApproval.data.id, allow: true }), false);
     assert.equal(await call('dismissApproval', {
@@ -350,6 +421,131 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     await waitEvent(web, 'done');
     assert.equal(websiteReads, 1);
     assert.match(JSON.stringify(requests.at(-1).body.messages.filter(message => message.role === 'tool')), /TEST-WEB-PAGE/);
+
+    const stalled = randomUUID();
+    steps = [['web_fetch', { url: new URL('/in-flight-page', url).href }]];
+    await call('chat', { ...context, sessionId: randomUUID(), ...model, runId: stalled,
+      permission: 'full', message: '读取一个尚未返回的网页' });
+    const stalledApproval = await waitEvent(stalled, 'approval');
+    const requestReceived = once(server, 'in-flight-read', { signal: AbortSignal.timeout(10000) });
+    const [allowed] = await Promise.all([
+      call('approve', { runId: stalled, approvalId: stalledApproval.data.id, allow: true }),
+      requestReceived
+    ]);
+    assert.equal(allowed, true);
+    assert.equal((await approvalRecord(stalledApproval.data.id)).status, 'APPROVED');
+    assert.equal(await call('dismissApproval', { projectId: context.projectId, approvalId: stalledApproval.data.id }), false);
+    const stalledExit = once(child, 'exit');
+    child.kill();
+    await stalledExit;
+    call = launch();
+    const stalledRecord = await approvalRecord(stalledApproval.data.id);
+    assert.equal(stalledRecord.status, 'INTERRUPTED');
+    assert.equal(stalledRecord.interruptedFrom, 'APPROVED');
+    assert.equal(await call('approve', { runId: stalled, approvalId: stalledApproval.data.id, allow: true }), false);
+    assert.equal(stalledReads, 1);
+    assert.equal((await approvalRecord(approval.data.id)).status, 'COMPLETED');
+
+    const durable = { ...context, sessionId: randomUUID() };
+    const durableRun = randomUUID();
+    const durableMessage = '测试重启后继续同一个任务';
+    const durablePath = path.join(projectPath, 'Durable.txt');
+    await writeFile(durablePath, 'DURABLE-STEP');
+    steps = [['edit_file', { path: 'Durable.txt', old_text: 'DURABLE-STEP', new_text: 'DURABLE-STEP approved' }]];
+    await call('chat', { ...durable, ...model, runId: durableRun, permission: 'durable', message: durableMessage });
+    assert.equal((await waitEvent(durableRun, 'done')).data.status, 'suspended');
+    const suspendedTask = await call('task', durable);
+    assert.equal(suspendedTask.status, 'suspended');
+    assert.equal(suspendedTask.uncertain, false);
+    assert.ok(suspendedTask.turnId);
+    assert.equal(suspendedTask.approvals.length, 1);
+    const [resumableApproval] = suspendedTask.approvals;
+    assert.equal(resumableApproval.operation, 'edit_file');
+    assert.equal(resumableApproval.path, 'Durable.txt');
+    assert.equal(resumableApproval.before, 'DURABLE-STEP');
+    assert.equal(resumableApproval.after, 'DURABLE-STEP approved');
+    assert.equal(await readFile(durablePath, 'utf8'), 'DURABLE-STEP');
+    const taskCenter = await call('tasks', { sessions: [{ ...durable, projectName: 'Fixture', title: 'Durable' }] });
+    assert.equal(taskCenter.length, 1);
+    assert.equal(taskCenter[0].projectId, durable.projectId);
+    assert.equal(taskCenter[0].status, 'suspended');
+    assert.equal(taskCenter[0].title, durableMessage);
+    assert.equal(taskCenter[0].approvals.length, 1);
+
+    const durableExit = once(child, 'exit');
+    child.kill();
+    await durableExit;
+    call = launch();
+    assert.deepEqual(await call('task', durable), suspendedTask);
+    assert.equal((await call('tasks', {
+      sessions: [{ ...durable, projectName: 'Fixture', title: 'Durable' }]
+    }))[0].status, 'suspended');
+    assert.equal(await readFile(durablePath, 'utf8'), 'DURABLE-STEP');
+    const resumedRun = randomUUID();
+    const resumeRequestStart = requests.length;
+    await call('resumeTask', { ...durable, ...model, turnId: suspendedTask.turnId, runId: resumedRun,
+      answers: { [resumableApproval.id]: true } });
+    assert.equal((await waitEvent(resumedRun, 'done')).data.status, 'completed');
+    assert.equal(await readFile(durablePath, 'utf8'), 'DURABLE-STEP approved');
+    assert.deepEqual(await call('task', durable), {});
+    assert.equal(requests.length, resumeRequestStart + 1);
+    const resumedMessages = requests[resumeRequestStart].body.messages;
+    assert.equal(resumedMessages.filter(message => message.role === 'user'
+      && !String(message.content).includes('<HARNESS_CONTEXT>')).length, 1);
+    assert.match(JSON.stringify(resumedMessages.filter(message => message.role === 'tool')), /已编辑 Durable\.txt/);
+    assert.deepEqual((await call('history', durable)).map(message => [message.role, message.turn, message.text]),
+      [['user', 1, durableMessage], ['assistant', 1, '**ORCHID-28**']]);
+
+    const cancelContext = { ...context, sessionId: randomUUID() };
+    const cancelRun = randomUUID();
+    steps = [['create_file', { path: 'DurableCancelled.txt', content: 'must not execute' }]];
+    await call('chat', { ...cancelContext, ...model, runId: cancelRun, permission: 'durable', message: '测试取消待审批任务' });
+    assert.equal((await waitEvent(cancelRun, 'done')).data.status, 'suspended');
+    const cancelTask = await call('task', cancelContext);
+    assert.equal(cancelTask.approvals.length, 1);
+    assert.equal(await call('cancelTask', { ...cancelContext, turnId: cancelTask.turnId }), true);
+    assert.deepEqual(await call('task', cancelContext), {});
+    await assert.rejects(readFile(path.join(projectPath, 'DurableCancelled.txt')), { code: 'ENOENT' });
+
+    const queueContext = { ...context, sessionId: randomUUID() };
+    const queuePath = path.join(projectPath, 'Queued.txt');
+    await writeFile(queuePath, 'QUEUE-STEP');
+    steps = [['edit_file', { path: 'Queued.txt', old_text: 'QUEUE-STEP', new_text: 'QUEUE-STEP approved' }]];
+    const queueFirstRun = randomUUID();
+    await call('chat', { ...queueContext, ...model, runId: queueFirstRun,
+      permission: 'durable', message: '先完成待审批任务' });
+    assert.equal((await waitEvent(queueFirstRun, 'done')).data.status, 'suspended');
+    const queueFirstTask = await call('task', queueContext);
+    const queueRun = randomUUID();
+    await call('chat', { ...queueContext, ...model, runId: queueRun,
+      permission: 'durable', message: '排队处理后续任务' });
+    const queuedTasks = await call('tasks', {
+      sessions: [{ ...queueContext, projectName: 'Fixture', title: 'Queued' }]
+    });
+    assert.deepEqual(queuedTasks.map(item => item.status).sort(), ['queued', 'suspended']);
+    assert.equal((await call('task', queueContext)).turnId, queueFirstTask.turnId);
+    await call('resumeTask', { ...queueContext, ...model, turnId: queueFirstTask.turnId,
+      runId: randomUUID(), answers: { [queueFirstTask.approvals[0].id]: true } });
+    assert.equal((await waitEvent(queueRun, 'done')).data.status, 'completed');
+    assert.equal(await readFile(queuePath, 'utf8'), 'QUEUE-STEP approved');
+    assert.deepEqual(await call('tasks', {
+      sessions: [{ ...queueContext, projectName: 'Fixture', title: 'Queued' }]
+    }), []);
+
+    const steerContext = { ...context, sessionId: randomUUID() };
+    steps = [['read_file', { path: 'README.md' }, 'ORCHID-28']];
+    const steerRun = randomUUID();
+    const steerRequestStart = requests.length;
+    holdForSteer = true;
+    const modelHeld = once(server, 'model-held', { signal: AbortSignal.timeout(10000) });
+    await call('chat', { ...steerContext, ...model, runId: steerRun,
+      permission: 'durable', message: '读取 README 并继续' });
+    await modelHeld;
+    assert.equal(await call('steer', { runId: steerRun, message: 'STEER-TOKEN-77' }), true);
+    releaseHeldModel();
+    assert.equal((await waitEvent(steerRun, 'done')).data.status, 'completed');
+    assert.ok(requests.slice(steerRequestStart).some(request =>
+      JSON.stringify(request.body.messages).includes('STEER-TOKEN-77')));
 
     const malformed = randomUUID();
     steps = [['create_file', {}, '', '{"path":"Malformed.txt","content":']];

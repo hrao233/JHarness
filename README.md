@@ -15,12 +15,19 @@ Windows 本地项目助手。桌面窗口由 Electron 和 React 提供，Java �
 - 「＋」添加 UTF-8 文本、PNG/JPEG 截图、文件夹目录清单或项目 Skill。图片需要支持视觉输入的模型。文本单项上限 64 KiB，图片单项上限 5 MiB，每条消息最多 8 项。
 - Skill 放在项目的 `.agents/skills/<名称>/SKILL.md` 或 `skills/<名称>/SKILL.md`。插件放在 `plugins/<名称>/`，含 `.codex-plugin/plugin.json`，菜单可以选中插件的 Skill。应用将所选 Skill 正文作为本次消息的工作指引传给模型。
 - 「请求批准」会在修改或创建文件前暂停，可查看变更后批准或拒绝。「帮我批准」用当前配置的模型发起独立审查请求，只传本次任务和拟议改动。审查结论会显示在会话里，可自动批准或阻止，遇到不确定、超时或过大的变更会转人工。审查请求也会产生 API 用量。「完全访问权限」跳过审批，文件工具仍限制在项目目录内。
+- 「可续跑任务」使用持久任务日志执行读取、编辑和创建文件。任务等待审批或中断后，可以在会话底部继续或取消；关闭应用不会丢失任务。任务运行时可以继续输入补充指令，也可以把下一条消息排队为后续任务。
+- 应用意外退出后，有遗留审批的项目会在输入栏上方显示「中断的审批」。展开可查看原操作和中断状态。若此前已批准且执行结果待核对，请先检查文件或命令影响。清除记录只会将其从面板移除。
+- 可续跑任务遇到结果未知的工具操作时，任务卡会列出具体调用。先在项目中核对实际影响，再逐项标记「已完成」或「未执行」，JHarness 会把核对结果写回任务并继续。
+- 左侧「任务中心」列出当前所有项目中运行、排队、等待审批或中断的任务，可跳到对应会话处理。任务列表直接来自持久会话日志，后端重启后仍可读取。
+- 左侧「上下文」显示最近一次模型请求所用的模型、消息预览、可用工具、项目上下文项、检查点和压缩记录，便于确认实际发送了什么。
+- 上下文面板可把当前会话导出为 Markdown 或原始事件 JSON。Markdown 适合阅读和归档，JSON 保留事件顺序与载荷，便于审计和后续迁移。
 - 闪电按钮独立控制生成速度。兼容接口可在模型设置里指定服务商支持的 `fast` 或 `priority`，开启后实际发送 `service_tier`，可能产生额外用量费用。DeepSeek 官方接口使用标准档。最终速度取决于服务商和账号。
 - 右侧模型按钮打开推理强度滑块。DeepSeek 官方支持关闭、低、高和极高，后端分别发送 `thinking` 和 `reasoning_effort`。没有已选档位时优先选「高」，其次选配置中的第一个档位。兼容接口可勾选模型支持的强度，全部取消时不发送推理参数。连接测试可以带上具体推理强度和快速档位。
 - 左侧分别显示最近会话和项目。项目行的「＋」会在该项目新建会话，项目名前的箭头展开或收起会话。
 - 最左一列可收起项目栏、添加图片、打开收藏资料库、选用项目 Skill 或插件、搜索项目名、会话标题和消息正文，以及查看当前项目的 Git 状态和暂存前后的差异。
 - 会话左侧每条短线对应一条用户消息。悬停预览，点击跳转，当前轮次随滚动高亮。向上查看旧消息时，新回复不会把页面拉回底部。
 - 消息下方可复制原文、把内容引用到输入栏，或从「更多消息操作」收藏到本机资料库。Java 后端按会话日志中的消息 ID 保存收藏，点击收藏或正文搜索结果可定位原消息。旧版收藏首次打开时自动迁移。
+- 消息下方的分叉按钮可从该消息创建新会话。分叉记录来源，只复制当时的对话基线，不继承未结束的执行；原会话历史保持不变。
 
 Agent 可以浏览目录、按名称查找、读取、编辑和新建项目内的 UTF-8 文本文件，单文件上限为 64 KiB。编辑时匹配唯一一处原文。新建文件使用已有目录。会话使用 Harness 持久日志。模型 Key 由 Electron 主进程通过 Windows DPAPI 加密，数据位于应用的用户数据目录。
 
@@ -56,14 +63,14 @@ apps/ui/                React 界面
 | 项目工具、审批和自动审查 | `agent` 注册 JHarness 的工具与审批回调，Core 通过工具注册表调度。 |
 | Skill、上下文压缩和跨会话记忆 | `ConversationRuntime` 配置 Harness，`ProjectMemory` 接入项目的长期记忆和日记。 |
 
-当前桌面入口使用直接会话流。结构化输出、备用模型、原生外部工具回填以及 `AgentSession` 的持久任务队列需要各自的应用入口。
+普通会话使用直接流式执行；选择「可续跑任务」时，桌面入口切换到 `AgentSession` 的持久任务路径。结构化输出、备用模型和原生外部工具回填仍需要各自的应用入口。
 
 然后在 JHarness 根目录运行：
 
 ```powershell
 npm ci
 mvn -B -T1C clean verify
-& "$env:JAVA_HOME/bin/jlink.exe" --add-modules java.se,jdk.unsupported,jdk.crypto.ec,jdk.charsets,jdk.zipfs --strip-debug --no-header-files --no-man-pages --compress=zip-6 --output runtime
+& "$env:JAVA_HOME\bin\jlink.exe" --add-modules java.se,jdk.unsupported,jdk.crypto.ec,jdk.charsets,jdk.zipfs --strip-debug --no-header-files --no-man-pages --compress=2 --output runtime
 npm test
 npm run package:win
 ```
@@ -72,4 +79,4 @@ npm run package:win
 
 `npm run package:win` 还会隐藏启动打包后的 Electron 应用，等待 React 渲染完成后检查页面文本，避免生成只因路径错误而白屏的 EXE。实际可用产物位于 `release/win-unpacked/JHarness.exe`。
 
-架构、迁移决策和当前进度见 `docs/architecture/`、`docs/decisions/`、`docs/research/` 和 `docs/progress/`。
+[产品成熟度路线图](docs/roadmap/jharness.md)列出了当前状态、后续阶段和每阶段的验收场景。[迁移进度](docs/progress/agentscope-lite.md)记录 AgentScope Lite 的迁移结果与验证。[架构](docs/architecture/agentscope-lite.md)、[设计决策](docs/decisions/)和[调研](docs/research/harness-landscape.md)提供技术背景。

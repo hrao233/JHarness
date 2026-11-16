@@ -1,0 +1,26 @@
+{
+  "events": [
+    {
+      "schemaVersion": 1,
+      "eventId": "legacy-event-1",
+      "seq": 1,
+      "occurredAt": 1700000000001,
+      "type": "message/user",
+      "executionRunId": "legacy-run",
+      "turnId": "legacy-turn",
+      "required": true,
+      "payloadJson": "{\"message\":{\"id\":\"legacy-user\",\"name\":null,\"role\":\"USER\",\"content\":[{\"type\":\"text\",\"text\":\"legacy question legacy question\"}],\"metadata\":{\"jharnessDisplay\":\"legacy display\"},\"timestamp\":\"2023-11-14 22:13:20.000\",\"usage\":null}}"
+    },
+    {
+      "schemaVersion": 1,
+      "eventId": "legacy-event-2",
+      "seq": 2,
+      "occurredAt": 1700000000002,
+      "type": "message/assistant",
+      "executionRunId": "legacy-run",
+      "turnId": "legacy-turn",
+      "required": true,
+      "payloadJson": "{\"message\":{\"id\":\"legacy-assistant\",\"name\":\"JHarness\",\"role\":\"ASSISTANT\",\"content\":[{\"type\":\"text\",\"text\":\"legacy answer legacy answer\"}],\"metadata\":{},\"timestamp\":\"2023-11-14 22:13:21.000\",\"usage\":null}}"
+    }
+  ]
+}

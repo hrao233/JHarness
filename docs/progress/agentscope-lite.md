@@ -2,6 +2,10 @@
 
 Updated: 2026-11-16
 
+This page records the AgentScope Lite migration and its verification results.
+The [JHarness maturity roadmap](../roadmap/jharness.md) tracks product
+capabilities and delivery milestones beyond the migration.
+
 ## Current State
 
 JHarness now builds and runs from local Java modules. It no longer resolves
@@ -100,6 +104,44 @@ payloads and existing downstream imports stay compatible.
 - Fixed packaged Electron UI path resolution and added a hidden packaged-GUI
   smoke test that verifies rendered page content.
 
+### Product milestone: durable task control plane
+
+- Routed desktop `durable` conversations through `AgentSession` instead of
+  transient streaming runs while preserving the existing approval modes.
+- Persisted task identity, turn identity, pending approvals and interruption
+  state in the session log; reopening the backend reconstructs the same task.
+- Added same-session queueing for later submissions and steering for a running
+  durable task without creating a second turn.
+- Added cross-session task projection for the desktop task center and a narrow
+  IPC surface for listing, steering, queueing, resuming and cancelling tasks.
+- Allowed the Electron main process to track multiple active runs so queued work
+  can start while another run or session remains active.
+- Added end-to-end coverage for task-center projection, restart recovery,
+  same-session queueing and steering context delivery.
+- Added explicit reconciliation for uncertain tool outcomes. The task card
+  collects one success/error decision per unresolved call, writes the result
+  into the session projection, and resumes from the repaired state.
+- Added immutable session branching from a selected message. A branch stores a
+  clean `AgentState` baseline plus a source marker instead of copying open runs,
+  so the new conversation can continue immediately.
+- Added a context inspector over the latest `request/prepared` event, including
+  model, message previews, tool names, `HARNESS_CONTEXT` items, compaction count,
+  checkpoints and pending interactions.
+- Added packaged-GUI smoke coverage for opening the context panel and loading its
+  empty state.
+- Added packaged task-recovery smoke: a bundled Java backend creates a durable
+  task with a pending file approval, exits, and the packaged Electron app must
+  render the same task with its approval action.
+- Added Markdown and raw-event JSON export through a native save dialog. Export
+  content is generated in Java with a 16 MiB safety bound and written only by the
+  Electron main process.
+- Added branch-source navigation and export controls to the context panel.
+- Added a 1,200-message synthetic long-session test that measures context
+  inspection plus Markdown/JSON export against a five-second local budget.
+- Added a legacy v1 migration fixture that is loaded into the current journal,
+  inspected, exported and branched. Added Chinese and English session-search
+  expectations, including branch results.
+
 ## Lightweight Runtime
 
 Dependencies that support optional capabilities are marked optional where the
@@ -131,19 +173,31 @@ npm run package:win
 
 Last verified on 2026-11-16:
 
-- `mvn -B -T1C clean verify`: 5076 tests, 0 failures, 0 errors;
+- `mvn -B -T1C clean verify`: 5079 tests, 0 failures, 0 errors;
 - `npm test`: 4 tests, 0 failures;
 - `npm run build:ui`: success;
 - `npm run package:win`: success, including `PACKAGED_GUI_SMOKE_OK`;
-- shaded backend JAR: 22,437,472 bytes (21.4 MiB).
+- shaded backend JAR: 22,495,887 bytes (21.5 MiB).
 
 The cross-process Node test launches the shaded backend JAR with the bundled
 Java runtime and verifies model requests, tool permissions, streaming events,
 workspace edits, memory, web approval, cancellation and session recovery.
 
-## Remaining Hardening
+## Follow-up Work
 
-The remaining work is capability-level RPC over the process bridge and broader
-historical storage migration coverage. The process host currently provides
-isolated lifecycle and request transport; Java capability objects are still
-registered in-process.
+- M2 now includes uncertain tool-result reconciliation and packaged recovery of
+  a pending approval task. The remaining increment is packaged fault injection
+  while an approved tool is executing and when its outcome is unknown.
+- M3 now exposes recent model context, message-level session branching, source
+  navigation, Markdown/JSON export, a v1 migration sample and Chinese/English
+  search expectations. A branch records its source and begins from a clean state
+  baseline. A broader migration corpus and recall quality evaluation remain.
+- M5 adds capability-level RPC and desktop plugin integration. The process
+  host currently provides lifecycle management and request transport, and the
+  Java capability registry runs in-process.
+- M6 now configures the JDK 17 `jlink` compression flag and runs Node integration
+  tests after building the bundled runtime. Clean Windows runner and release
+  verification remain pending.
+
+The [maturity roadmap](../roadmap/jharness.md) defines the product acceptance
+scenarios and the next delivery increments.

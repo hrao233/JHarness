@@ -12,18 +12,17 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.function.Predicate;
 
 public final class ProjectCommand {
     private static final int MAX_OUTPUT_BYTES = 12000;
     private final Path project;
-    private final Predicate<String> approve;
+    private final ApprovedOperation approval;
     private boolean closed;
     private Process running;
 
-    ProjectCommand(Path project, Predicate<String> approve) {
+    ProjectCommand(Path project, ApprovedOperation approval) {
         this.project = project;
-        this.approve = approve;
+        this.approval = approval;
     }
 
     @Tool(name = "run_command", description = """
@@ -36,7 +35,11 @@ public final class ProjectCommand {
         if (command == null || command.isBlank() || command.indexOf(0) >= 0 || command.length() > 8000) {
             return ToolResultBlock.error("请输入 8,000 字符以内的有效 PowerShell 命令。");
         }
-        if (!approve.test(command)) return ToolResultBlock.error("命令未获批准，未执行。");
+        return approval.run("run_command", project.toString(), "", command, "命令未获批准，未执行。",
+                () -> runApproved(command));
+    }
+
+    private ToolResultBlock runApproved(String command) {
         Process process = null;
         try {
             synchronized (this) {

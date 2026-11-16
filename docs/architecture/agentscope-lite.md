@@ -368,6 +368,25 @@ then replaces each manifest entry and deletes the derived search index so it reb
 shows a confirmation and the Electron main process requires no active runs before restore. A short
 relaunch follows so in-memory settings cannot overwrite the restored file.
 
+### Local automation scheduler
+
+Automations are definitions with identity independent from each run. Definitions store name, full
+prompt, project/session identity, interval or one-shot schedule, next trigger time and enabled state.
+Runs store a separate run ID, trigger (`schedule`, `manual`, `retry`), scheduled/start/finish times,
+status and bounded error. The Electron main process ticks every 15 seconds while the backend is
+available; scheduling stops when the app exits.
+
+Before launching a scheduled run, the scheduler claims it by advancing `nextRunAt` (or disabling a
+one-shot definition) and persists the run. A definition with a queued/running/suspended run is not
+triggered again; the next check is delayed up to five minutes. Manual and retry runs are explicit and
+can be queued even while another run exists.
+
+Automation sessions use `durable` permission and the normal project model settings. Event `done`
+and `error` messages update run state by the same backend run ID. On startup, queued/running records
+left by a crash become `interrupted` so they do not block future schedules forever. Suspended runs
+remain visible in the task center for approval. Event triggers, dependency graphs and retry backoff
+are not yet implemented.
+
 ### Session search projection
 
 Session recall uses a rebuildable SQLite FTS5 database under the local data

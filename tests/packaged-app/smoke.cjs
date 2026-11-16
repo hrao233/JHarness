@@ -83,6 +83,7 @@ async function verifyInterruptedApproval(data) {
   assert.match(smoke.context, /当前会话还没有模型请求记录/);
   assert.match(smoke.reports, /当前会话还没有任务报告/);
   assert.match(smoke.worktrees, /隔离工作树/);
+  assert.match(smoke.automations, /当前项目还没有自动任务/);
   assert.match(smoke.maintenance, /本地数据与恢复/);
   assert.match(smoke.checkpoints, /当前会话还没有文件检查点/);
   const records = JSON.parse(await readFile(approvalsFile, 'utf8'));

@@ -364,5 +364,32 @@ h1{margin:0;font-weight:650;letter-spacing:-.045em;font-size:30px}
 .maintenance-result>span{display:grid;min-width:0;gap:2px}
 .maintenance-result small{color:#52705c;font-size:10px;overflow-wrap:anywhere}
 .maintenance-preview .context-metrics{margin:8px 0}
+.automation-create{display:grid;gap:7px;margin:10px 0;padding-bottom:10px;border-bottom:1px solid var(--line)}
+.automation-create>input,.automation-create>textarea,.automation-schedule select,.automation-schedule input{border:1px solid var(--line);border-radius:7px;background:#fcfcfb;padding:7px 8px;min-width:0}
+.automation-create>textarea{resize:vertical}
+.automation-create>small{color:var(--muted);font-size:10px}
+.automation-schedule{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.automation-schedule label{display:flex;align-items:center;gap:5px;font-size:12px}
+.automation-schedule label input{width:74px}
+.automation-schedule button{margin-left:auto}
+.automation-list{display:grid;gap:0;margin-top:8px}
+.automation-definition{padding:9px 0;border-top:1px solid var(--line)}
+.automation-definition:first-of-type{border-top:0}
+.automation-heading{display:flex;align-items:flex-start;gap:7px;min-width:0}
+.automation-heading>svg{flex:none;margin-top:2px;color:#4d6657}
+.automation-heading>span{display:grid;min-width:0;flex:1}
+.automation-heading strong,.automation-heading small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.automation-heading small{color:var(--muted);font-size:10px}
+.automation-heading>.task-state{flex:none;margin:0}
+.automation-definition>p{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin:6px 0;color:#555d56;font-size:11px}
+.automation-actions{display:flex;flex-wrap:wrap;gap:5px}
+.automation-actions .secondary{padding:4px 7px;font-size:11px}
+.automation-runs{margin-top:6px;font-size:11px;color:var(--muted)}
+.automation-runs summary{cursor:pointer}
+.automation-run{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:5px 0;border-top:1px dashed #ecece7}
+.automation-run code{font-size:10px}
+.automation-run>small{color:var(--muted)}
+.automation-run .secondary{margin-left:auto;padding:3px 6px;font-size:10px}
+.automation-run .error-text{flex-basis:100%;margin:2px 0 0}
 @media(max-width:900px){.app{grid-template-columns:50px 200px minmax(0,1fr)}.thread{padding-right:17px}.bottom{padding-inline:17px}}
-@media(max-width:620px){.nav-dialog{width:calc(100vw - 16px);padding:16px}.task-report>summary{align-items:flex-start}.report-counts{max-width:44%}.acceptance-row{flex-wrap:wrap}.acceptance-actions{width:100%;max-width:none;margin-left:23px;flex-wrap:wrap}.acceptance-actions select{flex:1;max-width:none}.command-evidence-head{align-items:flex-start;flex-wrap:wrap}.command-outcome{margin-left:23px}.artifact-row{align-items:flex-start}.artifact-row .secondary{width:34px;justify-content:center;font-size:0}.artifact-row .secondary svg{width:16px}.change-set-toolbar{align-items:flex-start;flex-wrap:wrap}.change-set-file{align-items:flex-start;flex-wrap:wrap}.change-set-file small{margin-left:23px}.change-set-actions{flex-wrap:wrap}.worktree-source-state{align-items:flex-start;flex-wrap:wrap}.worktree-source-state>small{margin-left:22px}.worktree-create-row{flex-wrap:wrap}.worktree-create-row input{flex-basis:100%}.worktree-create-row button{width:100%;justify-content:center}.worktree-heading{align-items:flex-start;flex-wrap:wrap}.worktree-heading>.task-state{margin-left:26px}.maintenance-actions{flex-direction:column}.maintenance-actions button{justify-content:center}}
+@media(max-width:620px){.nav-dialog{width:calc(100vw - 16px);padding:16px}.task-report>summary{align-items:flex-start}.report-counts{max-width:44%}.acceptance-row{flex-wrap:wrap}.acceptance-actions{width:100%;max-width:none;margin-left:23px;flex-wrap:wrap}.acceptance-actions select{flex:1;max-width:none}.command-evidence-head{align-items:flex-start;flex-wrap:wrap}.command-outcome{margin-left:23px}.artifact-row{align-items:flex-start}.artifact-row .secondary{width:34px;justify-content:center;font-size:0}.artifact-row .secondary svg{width:16px}.change-set-toolbar{align-items:flex-start;flex-wrap:wrap}.change-set-file{align-items:flex-start;flex-wrap:wrap}.change-set-file small{margin-left:23px}.change-set-actions{flex-wrap:wrap}.worktree-source-state{align-items:flex-start;flex-wrap:wrap}.worktree-source-state>small{margin-left:22px}.worktree-create-row{flex-wrap:wrap}.worktree-create-row input{flex-basis:100%}.worktree-create-row button{width:100%;justify-content:center}.worktree-heading{align-items:flex-start;flex-wrap:wrap}.worktree-heading>.task-state{margin-left:26px}.maintenance-actions{flex-direction:column}.maintenance-actions button{justify-content:center}.automation-schedule{align-items:flex-start}.automation-schedule button{width:100%;margin-left:0;justify-content:center}}

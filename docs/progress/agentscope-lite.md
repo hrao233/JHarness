@@ -214,6 +214,12 @@ payloads and existing downstream imports stay compatible.
   safety snapshot of current data first and relaunches the application.
 - Added a data-maintenance desktop panel with project/session/file/byte metrics,
   native backup selection, integrity preview and packaged GUI smoke coverage.
+- Added the first M8 scheduler slice: persistent interval/one-shot definitions,
+  independent run records, schedule claiming, manual runs, pause/resume, cancel
+  and retry. Automation sessions use the normal durable task path.
+- Added active-run deduplication and crash recovery of queued/running automation
+  records. A pending definition is claimed before launch; suspended tasks remain
+  available in the task center.
 - Added `acceptance_write` and host-authorized shell-exit verification. Criteria
   begin as `PENDING`; only a user-selected command receipt from the same run can
   produce `PASSED`, `FAILED` or `UNKNOWN`. The report retains command identity,
@@ -254,7 +260,7 @@ npm run package:win
 Last verified on 2026-11-16:
 
 - `mvn -B -T1C clean verify`: 5088 tests, 0 failures, 0 errors, 56 skipped;
-- `npm test`: 8 tests, 0 failures;
+- `npm test`: 9 tests, 0 failures;
 - `npm run build:ui`: success;
 - `npm run package:win`: success, including `PACKAGED_GUI_SMOKE_OK`;
 - shaded backend JAR: 22,579,167 bytes (21.5 MiB).
@@ -281,6 +287,10 @@ checkpoint/report correlation, and command approval across a durable resume.
 - M7 now has a CLI second entry for one-shot tasks and doctor diagnostics. The
   CLI can create a desktop-visible session and use interactive or JSON output.
   Channel adapters and concurrent multi-entry settings coordination remain.
+- M8 now has local interval/one-shot automations with run history, pause,
+  resume, manual execution, cancellation and retry. Event triggers, dependency
+  graphs, backoff policy and background operation while the desktop is closed
+  remain.
 - M4 now has a reviewable project-work slice: task plans, command/test receipts,
   artifacts, file checkpoints, diffs, safe per-file restore and guarded
   whole-run restore, isolated Git worktrees and deterministic shell-evidence

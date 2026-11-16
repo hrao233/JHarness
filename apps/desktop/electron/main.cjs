@@ -8,6 +8,7 @@ const path = require('node:path');
 const { importAttachment, projectParts, label } = require('./context-parts.cjs');
 const { createManager } = require('./worktree-manager.cjs');
 const maintenance = require('./data-maintenance.cjs');
+const { createStore: createAutomationStore } = require('./automation-store.cjs');
 const git = promisify(execFile);
 
 let win;
@@ -18,6 +19,9 @@ let settingsFile;
 let quitting = false;
 let bookmarkMigration;
 let worktreeManager;
+let automationStore;
+let automationTimer;
+let automationTicking = false;
 const pending = new Map();
 const attachments = new Map();
 const effortValues = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -66,6 +70,7 @@ function startBackend(directory) {
     let message;
     try { message = JSON.parse(line); } catch { return; }
     if (message.event) {
+      void observeAutomationEvent(message);
       if (message.event === 'done') activeRuns.delete(message.runId);
       if (win && !win.isDestroyed()) win.webContents.send('jh:event', message);
       return;
@@ -183,6 +188,80 @@ function conversationModel(options) {
   const fast = options.fast === true;
   if (fast && !model.fastTier) throw new Error('当前模型未配置快速模式。');
   return { model, effort, fast };
+}
+
+function automationStatus(status) {
+  if (status === 'ON_COMPLETE' || status === 'completed') return 'completed';
+  if (status === 'suspended') return 'suspended';
+  if (status === 'ON_ERROR' || status === 'failed') return 'failed';
+  if (status === 'cancelled' || status === 'ON_CANCEL') return 'cancelled';
+  if (status === 'interrupted') return 'interrupted';
+  return 'completed';
+}
+
+async function observeAutomationEvent(message) {
+  if (!automationStore) return;
+  if (message.event === 'error') {
+    await automationStore.finish(message.runId, 'failed', message.data?.message || '任务失败。');
+  } else if (message.event === 'done') {
+    await automationStore.finish(message.runId, automationStatus(message.data?.status));
+  }
+}
+
+async function launchAutomationRun(run) {
+  const project = settings.projects.find(item => item.id === run.projectId);
+  const session = project?.sessions.find(item => item.id === run.sessionId);
+  if (!project || !session) throw new Error('自动任务对应的项目或会话已被删除。');
+  await automationStore.markRunning(run.runId);
+  activeRuns.add(run.runId);
+  try {
+    const { model, effort, fast } = conversationModel({});
+    await call('chat', {
+      projectId: project.id,
+      sessionId: session.id,
+      projectPath: project.directory,
+      ...model,
+      message: run.prompt,
+      runId: run.runId,
+      parts: [],
+      permission: 'durable',
+      effort,
+      autoMemory: project.autoMemory === true,
+      serviceTier: fast ? model.fastTier : ''
+    });
+    session.updatedAt = Date.now();
+    persist();
+    return true;
+  } catch (error) {
+    activeRuns.delete(run.runId);
+    await automationStore.finish(run.runId, 'failed', error.message);
+    throw error;
+  }
+}
+
+async function tickAutomations() {
+  if (automationTicking || !automationStore || !backend?.stdin.writable) return;
+  automationTicking = true;
+  try {
+    const due = await automationStore.claimDue();
+    for (const run of due) {
+      try {
+        await launchAutomationRun(run);
+      } catch (error) {
+        console.error('Automation failed:', run.automationName, error.message);
+      }
+    }
+  } finally {
+    automationTicking = false;
+  }
+}
+
+async function initializeAutomations() {
+  automationStore = createAutomationStore(path.join(app.getPath('userData'), 'automations.json'));
+  await automationStore.recoverRunning();
+  clearInterval(automationTimer);
+  automationTimer = setInterval(() => { void tickAutomations(); }, 15000);
+  void tickAutomations();
 }
 
 function register() {
@@ -338,6 +417,65 @@ function register() {
     return result;
   });
   ipcMain.handle('jh:maintenance-open-data', () => shell.openPath(app.getPath('userData')));
+  ipcMain.handle('jh:automations', async () => {
+    if (!automationStore) throw new Error('自动任务调度尚未启动。');
+    return automationStore.list();
+  });
+  ipcMain.handle('jh:automation-create', async (_, input = {}) => {
+    if (!automationStore) throw new Error('自动任务调度尚未启动。');
+    const project = settings.projects.find(item => item.id === input.projectId);
+    if (!project) throw new Error('找不到自动任务项目。');
+    const session = {
+      id: randomUUID(),
+      title: '自动任务 · ' + String(input.name || '未命名').slice(0, 40),
+      permission: 'durable',
+      automation: true,
+      updatedAt: Date.now()
+    };
+    project.sessions.unshift(session);
+    persist();
+    try {
+      return await automationStore.create({
+        name: input.name,
+        prompt: input.prompt,
+        projectId: project.id,
+        sessionId: session.id,
+        scheduleType: input.scheduleType,
+        intervalMinutes: input.intervalMinutes,
+        runAt: Number(input.runAt)
+      });
+    } catch (error) {
+      project.sessions = project.sessions.filter(item => item.id !== session.id);
+      persist();
+      throw error;
+    }
+  });
+  ipcMain.handle('jh:automation-update', (_, id, patch = {}) => {
+    if (!automationStore) throw new Error('自动任务调度尚未启动。');
+    return automationStore.update(id, patch);
+  });
+  ipcMain.handle('jh:automation-remove', (_, id) => {
+    if (!automationStore) throw new Error('自动任务调度尚未启动。');
+    return automationStore.remove(id);
+  });
+  ipcMain.handle('jh:automation-run', async (_, id) => {
+    if (!automationStore) throw new Error('自动任务调度尚未启动。');
+    const run = await automationStore.runNow(id);
+    await launchAutomationRun(run);
+    return run;
+  });
+  ipcMain.handle('jh:automation-retry', async (_, runId) => {
+    if (!automationStore) throw new Error('自动任务调度尚未启动。');
+    const run = await automationStore.retry(runId);
+    await launchAutomationRun(run);
+    return run;
+  });
+  ipcMain.handle('jh:automation-cancel', async (_, runId) => {
+    if (!automationStore) throw new Error('自动任务调度尚未启动。');
+    await call('stop', { runId });
+    activeRuns.delete(runId);
+    return automationStore.finish(runId, 'cancelled');
+  });
   ipcMain.handle('jh:project', async () => {
     const result = await dialog.showOpenDialog(win, { title: '打开项目', properties: ['openDirectory'] });
     if (result.canceled) return null;
@@ -669,6 +807,17 @@ async function smokeInterruptedApproval() {
     'Worktree panel did not render');
   result.worktrees = worktreeDialog.innerText;
   worktreeDialog.querySelector('.dialog-head button').click();
+  const automationButton = [...document.querySelectorAll('button')]
+    .find(button => button.title === '自动任务');
+  if (!automationButton) throw new Error('Automation entry missing');
+  automationButton.click();
+  const automationDialog = await waitFor(
+    () => document.querySelector('dialog.nav-automations'), 'Automation dialog did not open');
+  await waitFor(
+    () => automationDialog.innerText.includes('当前项目还没有自动任务'),
+    'Automation empty state did not load');
+  result.automations = automationDialog.innerText;
+  automationDialog.querySelector('.dialog-head button').click();
   const maintenanceButton = [...document.querySelectorAll('button')]
     .find(button => button.title === '数据与运维');
   if (!maintenanceButton) throw new Error('Maintenance entry missing');
@@ -775,6 +924,9 @@ else {
     }
     register();
     startBackend(path.join(directory, 'workspaces'));
+    void initializeAutomations().catch(error => {
+      console.error('Automation scheduler failed:', error.message);
+    });
     win = new BrowserWindow({
       width: 1240, height: 830, minWidth: 780, minHeight: 570,
       backgroundColor: '#fcfcfb', autoHideMenuBar: true,
@@ -825,6 +977,7 @@ app.on('before-quit', event => {
   if (quitting || !backend) return;
   event.preventDefault();
   quitting = true;
+  clearInterval(automationTimer);
   const child = backend;
   for (const runId of activeRuns) call('stop', { runId }).catch(() => {});
   child.stdin.end();

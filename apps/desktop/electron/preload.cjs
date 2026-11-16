@@ -25,6 +25,13 @@ contextBridge.exposeInMainWorld('jharness', {
   inspectBackup: () => ipcRenderer.invoke('jh:maintenance-inspect-backup'),
   restoreBackup: directory => ipcRenderer.invoke('jh:maintenance-restore', directory),
   openDataDirectory: () => ipcRenderer.invoke('jh:maintenance-open-data'),
+  automations: () => ipcRenderer.invoke('jh:automations'),
+  createAutomation: input => ipcRenderer.invoke('jh:automation-create', input),
+  updateAutomation: (id, patch = {}) => ipcRenderer.invoke('jh:automation-update', id, patch),
+  removeAutomation: id => ipcRenderer.invoke('jh:automation-remove', id),
+  runAutomation: id => ipcRenderer.invoke('jh:automation-run', id),
+  retryAutomation: runId => ipcRenderer.invoke('jh:automation-retry', runId),
+  cancelAutomationRun: runId => ipcRenderer.invoke('jh:automation-cancel', runId),
   report: (project, session) => ipcRenderer.invoke('jh:report', project, session),
   verifyCriterion: (project, session, runId, criterionId, commandId) =>
     ipcRenderer.invoke('jh:verify-criterion', project, session, runId, criterionId, commandId),

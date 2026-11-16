@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { BookOpen, Brain, CircleCheck, CircleDashed, CircleX, ClipboardList, Download, ExternalLink,
-  Database, FileBox, GitBranch, GitPullRequest, House, Images, ListChecks, Plus, Power, Puzzle,
-  RefreshCw, RotateCcw, ScanText, Search, Settings, SquareTerminal, Trash2, X }
+  CalendarClock, Database, FileBox, GitBranch, GitPullRequest, House, Images, ListChecks, Pause,
+  Play, Plus, Power, Puzzle, RefreshCw, RotateCcw, ScanText, Search, Settings, SquareTerminal,
+  Trash2, X }
   from 'lucide-react';
 
 export function Navigation({ showSidebar, home, attachImage, openPanel, openSettings, busy, project, session }) {
@@ -13,6 +14,7 @@ export function Navigation({ showSidebar, home, attachImage, openPanel, openSett
     { label: 'Skills 与插件', Icon: Puzzle, action: () => openPanel('plugins') },
     { label: '搜索会话', Icon: Search, action: () => openPanel('search') },
     { label: '任务中心', Icon: ListChecks, action: () => openPanel('tasks') },
+    { label: '自动任务', Icon: CalendarClock, action: () => openPanel('automations'), disabled: !project },
     { label: '任务报告', Icon: ClipboardList, action: () => openPanel('reports'), disabled: !session },
     { label: '隔离工作树', Icon: GitBranch, action: () => openPanel('worktrees'), disabled: !project },
     { label: '数据与运维', Icon: Database, action: () => openPanel('maintenance') },
@@ -30,8 +32,8 @@ export function Navigation({ showSidebar, home, attachImage, openPanel, openSett
 
 const titles = {
   library: '资料库', plugins: 'Skills 与插件', search: '搜索会话', tasks: '任务中心',
-  reports: '任务报告', worktrees: '隔离工作树', context: '上下文', checkpoints: '检查点',
-  maintenance: '数据与运维', review: '代码审查'
+  reports: '任务报告', automations: '自动任务', worktrees: '隔离工作树', context: '上下文',
+  checkpoints: '检查点', maintenance: '数据与运维', review: '代码审查'
 };
 const taskStatus = {
   queued: '排队中', running: '运行中', suspended: '等待审批',
@@ -78,6 +80,13 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
   const [backupPreview, setBackupPreview] = useState(null);
   const [backupCreated, setBackupCreated] = useState(null);
   const [maintenanceBusy, setMaintenanceBusy] = useState('');
+  const [automations, setAutomations] = useState(null);
+  const [automationBusy, setAutomationBusy] = useState('');
+  const [automationName, setAutomationName] = useState('');
+  const [automationPrompt, setAutomationPrompt] = useState('');
+  const [automationSchedule, setAutomationSchedule] = useState('interval');
+  const [automationInterval, setAutomationInterval] = useState('60');
+  const [automationRunAt, setAutomationRunAt] = useState('');
   useEffect(() => { dialog.current.showModal(); }, []);
   useEffect(() => {
     if (panel !== 'plugins' && (panel !== 'review' || !project)) return;
@@ -195,6 +204,27 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
     });
     return () => { live = false; };
   }, [api, errorText, panel, revision]);
+
+  useEffect(() => {
+    if (panel !== 'automations' || !project) return;
+    let live = true;
+    async function load() {
+      try {
+        const value = await api.automations();
+        if (live) {
+          setAutomations(value);
+          setError('');
+        }
+      } catch (failure) {
+        if (live) setError(errorText(failure));
+      }
+    }
+    setAutomations(null);
+    setError('');
+    void load();
+    const timer = setInterval(load, 3000);
+    return () => { live = false; clearInterval(timer); };
+  }, [api, errorText, panel, project?.id, revision]);
 
   const needle = query.trim().toLowerCase();
   useEffect(() => {
@@ -452,6 +482,47 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
     }
   }
 
+  async function createAutomation(event) {
+    event.preventDefault();
+    if (!project) return;
+    setAutomationBusy('create');
+    setError('');
+    try {
+      await api.createAutomation({
+        projectId: project.id,
+        name: automationName,
+        prompt: automationPrompt,
+        scheduleType: automationSchedule,
+        intervalMinutes: Number(automationInterval),
+        runAt: automationRunAt ? new Date(automationRunAt).getTime() : 0
+      });
+      setAutomationName('');
+      setAutomationPrompt('');
+      setRevision(value => value + 1);
+    } catch (failure) {
+      setError(errorText(failure));
+    } finally {
+      setAutomationBusy('');
+    }
+  }
+
+  async function automationAction(action, id, value) {
+    setAutomationBusy(id);
+    setError('');
+    try {
+      if (action === 'toggle') await api.updateAutomation(id, value);
+      else if (action === 'run') await api.runAutomation(id);
+      else if (action === 'remove') await api.removeAutomation(id);
+      else if (action === 'cancel') await api.cancelAutomationRun(id);
+      else if (action === 'retry') await api.retryAutomation(id);
+      setRevision(value => value + 1);
+    } catch (failure) {
+      setError(errorText(failure));
+    } finally {
+      setAutomationBusy('');
+    }
+  }
+
   async function verifyCriterion(report, criterion) {
     const commandId = criterionCommands[criterion.id] || criterion.commandId;
     if (!project || !session || !commandId) return;
@@ -582,6 +653,98 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
           </div>
         </> : <p className="muted">当前会话还没有模型请求记录。</p>}
       </div>}
+    </>}
+    {panel === 'automations' && <>
+      <div className="review-head"><span>{project?.name || '项目'}的自动任务</span>
+        <button type="button" className="secondary" onClick={() => setRevision(value => value + 1)}>
+          <RefreshCw size={15}/>刷新
+        </button>
+      </div>
+      {project && <form className="automation-create" onSubmit={createAutomation}>
+        <input maxLength={80} value={automationName} aria-label="自动任务名称"
+          placeholder="自动任务名称" onChange={event => setAutomationName(event.target.value)}/>
+        <textarea rows="3" maxLength={16000} value={automationPrompt} aria-label="自动任务内容"
+          placeholder="每次触发时交给 Agent 的完整任务"
+          onChange={event => setAutomationPrompt(event.target.value)}/>
+        <div className="automation-schedule">
+          <select aria-label="触发方式" value={automationSchedule}
+            onChange={event => setAutomationSchedule(event.target.value)}>
+            <option value="interval">固定间隔</option>
+            <option value="once">执行一次</option>
+          </select>
+          {automationSchedule === 'interval'
+            ? <label>每 <input type="number" min="1" max="10080" value={automationInterval}
+              aria-label="间隔分钟" onChange={event => setAutomationInterval(event.target.value)}/> 分钟</label>
+            : <input type="datetime-local" value={automationRunAt} aria-label="执行时间"
+              onChange={event => setAutomationRunAt(event.target.value)}/>}
+          <button type="submit" className="primary"
+            disabled={!!automationBusy || !automationName.trim() || !automationPrompt.trim()}>
+            <Plus size={15}/>创建
+          </button>
+        </div>
+        <small>自动任务使用可续跑 durable 模式；应用关闭时不会触发。</small>
+      </form>}
+      <section className="automation-list">
+        <div className="side-label">任务定义</div>
+        {!automations && !error && <p className="muted">正在读取自动任务…</p>}
+        {automations?.definitions.filter(item => item.projectId === project?.id).map(definition =>
+          <div className="automation-definition" key={definition.id}>
+            <div className="automation-heading">
+              <CalendarClock size={17}/>
+              <span><strong>{definition.name}</strong>
+                <small>{definition.enabled
+                  ? (definition.scheduleType === 'once'
+                    ? '执行一次 · ' + new Date(definition.nextRunAt).toLocaleString()
+                    : '每 ' + definition.intervalMinutes + ' 分钟 · 下次 ' +
+                      new Date(definition.nextRunAt).toLocaleString())
+                  : '已暂停'}</small></span>
+              <span className={'task-state ' + (definition.enabled ? 'state-completed' : 'state-cancelled')}>
+                {definition.enabled ? '已启用' : '已暂停'}
+              </span>
+            </div>
+            <p>{definition.prompt}</p>
+            <div className="automation-actions">
+              <button type="button" className="secondary" disabled={!!automationBusy}
+                onClick={() => automationAction('toggle', definition.id,
+                  { enabled: !definition.enabled })}>
+                {definition.enabled ? <Pause size={14}/> : <Play size={14}/>}
+                {definition.enabled ? '暂停' : '恢复'}
+              </button>
+              <button type="button" className="secondary" disabled={!!automationBusy}
+                onClick={() => automationAction('run', definition.id)}>
+                <Play size={14}/>立即运行
+              </button>
+              <button type="button" className="secondary" disabled={!!automationBusy}
+                onClick={() => {
+                  if (confirm('删除自动任务“' + definition.name + '”？已有运行记录会保留。'))
+                    automationAction('remove', definition.id);
+                }}><Trash2 size={14}/>删除</button>
+            </div>
+            <details className="automation-runs">
+              <summary>运行记录（{automations.runs.filter(run =>
+                run.automationId === definition.id).length}）</summary>
+              {automations.runs.filter(run => run.automationId === definition.id)
+                .slice(0, 20).map(run => <div className="automation-run" key={run.id}>
+                  <span className={'task-state state-' + (run.status === 'completed' ? 'completed'
+                    : run.status === 'failed' ? 'failed'
+                      : run.status === 'suspended' ? 'suspended' : 'interrupted')}>
+                    {run.status}
+                  </span>
+                  <code>{new Date(run.startedAt || run.scheduledFor).toLocaleString()}</code>
+                  <small>{run.trigger}</small>
+                  {['queued', 'running', 'suspended'].includes(run.status)
+                    && <button type="button" className="secondary"
+                      disabled={!!automationBusy} onClick={() => automationAction('cancel', run.runId)}>取消</button>}
+                  {['failed', 'interrupted', 'cancelled'].includes(run.status)
+                    && <button type="button" className="secondary"
+                      disabled={!!automationBusy} onClick={() => automationAction('retry', run.runId)}>重跑</button>}
+                  {run.error && <p className="error-text">{run.error}</p>}
+                </div>)}
+            </details>
+          </div>)}
+        {automations?.definitions.filter(item => item.projectId === project?.id).length === 0
+          && <p className="muted">当前项目还没有自动任务。</p>}
+      </section>
     </>}
     {panel === 'reports' && <>
       <div className="review-head"><span>{session?.title || '当前会话'}的任务报告</span>

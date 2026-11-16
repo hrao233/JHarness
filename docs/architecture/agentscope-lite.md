@@ -1,6 +1,6 @@
 # AgentScope Lite 架构与迁移规划
 
-Status: Draft
+Status: Implemented through Phase 5; Phase 6 hardening tracked in progress
 
 Date: 2026-11-16
 
@@ -63,7 +63,8 @@ JHarness/
 ├─ libs/
 │  ├─ agent-core/               Agent loop, messages, events, tools, middleware
 │  ├─ agent-harness/            Sessions, context, workspace, memory, skills
-│  └─ model-openai/             Built-in OpenAI-compatible model adapter
+│  ├─ model-openai/             Built-in OpenAI-compatible model adapter
+│  └─ dependencies-bom/         Local third-party dependency versions
 ├─ packaging/windows/           jlink and Windows packaging scripts
 ├─ scripts/                     Build, test and development entry points
 ├─ tests/

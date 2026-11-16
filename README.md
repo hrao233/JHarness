@@ -1,8 +1,8 @@
 # JHarness
 
-Windows 本地项目助手。桌面窗口由 Electron 和 React 提供，Java 后端使用 AgentScope Core 和 Harness。应用通过进程管道传输 JSON 行和流式事件。
+Windows 本地项目助手。桌面窗口由 Electron 和 React 提供，Java 后端使用仓库内本地构建的 Agent Core、Harness 和 OpenAI 兼容模型模块。应用通过进程管道传输 JSON 行和流式事件。
 
-会话通过 AgentScope Harness 执行，Core 负责推理、工具调度、终止与步数用尽后的总结。JHarness 通过中间件和原生事件接收进度，并配置本地工具、审批和项目记忆。
+会话通过本地 Harness 执行，Core 负责推理、工具调度、终止与步数用尽后的总结。JHarness 通过中间件和原生事件接收进度，并配置本地工具、审批和项目记忆。运行时保留 AgentScope 的包名和持久化格式，但不再依赖 AgentScope 的发布构件。
 
 ## 使用
 
@@ -36,13 +36,18 @@ Agent 可以浏览目录、按名称查找、读取、编辑和新建项目内�
 
 ## 开发
 
-需要 Windows x64、JDK 17+、Maven 和 Node.js。当前后端使用 AgentScope Java `2.1.0-SNAPSHOT` 的本地 Maven 构件。若本机尚未安装该版本，在对应 AgentScope Java 源码根目录构建：
+需要 Windows x64、JDK 17+、Maven 和 Node.js。根目录的 `pom.xml` 是唯一的 Java 构建入口，所有运行时模块都在本仓库内构建，不需要预先安装 AgentScope Maven 构件。
 
-```powershell
-mvn -T1C -pl agentscope-harness,agentscope-extensions/agentscope-extensions-model/agentscope-extensions-model-openai -am -DskipTests install
+```text
+libs/agent-core/        ReAct、消息、事件、工具、中间件、权限与状态
+libs/agent-harness/     会话、上下文、工作区、记忆、Skill、审批与插件
+libs/model-openai/      OpenAI 兼容与 DeepSeek 选项
+apps/backend/           桌面 JSON 管道和 JHarness 产品逻辑
+apps/desktop/           Electron 生命周期与安全存储
+apps/ui/                React 界面
 ```
 
-后端源码统一位于 `apps/backend/src/main/java/local/jharness` 包。根包的 `Backend` 是桌面 JSON 管道入口，`agent` 包负责组装会话、审批、本地工具与事件转发，`memory` 包负责项目记忆。ReAct 实现通过 Maven 的 Core 依赖进入运行包。
+后端产品源码位于 `apps/backend/src/main/java/local/jharness`。根包的 `Backend` 是桌面 JSON 管道入口，`agent` 包负责组装会话、审批、本地工具与事件转发，`memory` 包负责项目记忆。ReAct 和 Harness 通过本地 Maven 模块进入运行包。
 
 | 能力 | JHarness 的入口 |
 | --- | --- |
@@ -57,12 +62,12 @@ mvn -T1C -pl agentscope-harness,agentscope-extensions/agentscope-extensions-mode
 
 ```powershell
 npm ci
-mvn -T1C package
+mvn -B -T1C clean verify
 & "$env:JAVA_HOME/bin/jlink.exe" --add-modules java.se,jdk.unsupported,jdk.crypto.ec,jdk.charsets,jdk.zipfs --strip-debug --no-header-files --no-man-pages --compress=zip-6 --output runtime
 npm test
 npm run package:win
 ```
 
-`npm test` 使用本地模拟模型服务验证 Java 管道、模型请求、工具权限、流式回复和跨进程会话恢复。设置页的「测试连接」可验证实际账号。打包目录已包含 Java 运行时，使用者可以直接启动。Git 追踪源码和锁文件。
+`mvn clean verify` 会运行 Core、Harness、OpenAI 模型适配器和后端模块的完整测试。`npm test` 使用本地模拟模型服务验证 Java 管道、模型请求、工具权限、流式回复和跨进程会话恢复。设置页的「测试连接」可验证实际账号。打包目录已包含 Java 运行时，使用者可以直接启动。Git 追踪源码和锁文件。
 
 架构、迁移决策和当前进度见 `docs/architecture/`、`docs/decisions/`、`docs/research/` 和 `docs/progress/`。

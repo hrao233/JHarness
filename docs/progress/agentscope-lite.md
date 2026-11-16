@@ -2,40 +2,133 @@
 
 Updated: 2026-11-16
 
-## Completed
+## Current State
 
-- Phase 0 baseline and source provenance.
-- Phase 1 application layout and Maven aggregator.
-- First Phase 2 slice: local `jharness-agent-core` with the AgentScope message
-  and content model.
+JHarness now builds and runs from local Java modules. It no longer resolves
+AgentScope Core, Harness or model artifacts from Maven at runtime.
 
-## Current Module State
+```text
+apps/backend
+  -> libs/agent-harness
+  -> libs/model-openai
+  -> libs/agent-core
 
-- `apps/backend` still uses the upstream AgentScope artifacts.
-- `libs/agent-core` builds independently and is not yet on the backend runtime
-  classpath.
-- Package names remain unchanged to preserve serialization compatibility.
-- The imported message slice includes 35 main files and 10 test classes.
+libs/agent-harness -> libs/agent-core
+libs/model-openai  -> libs/agent-core
+```
 
-## Verification Baseline
+The imported package names remain `io.agentscope.*` so persisted state, event
+payloads and existing downstream imports stay compatible.
 
-- `mvn -B -T1C clean verify`
-- `npm test`
-- `npm run build:ui`
-- `npm run package:win`
+## Completed Phases
 
-## Next Slice
+### Phase 0: Baseline and provenance
 
-The next core slice should add the event and tool contracts needed by the ReAct
-loop. Before backend cutover, agent-core must contain, at minimum:
+- Created the feature branch `feat/agentscope-lite-foundation`.
+- Captured architecture, research, module-boundary and session decisions.
+- Recorded the AgentScope source snapshot by version, file count, line count
+  and SHA-256 aggregate digest in `docs/upstream/agentscope-provenance.md`.
+- Preserved Apache 2.0 headers and recorded every intentional source exclusion.
 
-- agent/event contracts;
-- tool registration and invocation contracts;
-- model request contracts;
-- middleware contracts;
-- permission contracts;
-- the ReAct loop and cancellation path.
+### Phase 1: Repository foundation
 
-Backend cutover is intentionally blocked until the local harness module can
-provide the behavior currently imported from `agentscope-harness`.
+- Moved product code into `apps/backend`, `apps/desktop` and `apps/ui`.
+- Moved Windows packaging into `packaging/windows`.
+- Added the root Maven aggregator, local dependency BOM and cross-process E2E
+  test layout.
+- Updated Electron, Vite, tests and packaging paths.
 
+### Phase 2: Agent core
+
+- Added `libs/agent-core` with the complete provider-independent AgentScope
+  Core surface used by JHarness.
+- Retained the ReAct loop, events, messages, tools, middleware, permissions,
+  cancellation, state, sessions, skills, RAG and workspace contracts.
+- Core depends on approved third-party libraries only and has no Harness,
+  backend, desktop or UI dependency.
+
+### Phase 3: Agent harness
+
+- Added `libs/agent-harness` against the local Core module.
+- Retained workspace, local and remote filesystem contracts, session logs,
+  transcript recovery, context assembly, compaction, memory, skills, subagents,
+  task repositories, gateway and channel abstractions.
+- Preserved the existing workspace, memory and session file layouts.
+- Kept cloud sandboxes, vendor channels and remote protocol implementations
+  out of the default product dependency graph.
+
+### Phase 4: Plugin host
+
+- Added a deterministic, in-process capability host in
+  `io.agentscope.harness.plugin`.
+- Supported capability slots for model providers, tools, middleware, context
+  sources, skill repositories, session stores, agent state stores, filesystems
+  and gateway channels.
+- Added manifest versioning, dependencies, settings schema, duplicate checks,
+  dependency ordering and reverse-order shutdown.
+- Added tests that exercise every capability slot, dependency ordering,
+  capability declarations, duplicate single-select providers and settings
+  schema preservation.
+- Project-local executable plugins are not scanned or loaded automatically.
+  Callers must provide an application-controlled, trusted classloader.
+
+### Phase 5: Product cutover
+
+- Pointed `apps/backend` at `local.jharness` modules.
+- Removed all `io.agentscope:*` Maven runtime dependencies.
+- Imported the OpenAI-compatible adapter and DeepSeek options only.
+- Excluded Kimi, GLM and MiniMax implementations from the local model module.
+- Kept Feishu, DingTalk, WeCom, Weixin, GitHub, GitLab, cloud storage, external
+  sandbox and protocol adapters outside the default distribution.
+- Preserved the desktop JSON-line protocol and user-visible JHarness behavior.
+
+## Lightweight Runtime
+
+Dependencies that support optional capabilities are marked optional where the
+runtime can operate without them:
+
+- MCP SDK;
+- OkHttp model transports;
+- tree-sitter shell analysis;
+- OpenTelemetry tracing;
+- Jackson YAML configuration;
+- Commons Compress sandbox archives.
+
+SQLite remains a required Harness dependency because the default local session
+storage uses it on the normal conversation path.
+
+The shaded backend JAR contains only the local Core, Harness, OpenAI-compatible
+model module, JHarness backend and required runtime dependencies.
+
+## Verification
+
+The final verification gate is:
+
+```powershell
+mvn -B -T1C clean verify
+npm test
+npm run build:ui
+npm run package:win
+```
+
+Last verified on 2026-11-16:
+
+- `mvn -B -T1C clean verify`: 5070 tests, 0 failures, 0 errors;
+- `npm test`: 2 tests, 0 failures;
+- `npm run build:ui`: success;
+- `npm run package:win`: success;
+- shaded backend JAR: 22,437,472 bytes (21.4 MiB).
+
+The cross-process Node test launches the shaded backend JAR with the bundled
+Java runtime and verifies model requests, tool permissions, streaming events,
+workspace edits, memory, web approval, cancellation and session recovery.
+
+## Remaining Hardening
+
+These are follow-up hardening items, not missing Phase 2-5 functionality:
+
+- durable approval continuation across backend crashes;
+- an independent plugin-consumer build fixture and automated API drift check;
+- process-isolated loading for third-party executable plugins;
+- explicit startup-time and package-size budgets in CI;
+- broader persisted-session compatibility fixtures for older releases.

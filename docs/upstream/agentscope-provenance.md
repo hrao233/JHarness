@@ -57,3 +57,10 @@ The final aggregate is the SHA-256 of the UTF-8 manifest.
 - Do not rename packages during the first import.
 - Add a local patch log when imported source diverges from this snapshot.
 
+## Local Patch Log
+
+- `agentscope-extensions-model-openai`: excluded the Kimi, GLM and MiniMax
+  provider/formatter implementations. JHarness ships the OpenAI-compatible
+  provider and DeepSeek options only; other providers remain available through
+  the plugin model-provider contract.
+

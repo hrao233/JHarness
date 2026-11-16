@@ -53,7 +53,7 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
           function: { name: step[0], arguments: JSON.stringify(step[1]) } }] }
       : { role: 'assistant', content: reviewing ? reviewResponses.shift()
         : extracting ? '- AUTO-FACT-198' : consolidating ? '- AUTO-FACT-198（已整理）'
-        : toolAvailable ? '**ORCHID-28**' : 'OK' };
+        : toolAvailable ? '**ORCHID-28**' : endless ? 'FIXTURE-LIMIT-SUMMARY' : 'OK' };
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.end('data: ' + JSON.stringify({ id: 'chatcmpl-test', object: 'chat.completion.chunk',
       created: 1, model: 'fixture', choices: [{ index: 0, delta,
@@ -332,7 +332,12 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
       permission: 'full', message: '测试循环上限' });
     await waitEvent(limited, 'done');
     assert.equal(events.filter(event => event.runId === limited && event.event === 'tool-start').length, 18);
-    assert.match((await waitEvent(limited, 'result')).data.text, /步数上限/);
+    const limitResult = await waitEvent(limited, 'result');
+    assert.equal(limitResult.data.reason, 'MAX_ITERATIONS');
+    assert.match(limitResult.data.text, /FIXTURE-LIMIT-SUMMARY/);
+    assert.ok(events.some(event => event.runId === limited && event.event === 'loop-phase'
+      && event.data.phase === 'summary'));
+    endless = false;
 
     for (const effort of ['default', 'none', 'low', 'high', 'max']) {
       await call('testModel', { ...model, provider: 'deepseek', model: 'deepseek-flash', effort });

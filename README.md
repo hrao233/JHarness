@@ -2,7 +2,7 @@
 
 Windows 本地项目助手。桌面窗口由 Electron 和 React 提供，Java 后端使用 AgentScope Core 和 Harness。应用通过进程管道传输 JSON 行和流式事件。
 
-JHarness 的 `AgentLoop` 驱动每轮模型请求和工具执行，直到模型提交最终回复、达到执行上限或用户取消。`ReAct` 接入 AgentScope 的模型、工具注册表、上下文中间件和会话日志。会话显示当前步骤，工具结果在进入下一次模型请求前写入日志。
+正常会话由仓库内完整的 AgentScope `ReActAgent.java` 驱动。它负责模型与工具循环、工具调用恢复、终止条件和步数用尽后的总结。JHarness 在循环中增加了桌面进度事件，模型、工具注册和会话日志继续由 AgentScope Core 与 Harness 提供。
 
 ## 使用
 
@@ -41,6 +41,8 @@ Agent 可以浏览目录、按名称查找、读取、编辑和新建项目内�
 ```powershell
 mvn -T1C -pl agentscope-harness,agentscope-extensions/agentscope-extensions-model/agentscope-extensions-model-openai -am -DskipTests install
 ```
+
+`backend/src/main/java/io/agentscope/core/ReActAgent.java` 来自该 AgentScope Java 源码，保留版权声明及 [Apache-2.0 许可证](backend/third-party/agentscope/LICENSE)。后端构建以该源码编译的类为准，包括它的内部类。更新 AgentScope 构件时需同步核对这份源码与 Core/Harness 的接口。
 
 然后在 JHarness 根目录运行：
 

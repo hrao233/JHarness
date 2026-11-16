@@ -347,9 +347,7 @@ public final class Backend {
                                 if (autoMemory) memory.attachMaintenance(builder, auxiliary);
                                 return builder.build();
                             },
-                            agent -> new ReAct(agent.getDelegate()).run(message, context,
-                                    store(workspace).open(new SessionKey(USER_ID, AGENT_ID, context.getSessionId()), context)),
-                            HarnessAgent::close)
+                            agent -> agent.streamEvents(message, context), HarnessAgent::close)
                     .subscribeOn(Schedulers.boundedElastic())
                     .doFinally(signal -> {
                         runs.remove(runId);
@@ -439,7 +437,7 @@ public final class Backend {
     }
 
     private void publish(String runId, AgentEvent value) {
-        if (value instanceof CustomEvent e && List.of("loop-phase", "step-reply").contains(e.getName())) {
+        if (value instanceof CustomEvent e && e.getName().equals("loop-phase")) {
             event(runId, e.getName(), e.getValue());
         } else if (value instanceof TextBlockDeltaEvent e) {
             event(runId, "text", Map.of("delta", e.getDelta(), "replyId", e.getReplyId()));
@@ -453,7 +451,9 @@ public final class Backend {
             event(runId, "tool-end", Map.of("toolId", e.getToolCallId(), "status", e.getState().toString()));
         } else if (value instanceof AgentResultEvent e) {
             Msg result = e.getResult();
-            event(runId, "result", Map.of("id", result.getId(), "text", result.getTextContent()));
+            var reason = result.getGenerateReason();
+            event(runId, "result", Map.of("id", result.getId(), "text", result.getTextContent(),
+                    "reason", reason == null ? "" : reason.name()));
         }
     }
 

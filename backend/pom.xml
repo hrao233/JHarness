@@ -63,6 +63,13 @@
                                         <exclude>META-INF/*.RSA</exclude>
                                     </excludes>
                                 </filter>
+                                <filter>
+                                    <artifact>io.agentscope:agentscope-core</artifact>
+                                    <excludes>
+                                        <exclude>io/agentscope/core/ReActAgent.class</exclude>
+                                        <exclude>io/agentscope/core/ReActAgent$*.class</exclude>
+                                    </excludes>
+                                </filter>
                             </filters>
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>

@@ -112,15 +112,14 @@ function App() {
       }
       if (selection.current !== current.selection) return;
       if (event === 'loop-phase') {
-        current.step = data.step;
+        current.step = data.phase === 'summary' ? 'summary' : data.step;
         return setPhase(data);
       }
       const step = current.step;
       setItems(previous => {
-        if (event === 'text' || event === 'result' || event === 'step-reply') {
+        if (event === 'text' || event === 'result') {
           const index = previous.findLastIndex(item => item.role === 'assistant' && item.runId === current.id
             && item.step === step);
-          if (event === 'step-reply' && !data.text) return previous;
           if (index < 0) return [...previous, { id: data.id, replyId: data.replyId, role: 'assistant',
             runId: current.id, step, text: data.text || data.delta }];
           const item = previous[index];
@@ -130,10 +129,13 @@ function App() {
             : value);
         }
         if (event === 'tool-start') {
-          return [...previous, { role: 'tool', id: data.toolId, name: data.name, status: '执行中', args: '', output: '' }];
+          return [...previous, { role: 'tool', id: current.id + ':' + step + ':' + data.toolId, toolId: data.toolId,
+            runId: current.id, name: data.name, status: '执行中', args: '', output: '' }];
         }
-        return previous.map(item => {
-          if (item.role !== 'tool' || item.id !== data.toolId) return item;
+        const toolIndex = previous.findLastIndex(item => item.role === 'tool'
+          && item.runId === current.id && item.toolId === data.toolId);
+        return previous.map((item, index) => {
+          if (index !== toolIndex) return item;
           if (event === 'tool-args') return { ...item, args: (item.args + data.delta).slice(0, 16000) };
           if (event === 'tool-output') return { ...item, output: (item.output + data.delta).slice(0, 16000) };
           if (event === 'tool-end') return { ...item, status: data.status };
@@ -330,7 +332,8 @@ function App() {
       </header>
       <Conversation key={session?.id || project?.id || 'empty'} items={items} sessionId={session?.id}
         status={run && !approvals.length ? (phase
-          ? '第 ' + phase.step + ' / ' + phase.limit + ' 步 · ' + (phase.phase === 'acting' ? '执行工具' : '请求模型')
+          ? '第 ' + phase.step + ' / ' + phase.limit + ' 步 · '
+            + ({ acting: '执行工具', reasoning: '请求模型', summary: '整理本轮结果' }[phase.phase] || '执行中')
           : '正在准备…') : null}
         copy={copy} quote={run || loading ? null : quote} saved={bookmarks} onSave={saveBookmark}
         run={run} jump={jump} scroll={scroll}>

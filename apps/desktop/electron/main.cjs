@@ -19,6 +19,7 @@ const pending = new Map();
 const attachments = new Map();
 const effortValues = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const deepseekEfforts = ['none', 'low', 'high', 'max'];
+const smokeMode = process.argv.includes('--jharness-smoke');
 
 function fastTier(profile) {
   if (profile.provider !== 'compatible') return '';
@@ -328,6 +329,9 @@ function register() {
 }
 
 app.setName('JHarness');
+if (smokeMode && process.env.JHARNESS_SMOKE_DATA) {
+  app.setPath('userData', path.resolve(process.env.JHARNESS_SMOKE_DATA));
+}
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance', () => {
@@ -353,12 +357,36 @@ else {
     win = new BrowserWindow({
       width: 1240, height: 830, minWidth: 780, minHeight: 570,
       backgroundColor: '#fcfcfb', autoHideMenuBar: true,
+      show: !smokeMode,
       webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true,
         nodeIntegration: false, sandbox: true }
     });
+    if (smokeMode) {
+      win.webContents.on('did-fail-load', (_, code, description) => {
+        console.error('JHARNESS_SMOKE_ERROR ' + code + ' ' + description);
+        app.exit(1);
+      });
+      win.webContents.on('did-finish-load', () => {
+        setTimeout(() => {
+          win.webContents.executeJavaScript(
+            '({ title: document.title, text: document.body.innerText, url: location.href })')
+            .then(result => {
+              console.log('JHARNESS_SMOKE_OK ' + JSON.stringify(result));
+              app.quit();
+            })
+            .catch(error => {
+              console.error('JHARNESS_SMOKE_ERROR ' + error.message);
+              app.exit(1);
+            });
+        }, 1200);
+      });
+    }
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     win.webContents.on('will-navigate', event => event.preventDefault());
-    win.loadFile(path.join(__dirname, '..', '..', '..', 'dist', 'index.html'));
+    const ui = app.isPackaged
+      ? path.join(__dirname, '..', 'dist', 'index.html')
+      : path.join(__dirname, '..', '..', '..', 'dist', 'index.html');
+    win.loadFile(ui);
   }).catch(() => {
     dialog.showErrorBox('JHarness', '无法读取应用设置。');
     app.quit();

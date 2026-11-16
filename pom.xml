@@ -99,5 +99,6 @@
         <module>libs/agent-harness</module>
         <module>libs/model-openai</module>
         <module>apps/backend</module>
+        <module>tests/plugin-consumer</module>
     </modules>
 </project>

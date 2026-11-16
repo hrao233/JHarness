@@ -227,6 +227,27 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     assert.equal(await call('approve', { runId: stopped, approvalId: cancelled.data.id, allow: true }), false);
     await assert.rejects(readFile(path.join(projectPath, 'Cancelled.txt')), { code: 'ENOENT' });
 
+    const interrupted = randomUUID();
+    steps = [['create_file', { path: 'Interrupted.txt', content: 'must not execute' }]];
+    await call('chat', { ...context, sessionId: randomUUID(), ...model, runId: interrupted,
+      permission: 'ask', message: '创建一个文件' });
+    const interruptedApproval = await waitEvent(interrupted, 'approval');
+    const interruptedExit = once(child, 'exit');
+    child.kill();
+    await interruptedExit;
+    call = launch();
+    const recoveredApprovals = await call('approvals', { projectId: context.projectId });
+    const recovered = recoveredApprovals.find(item => item.id === interruptedApproval.data.id);
+    assert.equal(recovered.status, 'INTERRUPTED');
+    assert.equal(await call('approve', { runId: interrupted,
+      approvalId: interruptedApproval.data.id, allow: true }), false);
+    assert.equal(await call('dismissApproval', {
+      projectId: context.projectId, approvalId: interruptedApproval.data.id
+    }), true);
+    assert.equal((await call('approvals', { projectId: context.projectId }))
+      .find(item => item.id === interruptedApproval.data.id).status, 'DISMISSED');
+    await assert.rejects(readFile(path.join(projectPath, 'Interrupted.txt')), { code: 'ENOENT' });
+
     const terminal = randomUUID();
     const command = "[IO.File]::WriteAllText([IO.Path]::Combine((Get-Location).Path, 'command.txt'), 'approved'); Write-Output '完成'; exit 7";
     steps = [

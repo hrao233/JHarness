@@ -20,3 +20,8 @@ providers, tools, middleware, context sources, skill repositories, session
 stores, agent state stores, filesystems and gateway channels. Project-local
 executable plugins are not discovered automatically; the host must load only
 an application-controlled and trusted classloader.
+
+`PluginProcessHost` provides an explicit process-isolated JSON-line transport
+for trusted external plugins. It does not scan project directories or invoke a
+shell, and it keeps stdout reserved for protocol responses and stderr for
+diagnostics.

@@ -13,6 +13,7 @@ import io.agentscope.harness.agent.filesystem.spec.LocalFilesystemSpec;
 import io.agentscope.harness.agent.memory.compaction.CompactionConfig;
 import io.agentscope.harness.agent.session.WorkspaceSessionLogStore;
 import io.agentscope.harness.agent.tools.ToolsConfig;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -57,7 +58,8 @@ public final class ConversationRuntime implements AutoCloseable {
             Path workspace, Path project, RuntimeContext context, Msg message, String task,
             Model model, Model auxiliary, boolean autoMemory, String permission) {}
 
-    private record Approval(String runId, CompletableFuture<Boolean> decision) {}
+    private record Approval(
+            String runId, DurableApprovalStore store, CompletableFuture<Boolean> decision) {}
 
     private final Listener listener;
     private final Function<Throwable, String> describeError;
@@ -81,17 +83,33 @@ public final class ConversationRuntime implements AutoCloseable {
                 throw new IllegalArgumentException("任务已启动。");
             }
         }
+        var approvalStore = new DurableApprovalStore(request.workspace());
         var command = new ProjectCommand(request.project(), text ->
-                requestApproval(runId, "run_command", request.project().toString(), "", text));
+                requestApproval(
+                        runId, approvalStore, "run_command", request.project().toString(), "", text));
         try {
+            approvalStore.recoverInterrupted();
             var toolkit = new Toolkit();
             var review = permission.equals("assist") ? new WriteReview(request.auxiliary(), request.task()) : null;
             toolkit.registerTool(new ProjectTools(request.project(), (operation, path, before, after) ->
-                    allowWrite(runId, permission, review, operation, path, before, after)));
+                    allowWrite(
+                            runId,
+                            approvalStore,
+                            permission,
+                            review,
+                            operation,
+                            path,
+                            before,
+                            after)));
             toolkit.registerTool(command);
             toolkit.registerTool(new ApprovedWeb((operation, value) ->
-                    requestApproval(runId, operation, operation.equals("web_search") ? "api.tavily.com" : "",
-                            "", value)));
+                    requestApproval(
+                            runId,
+                            approvalStore,
+                            operation,
+                            operation.equals("web_search") ? "api.tavily.com" : "",
+                            "",
+                            value)));
             var events = new ConversationEvents(MAX_STEPS, (type, data) -> listener.event(runId, type, data));
             var builder = builder(request, toolkit).middleware(events);
             execution.update(Flux.using(builder::build,
@@ -170,7 +188,13 @@ public final class ConversationRuntime implements AutoCloseable {
 
     public boolean approve(String runId, String approvalId, boolean allow) {
         var approval = approvals.get(approvalId);
-        return approval != null && approval.runId().equals(runId) && approval.decision().complete(allow);
+        if (approval == null || !approval.runId().equals(runId)) return false;
+        try {
+            if (!approval.store().decide(approvalId, allow)) return false;
+            return approval.decision().complete(allow);
+        } catch (IOException error) {
+            return false;
+        }
     }
 
     @Override
@@ -179,8 +203,20 @@ public final class ConversationRuntime implements AutoCloseable {
     }
 
     private void cancelApprovals(String runId) {
-        approvals.values().stream().filter(approval -> approval.runId().equals(runId))
-                .forEach(approval -> approval.decision().complete(false));
+        approvals.entrySet().stream()
+                .filter(entry -> entry.getValue().runId().equals(runId))
+                .forEach(entry -> {
+                    var approval = entry.getValue();
+                    try {
+                        approval.store()
+                                .settle(
+                                        entry.getKey(),
+                                        DurableApprovalStore.Status.CANCELLED);
+                    } catch (IOException ignored) {
+                        // A later startup recovery will surface the unresolved state.
+                    }
+                    approval.decision().complete(false);
+                });
     }
 
     private boolean isRunning(String runId) {
@@ -188,8 +224,15 @@ public final class ConversationRuntime implements AutoCloseable {
         return execution != null && !execution.isDisposed();
     }
 
-    private boolean allowWrite(String runId, String permission, WriteReview review, String operation, String path,
-            String before, String after) {
+    private boolean allowWrite(
+            String runId,
+            DurableApprovalStore approvalStore,
+            String permission,
+            WriteReview review,
+            String operation,
+            String path,
+            String before,
+            String after) {
         if (!isRunning(runId)) return false;
         if (permission.equals("full")) return true;
         if (review != null) {
@@ -199,18 +242,31 @@ public final class ConversationRuntime implements AutoCloseable {
             listener.event(runId, "review", Map.of("path", path, "decision", decision.name()));
             if (decision != WriteReview.Decision.ASK) return decision == WriteReview.Decision.APPROVE;
         }
-        return requestApproval(runId, operation, path, before, after);
+        return requestApproval(runId, approvalStore, operation, path, before, after);
     }
 
-    private boolean requestApproval(String runId, String operation, String path, String before, String after) {
+    private boolean requestApproval(
+            String runId,
+            DurableApprovalStore store,
+            String operation,
+            String path,
+            String before,
+            String after) {
         String id = UUID.randomUUID().toString();
-        var approval = new Approval(runId, new CompletableFuture<>());
-        approvals.put(id, approval);
         try {
+            store.add(id, runId, operation, path, before, after);
+            var approval = new Approval(runId, store, new CompletableFuture<>());
+            approvals.put(id, approval);
             if (!isRunning(runId)) return false;
             listener.event(runId, "approval", Map.of("id", id, "operation", operation, "path", path,
                     "before", before, "after", after));
             return approval.decision().get(10, TimeUnit.MINUTES);
+        } catch (IOException error) {
+            listener.event(
+                    runId,
+                    "error",
+                    Map.of("message", "无法持久化审批请求，已拒绝执行有副作用的操作。"));
+            return false;
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
             return false;
@@ -218,7 +274,13 @@ public final class ConversationRuntime implements AutoCloseable {
             return false;
         } finally {
             approvals.remove(id);
+            try {
+                store.settle(id, DurableApprovalStore.Status.CANCELLED);
+            } catch (IOException ignored) {
+                // The persisted PENDING record will be marked INTERRUPTED on restart.
+            }
             listener.event(runId, "approval-end", Map.of("id", id));
         }
     }
+
 }

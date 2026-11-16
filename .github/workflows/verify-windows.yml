@@ -1,0 +1,35 @@
+name: Verify Windows Build
+
+on:
+  push:
+    branches: [main, feat/agentscope-lite-foundation]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install Node dependencies
+        run: npm ci
+      - name: Run full Java verification
+        run: mvn -B -T1C clean verify
+      - name: Run Node integration tests and startup budgets
+        run: npm test
+      - name: Build bundled runtime
+        shell: pwsh
+        run: |
+          & "$env:JAVA_HOME\bin\jlink.exe" --add-modules java.se,jdk.unsupported,jdk.crypto.ec,jdk.charsets,jdk.zipfs --strip-debug --no-header-files --no-man-pages --compress=zip-6 --output runtime
+      - name: Package Windows application
+        run: npm run package:win
+      - name: Recheck package budgets
+        run: npm run check:budgets

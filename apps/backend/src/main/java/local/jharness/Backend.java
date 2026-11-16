@@ -99,6 +99,8 @@ public final class Backend {
                 case "removeBookmark" -> removeBookmark(params);
                 case "importBookmarks" -> importBookmarks(params);
                 case "chat" -> startChat(params);
+                case "approvals" -> listApprovals(params);
+                case "dismissApproval" -> dismissApproval(params);
                 case "approve" -> conversations.approve(identifier(params, "runId"),
                         identifier(params, "approvalId"), params.path("allow").asBoolean(false));
                 default -> throw new IllegalArgumentException("未知操作。");
@@ -249,6 +251,18 @@ public final class Backend {
         conversations.start(new ConversationRuntime.Request(workspace(params), project, context, message,
                 required(params, "message"), model, auxiliary, autoMemory, permission));
         return true;
+    }
+
+    private List<local.jharness.agent.DurableApprovalStore.ApprovalRecord> listApprovals(
+            JsonNode params) throws Exception {
+        var store = new local.jharness.agent.DurableApprovalStore(workspace(params));
+        store.recoverInterrupted();
+        return store.list();
+    }
+
+    private boolean dismissApproval(JsonNode params) throws Exception {
+        return new local.jharness.agent.DurableApprovalStore(workspace(params))
+                .dismiss(identifier(params, "approvalId"));
     }
 
     private Msg userMessage(JsonNode params) {

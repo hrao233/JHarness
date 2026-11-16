@@ -70,4 +70,6 @@ npm run package:win
 
 `mvn clean verify` 会运行 Core、Harness、OpenAI 模型适配器和后端模块的完整测试。`npm test` 使用本地模拟模型服务验证 Java 管道、模型请求、工具权限、流式回复和跨进程会话恢复。设置页的「测试连接」可验证实际账号。打包目录已包含 Java 运行时，使用者可以直接启动。Git 追踪源码和锁文件。
 
+`npm run package:win` 还会隐藏启动打包后的 Electron 应用，等待 React 渲染完成后检查页面文本，避免生成只因路径错误而白屏的 EXE。实际可用产物位于 `release/win-unpacked/JHarness.exe`。
+
 架构、迁移决策和当前进度见 `docs/architecture/`、`docs/decisions/`、`docs/research/` 和 `docs/progress/`。

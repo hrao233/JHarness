@@ -82,6 +82,24 @@ payloads and existing downstream imports stay compatible.
   sandbox and protocol adapters outside the default distribution.
 - Preserved the desktop JSON-line protocol and user-visible JHarness behavior.
 
+### Phase 6: Hardening
+
+- Persisted approval requests and decisions in the project workspace.
+- Marked approvals left pending after a backend crash as `INTERRUPTED`; restart
+  never re-executes an uncertain side effect automatically.
+- Added explicit `approvals` and `dismissApproval` protocol operations.
+- Added an isolated executable-plugin process host with bounded JSON-line
+  requests, stderr diagnostics, shutdown, and explicit working directories.
+- Added an independent public-API consumer fixture under `tests/plugin-consumer`.
+- Added API-surface drift assertions for capability names and manifest version.
+- Added JAR, packaged-directory, and startup-time budget checks.
+- Added a Windows verification workflow covering Maven, Node integration,
+  packaging, and package budgets.
+- Added a v1 session fixture covering the legacy event envelope and message
+  payload shape.
+- Fixed packaged Electron UI path resolution and added a hidden packaged-GUI
+  smoke test that verifies rendered page content.
+
 ## Lightweight Runtime
 
 Dependencies that support optional capabilities are marked optional where the
@@ -113,10 +131,10 @@ npm run package:win
 
 Last verified on 2026-11-16:
 
-- `mvn -B -T1C clean verify`: 5070 tests, 0 failures, 0 errors;
-- `npm test`: 2 tests, 0 failures;
+- `mvn -B -T1C clean verify`: 5076 tests, 0 failures, 0 errors;
+- `npm test`: 4 tests, 0 failures;
 - `npm run build:ui`: success;
-- `npm run package:win`: success;
+- `npm run package:win`: success, including `PACKAGED_GUI_SMOKE_OK`;
 - shaded backend JAR: 22,437,472 bytes (21.4 MiB).
 
 The cross-process Node test launches the shaded backend JAR with the bundled
@@ -125,10 +143,7 @@ workspace edits, memory, web approval, cancellation and session recovery.
 
 ## Remaining Hardening
 
-These are follow-up hardening items, not missing Phase 2-5 functionality:
-
-- durable approval continuation across backend crashes;
-- an independent plugin-consumer build fixture and automated API drift check;
-- process-isolated loading for third-party executable plugins;
-- explicit startup-time and package-size budgets in CI;
-- broader persisted-session compatibility fixtures for older releases.
+The remaining work is capability-level RPC over the process bridge and broader
+historical storage migration coverage. The process host currently provides
+isolated lifecycle and request transport; Java capability objects are still
+registered in-process.

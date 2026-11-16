@@ -3,12 +3,12 @@
   "productName": "JHarness",
   "version": "0.1.0",
   "private": true,
-  "main": "desktop/main.cjs",
+  "main": "apps/desktop/electron/main.cjs",
   "scripts": {
-    "build:ui": "vite build --base ./",
+    "build:ui": "vite build --config apps/ui/vite.config.mjs",
     "start": "electron .",
-    "package:win": "npm run build:ui && node desktop/package-win.cjs",
-    "test": "node --test desktop/*.test.cjs"
+    "package:win": "npm run build:ui && node packaging/windows/package.cjs",
+    "test": "node --test apps/desktop/test/*.test.cjs tests/e2e/*.test.cjs"
   },
   "dependencies": {
     "react": "19.2.0",

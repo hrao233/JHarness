@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { mkdir, mkdtemp, rm, writeFile } = require('node:fs/promises');
 const path = require('node:path');
 const { tmpdir } = require('node:os');
-const { importAttachment, projectParts } = require('./context-parts.cjs');
+const { importAttachment, projectParts } = require('../electron/context-parts.cjs');
 
 test('import native file selections and find local skill and plugin instructions', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'jharness-parts-'));

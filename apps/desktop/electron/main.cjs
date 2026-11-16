@@ -45,10 +45,10 @@ function persist() {
 }
 
 function startBackend(directory) {
-  const root = app.isPackaged ? process.resourcesPath : path.join(__dirname, '..');
+  const root = app.isPackaged ? process.resourcesPath : path.join(__dirname, '..', '..', '..');
   const java = path.join(root, 'runtime', 'bin', 'java.exe');
   const jar = app.isPackaged ? path.join(root, 'backend.jar')
-    : path.join(root, 'backend', 'target', 'jharness-backend.jar');
+    : path.join(root, 'apps', 'backend', 'target', 'jharness-backend.jar');
   backend = spawn(existsSync(java) ? java : 'java', ['-Dfile.encoding=UTF-8', '-jar', jar, directory],
     { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   createInterface({ input: backend.stdout }).on('line', line => {
@@ -358,7 +358,7 @@ else {
     });
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     win.webContents.on('will-navigate', event => event.preventDefault());
-    win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
+    win.loadFile(path.join(__dirname, '..', '..', '..', 'dist', 'index.html'));
   }).catch(() => {
     dialog.showErrorBox('JHarness', '无法读取应用设置。');
     app.quit();

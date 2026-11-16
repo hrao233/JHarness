@@ -5,6 +5,7 @@ const { spawn } = require('node:child_process');
 const { once } = require('node:events');
 const { randomUUID } = require('node:crypto');
 const { createInterface } = require('node:readline');
+const { existsSync } = require('node:fs');
 const { mkdtemp, mkdir, readFile, writeFile, rm } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const path = require('node:path');
@@ -67,8 +68,9 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
   const events = [];
   let child;
   function launch() {
-    child = spawn(path.join('runtime', 'bin', 'java.exe'),
-      ['-jar', 'backend/target/jharness-backend.jar', data], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const bundledJava = path.join('runtime', 'bin', 'java.exe');
+    child = spawn(existsSync(bundledJava) ? bundledJava : 'java',
+      ['-jar', 'apps/backend/target/jharness-backend.jar', data], { stdio: ['pipe', 'pipe', 'pipe'] });
     let stderr = '';
     child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-14000); backendLog = stderr; });
     const pending = new Map();

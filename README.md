@@ -36,13 +36,13 @@ Agent 可以浏览目录、按名称查找、读取、编辑和新建项目内�
 
 ## 开发
 
-需要 Windows x64、JDK 21、Maven 和 Node.js。当前后端使用 AgentScope Java `2.1.0-SNAPSHOT` 的本地 Maven 构件。若本机尚未安装该版本，在对应 AgentScope Java 源码根目录构建：
+需要 Windows x64、JDK 17+、Maven 和 Node.js。当前后端使用 AgentScope Java `2.1.0-SNAPSHOT` 的本地 Maven 构件。若本机尚未安装该版本，在对应 AgentScope Java 源码根目录构建：
 
 ```powershell
 mvn -T1C -pl agentscope-harness,agentscope-extensions/agentscope-extensions-model/agentscope-extensions-model-openai -am -DskipTests install
 ```
 
-后端源码统一位于 `local.jharness` 包。根包的 `Backend` 是桌面 JSON 管道入口，`agent` 包负责组装会话、审批、本地工具与事件转发，`memory` 包负责项目记忆。ReAct 实现通过 Maven 的 Core 依赖进入运行包。
+后端源码统一位于 `apps/backend/src/main/java/local/jharness` 包。根包的 `Backend` 是桌面 JSON 管道入口，`agent` 包负责组装会话、审批、本地工具与事件转发，`memory` 包负责项目记忆。ReAct 实现通过 Maven 的 Core 依赖进入运行包。
 
 | 能力 | JHarness 的入口 |
 | --- | --- |
@@ -57,10 +57,12 @@ mvn -T1C -pl agentscope-harness,agentscope-extensions/agentscope-extensions-mode
 
 ```powershell
 npm ci
-mvn -T1C -f backend/pom.xml package
+mvn -T1C package
 & "$env:JAVA_HOME/bin/jlink.exe" --add-modules java.se,jdk.unsupported,jdk.crypto.ec,jdk.charsets,jdk.zipfs --strip-debug --no-header-files --no-man-pages --compress=zip-6 --output runtime
 npm test
 npm run package:win
 ```
 
 `npm test` 使用本地模拟模型服务验证 Java 管道、模型请求、工具权限、流式回复和跨进程会话恢复。设置页的「测试连接」可验证实际账号。打包目录已包含 Java 运行时，使用者可以直接启动。Git 追踪源码和锁文件。
+
+架构与迁移决策见 `docs/architecture/`、`docs/decisions/` 和 `docs/research/`。

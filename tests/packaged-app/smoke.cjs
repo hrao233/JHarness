@@ -18,6 +18,10 @@ main().catch(error => {
 async function main() {
   const data = await mkdtemp(path.join(tmpdir(), 'jharness-gui-smoke-'));
   try {
+    const cliHelp = await command(path.join(__dirname, '..', '..', 'release', 'win-unpacked',
+      'jharness-cli.cmd'), ['--help']);
+    assert.match(cliHelp, /JHarness CLI/);
+    assert.match(cliHelp, /jharness run/);
     const emptyData = path.join(data, 'empty');
     await mkdir(emptyData);
     const smoke = await run(emptyData);
@@ -31,6 +35,27 @@ async function main() {
   } finally {
     await rm(data, { recursive: true, force: true, maxRetries: 5 });
   }
+}
+
+function command(file, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.env.ComSpec || 'cmd.exe',
+      ['/d', '/s', '/c', 'call', file, ...args], { windowsHide: true });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', chunk => { stdout += chunk; });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error('packaged CLI timed out\n' + stdout + stderr));
+    }, 10000);
+    child.once('error', reject);
+    child.once('close', code => {
+      clearTimeout(timer);
+      if (code === 0) resolve(stdout);
+      else reject(new Error('packaged CLI failed\n' + stdout + stderr));
+    });
+  });
 }
 
 async function verifyInterruptedApproval(data) {

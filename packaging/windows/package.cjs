@@ -18,9 +18,12 @@ cpSync(electron, output, { recursive: true, filter: file => path.basename(file) 
 const resources = path.join(output, 'resources');
 const app = path.join(resources, 'app');
 mkdirSync(path.join(app, 'desktop'), { recursive: true });
+mkdirSync(path.join(app, 'cli'), { recursive: true });
 for (const file of ['main.cjs', 'preload.cjs', 'context-parts.cjs', 'worktree-manager.cjs']) {
   copyFileSync(path.join(desktop, file), path.join(app, 'desktop', file));
 }
+copyFileSync(path.join(root, 'apps', 'cli', 'jharness-cli.cjs'),
+  path.join(app, 'cli', 'jharness-cli.cjs'));
 const { name, productName, version } = require('../../package.json');
 writeFileSync(path.join(app, 'package.json'), JSON.stringify({
   name, productName, version, main: 'desktop/main.cjs'
@@ -30,4 +33,7 @@ cpSync(runtime, path.join(resources, 'runtime'), { recursive: true });
 copyFileSync(backend, path.join(resources, 'backend.jar'));
 const executable = path.join(output, 'JHarness.exe');
 require('node:fs').renameSync(path.join(output, 'electron.exe'), executable);
+writeFileSync(path.join(output, 'jharness-cli.cmd'),
+  '@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n'
+    + '"%~dp0JHarness.exe" "%~dp0resources\\app\\cli\\jharness-cli.cjs" %*\r\n');
 console.log(executable);

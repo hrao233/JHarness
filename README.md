@@ -26,6 +26,17 @@ Windows 本地项目助手。桌面窗口由 Electron 和 React 提供，Java �
 - 左侧「检查点」记录 Agent 文件写入前后的快照、命令类型和结果状态。可查看完整前后差异并恢复单个文件；若文件在检查点后又被修改或删除，恢复会中止，避免覆盖后续编辑。
 - 左侧「任务报告」按运行归档计划、验收标准、命令与测试证据、交付物和文件改动。计划来自 Agent 的 `todo_write`，验收标准来自 `acceptance_write` 且只能由用户绑定同一运行的命令证据后按退出码核验。命令记录退出码、耗时与有界输出，交付物保存在应用数据目录并可从桌面直接打开。一次运行涉及多个文件时，可先整组预检再一起恢复；任何文件在任务后又被手改，整组回退都会停止。
 - 左侧「隔离工作树」从当前 Git 提交创建独立 `jharness/*` 分支和 App 数据目录中的工作树，可把实验性改动放在独立项目会话里。未提交修改不会复制到工作树；工作树提交后可审阅 commit、统计和补丁，并在主工作区干净时以未提交、已暂存状态应用，冲突会自动撤销。有未提交内容或未合并提交时，移除默认被阻止，确认丢弃后才强制清理。
+
+除桌面外，可以使用同一个运行时从命令行执行任务：
+
+```powershell
+$env:JHARNESS_API_KEY = "..."
+$env:JHARNESS_MODEL = "..."
+$env:JHARNESS_BASE_URL = "https://api.openai.com/v1"
+npm run cli -- run "读取 README 并总结项目结构" --project D:\path\to\project --permission ask
+```
+
+CLI 会读取桌面 `settings.json`，复用已有项目 ID 和最新/指定会话；新会话会写回桌面设置。Windows 包内提供 `release/win-unpacked/jharness-cli.cmd`。支持 `--json` NDJSON 事件、`ask/assist/full/durable` 审批模式和 `doctor` 诊断。
 - 闪电按钮独立控制生成速度。兼容接口可在模型设置里指定服务商支持的 `fast` 或 `priority`，开启后实际发送 `service_tier`，可能产生额外用量费用。DeepSeek 官方接口使用标准档。最终速度取决于服务商和账号。
 - 右侧模型按钮打开推理强度滑块。DeepSeek 官方支持关闭、低、高和极高，后端分别发送 `thinking` 和 `reasoning_effort`。没有已选档位时优先选「高」，其次选配置中的第一个档位。兼容接口可勾选模型支持的强度，全部取消时不发送推理参数。连接测试可以带上具体推理强度和快速档位。
 - 左侧分别显示最近会话和项目。项目行的「＋」会在该项目新建会话，项目名前的箭头展开或收起会话。

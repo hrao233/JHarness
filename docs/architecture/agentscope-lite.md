@@ -335,6 +335,25 @@ project. It runs `git merge --no-commit --no-ff <branch>` in the source checkout
 staged files. The result deliberately remains uncommitted so the user can inspect or amend it.
 A failed merge runs `git merge --abort`; the isolated branch is not deleted automatically.
 
+### CLI second entry
+
+`apps/cli/jharness-cli.cjs` is a thin client over the same JSON-line backend, not a second agent
+runtime. It resolves the project directory, reads the desktop `settings.json`, reuses or creates the
+matching project/session identity, then launches the local shaded JAR with the same workspace root.
+Credentials come from environment variables and are never written by the CLI.
+
+Human mode streams text to stdout, reports tools on stderr and asks for approval over stdin. JSON mode
+emits every backend event as NDJSON and denies approvals because no interactive approver is present.
+Durable tasks that suspend return exit code `3` and print the pending operations. `doctor` reports
+the resolved project, session, data directory and runtime paths without printing credentials.
+
+The packaged layout places the script under `resources/app/cli/` and the backend/JDK under
+`resources/`; the same script detects this layout. `jharness-cli.cmd` starts the packaged Electron
+executable with `ELECTRON_RUN_AS_NODE=1`, so no system Node installation is required. CLI state for
+projects absent from the desktop lives in `cli-projects.json`. When a session is created for a
+desktop project, the CLI atomically rewrites the settings file; the desktop should not be persisting
+unrelated settings at the exact same moment.
+
 ### Session search projection
 
 Session recall uses a rebuildable SQLite FTS5 database under the local data

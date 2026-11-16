@@ -198,6 +198,13 @@ payloads and existing downstream imports stay compatible.
   diff stat and commit subjects; integration requires clean source and worktree
   checkouts, merges with `--no-commit --no-ff`, leaves staged changes for user
   inspection and aborts on conflict.
+- Added a CLI second entry over the same backend protocol and workspace. It reads
+  desktop settings, reuses or creates a project/session identity, streams text
+  and tools, supports interactive approvals, NDJSON events and durable-suspend
+  exit status.
+- Added packaged CLI support through `jharness-cli.cmd` and Electron's
+  `ELECTRON_RUN_AS_NODE` mode. The CLI test validates the same desktop session
+  and workspace path, and packaged smoke verifies the launcher.
 - Added `acceptance_write` and host-authorized shell-exit verification. Criteria
   begin as `PENDING`; only a user-selected command receipt from the same run can
   produce `PASSED`, `FAILED` or `UNKNOWN`. The report retains command identity,
@@ -238,7 +245,7 @@ npm run package:win
 Last verified on 2026-11-16:
 
 - `mvn -B -T1C clean verify`: 5088 tests, 0 failures, 0 errors, 56 skipped;
-- `npm test`: 6 tests, 0 failures;
+- `npm test`: 7 tests, 0 failures;
 - `npm run build:ui`: success;
 - `npm run package:win`: success, including `PACKAGED_GUI_SMOKE_OK`;
 - shaded backend JAR: 22,579,167 bytes (21.5 MiB).
@@ -262,6 +269,9 @@ checkpoint/report correlation, and command approval across a durable resume.
 - M5 now has desktop integration for process-isolated tool plugins. Capability-
   level RPC, public SDK packaging, model/context/storage plugin slots and upgrade
   compatibility remain.
+- M7 now has a CLI second entry for one-shot tasks and doctor diagnostics. The
+  CLI can create a desktop-visible session and use interactive or JSON output.
+  Channel adapters and concurrent multi-entry settings coordination remain.
 - M4 now has a reviewable project-work slice: task plans, command/test receipts,
   artifacts, file checkpoints, diffs, safe per-file restore and guarded
   whole-run restore, isolated Git worktrees and deterministic shell-evidence

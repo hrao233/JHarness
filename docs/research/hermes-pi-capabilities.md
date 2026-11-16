@@ -54,6 +54,8 @@ Pi 主 CLI 的默认工具不包含计划模式和子代理。独立的 Durable�
 
 `pi-ai` 统一模型接口，`pi-agent-core` 处理轮次、事件和两种输入队列。主 CLI 通过 SDK 组装 `Agent`、自己的 `AgentSession`、JSONL `SessionManager`、项目资源与扩展，再由 TUI、输出模式和 RPC 复用。主 CLI 的会话树与运行中队列可以分别追溯到这两层。依据 `packages/coding-agent/src/core/sdk.ts:191`、`packages/coding-agent/src/core/sdk.ts:403`、`packages/coding-agent/src/core/session-manager.ts:577`。
 
+Hermes 的多入口共用 Python agent 与会话循环，各入口分别负责终端交互、协议传输和权限确认；Pi 则把 CLI 的交互、输出和 RPC 模式建立在同一 SDK/session 管理之上。JHarness 的 CLI 采用更窄的 JSON-line 协议：读取桌面 settings 中的项目/会话身份，启动同一个 shaded JAR，解析相同事件并转发审批决定。它没有复制 agent loop 或存储层。当前差异是 settings 文件尚未做跨进程锁，并行写配置仍需协调。
+
 Durable 库有独立的持久会话、提交记录、调度器和恢复逻辑。它在提交后发布变化，订阅可以还原运行状态和分页转录。它也支持等待信号、记录任务归属和在父子任务之间传播取消。P2 使用该库，并用 Chord 组合跨进程界面、插件和订阅。依据 `packages/durable/src/session/transaction.ts:367`、`packages/durable/src/harness/view.ts:200`、`packages/durable/src/harness/scheduler.ts:1709`、`apps/p2/src/runtime/worker.ts:753`。
 
 ## JHarness 应纳入的产品能力
@@ -66,7 +68,7 @@ Durable 库有独立的持久会话、提交记录、调度器和恢复逻辑。
 | 上下文和知识工作台 | 项目记忆、Skill、会话日志和自动压缩 | M3 区分项目事实、个人偏好、指导文件与原始历史；展示模型可见摘要及来源。基于真实长会话评估中英文本召回、可重建索引和提示词缓存，保留可定位的历史引文。 |
 | 模型与工具管理 | OpenAI 兼容设置、推理档与已有工具审批 | M5/M9 提供角色模型、可见的回退及成本、MCP 能力发现与按项目启停。用受控模拟提供方验证故障切换与明确的来源显示。 |
 | 可扩展产品 | Java 能力注册器、进程宿主、项目 Skill | M5 接入桌面的安装、启停、诊断与版本管理。通过一个独立工具扩展和一个上下文扩展验证同一宿主接口，随后增加模型、存储或其他所需能力。 |
-| 多入口与后台自动化 | Electron 协议、库内网关、部分任务基础 | M7/M8 在 CLI 和桌面间共享同一任务身份；增加按时间与事件触发、运行记录、重复去重、显式审批、摘要和失败重试。暂停一个计划后可明确看到它是否仍有运行中的任务。 |
+| 多入口与后台自动化 | Electron 协议、CLI 第二入口、库内网关、部分任务基础 | M7 已从 CLI 和桌面共享同一项目/会话身份、workspace、事件流、持久任务和审批。M8 再增加按时间与事件触发、运行记录、重复去重、摘要和失败重试。暂停一个计划后可明确看到它是否仍有运行中的任务。 |
 | 管理运维与评测 | 本地构建、测试预算、基本日志 | M6/M9 增加升级、数据备份和恢复、配置档案、用量和诊断。固定场景评估任务完成、重复副作用、上下文召回、插件故障和升级回归，记录可比较的用量与耗时。 |
 
 依据这些功能包推进 [JHarness 产品成熟度路线图](../roadmap/jharness.md)。

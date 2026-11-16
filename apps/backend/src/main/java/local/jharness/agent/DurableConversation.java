@@ -395,6 +395,7 @@ public final class DurableConversation implements AutoCloseable {
         private SessionRuntime(ConversationRuntime.Request request) throws Exception {
             sessionId = request.context().getSessionId();
             var toolkit = new Toolkit();
+            request.pluginTools().forEach(toolkit::registerTool);
             toolkit.registerTool(new ProjectTools(
                     request.project(),
                     (operation, path, before, after, denied, action) -> action.get()));
@@ -402,7 +403,9 @@ public final class DurableConversation implements AutoCloseable {
                 toolkit.replaceAgentTool(new ConfirmedWrite(toolkit.getTool(name)));
             var tools = new ToolsConfig();
             tools.setStrictAllow(true);
-            tools.setAllow(FILE_TOOLS);
+            var allowed = new ArrayList<>(FILE_TOOLS);
+            request.pluginTools().forEach(tool -> allowed.add(tool.getName()));
+            tools.setAllow(allowed);
             events = new ConversationEvents(
                     ConversationRuntime.MAX_STEPS,
                     (type, data) -> {

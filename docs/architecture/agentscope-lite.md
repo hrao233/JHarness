@@ -240,6 +240,17 @@ Keeping only the transcript baseline avoids inheriting stale writer ownership,
 inbox commands or active tool state. The source session remains unchanged and
 continues to hold the complete raw history.
 
+### External process tools
+
+`ExternalPluginManager` stores only explicitly installed plugin directories and enabled state.
+Installation parses `jharness-plugin.json` without launching code. Enabled plugins are started
+lazily when a request builds its toolkit.
+
+Each declared tool is registered as a normal Core tool whose implementation sends `tool_call`,
+`tool` and `input` over the process host JSON-line protocol. Calls are serialized per host, bounded
+by request timeout, and return stderr diagnostics separately from protocol output.
+The process boundary limits crashes and protocol interference; it is not an OS sandbox.
+
 ### Session search projection
 
 Session recall uses a rebuildable SQLite FTS5 database under the local data

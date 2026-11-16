@@ -1,0 +1,23 @@
+{
+  "id": "fixture.echo",
+  "name": "Fixture Echo",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "description": "Echo tool process fixture",
+  "executable": "node",
+  "arguments": ["plugin.cjs"],
+  "tools": [
+    {
+      "name": "plugin_echo",
+      "description": "Echo text through the plugin process",
+      "readOnly": true,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string" }
+        },
+        "required": ["text"]
+      }
+    }
+  ]
+}

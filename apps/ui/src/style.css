@@ -234,4 +234,16 @@ h1{margin:0;font-weight:650;letter-spacing:-.045em;font-size:30px}
 .context-role.role-assistant{background:#e8f0e8;color:#3e6448}
 .context-items{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}
 .context-items span{display:flex;gap:4px;padding:3px 6px;border-radius:5px;background:#f7f4eb;color:#70552e;font-size:11px}
+.plugin-list{gap:4px}
+.external-plugin{border-top:1px solid var(--line);padding:9px 0}
+.external-plugin-head{display:flex;align-items:center;gap:5px}
+.external-plugin-head strong,.external-plugin-head small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.external-plugin-head small{color:var(--muted)}
+.external-plugin-head .secondary{flex:none;padding:4px 7px;font-size:12px}
+.external-plugin-head .secondary[aria-pressed="true"]{background:#e6efe8;border-color:#789a80;color:#31543a}
+.external-plugin>p{margin:5px 0;color:#5c625b;font-size:12px}
+.plugin-tools{display:flex;flex-wrap:wrap;gap:4px}
+.plugin-tools code{padding:2px 5px;border-radius:4px;background:#f0f2ef;font-size:11px}
+.external-plugin details{margin-top:6px;font-size:12px}
+.external-plugin details pre{max-height:120px;overflow:auto;white-space:pre-wrap;background:#f6f6f4;padding:6px;border-radius:5px}
 @media(max-width:900px){.app{grid-template-columns:50px 200px minmax(0,1fr)}.thread{padding-right:17px}.bottom{padding-inline:17px}}

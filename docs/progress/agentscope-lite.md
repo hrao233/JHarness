@@ -147,6 +147,12 @@ payloads and existing downstream imports stay compatible.
   tokenizer extension. Session head sequences skip unchanged reindexing.
 - Added FTS tests for Chinese, English, filenames and a 5,000-message query
   budget. The append-only session journal remains the recovery source.
+- Connected the existing process host to the desktop as an explicit external
+  tool-plugin manager. Install, enable/disable, lazy start, tool invocation,
+  diagnostics and uninstall are implemented without scanning project folders.
+- Added a process-plugin integration test and an E2E conversation that installs a
+  Node.js echo plugin, exposes it to the model, invokes it and verifies the tool
+  result reaches the next model request.
 
 ## Lightweight Runtime
 
@@ -179,11 +185,11 @@ npm run package:win
 
 Last verified on 2026-11-16:
 
-- `mvn -B -T1C clean verify`: 5081 tests, 0 failures, 0 errors;
+- `mvn -B -T1C clean verify`: 5082 tests, 0 failures, 0 errors;
 - `npm test`: 4 tests, 0 failures;
 - `npm run build:ui`: success;
 - `npm run package:win`: success, including `PACKAGED_GUI_SMOKE_OK`;
-- shaded backend JAR: 22,506,037 bytes (21.5 MiB).
+- shaded backend JAR: 22,523,560 bytes (21.5 MiB).
 
 The cross-process Node test launches the shaded backend JAR with the bundled
 Java runtime and verifies model requests, tool permissions, streaming events,
@@ -199,9 +205,9 @@ workspace edits, memory, web approval, cancellation and session recovery.
   SQLite FTS5 recall index with CJK bigram tokens. A branch records its source
   and begins from a clean state baseline. A broader migration corpus and scored
   recall quality evaluation remain.
-- M5 adds capability-level RPC and desktop plugin integration. The process
-  host currently provides lifecycle management and request transport, and the
-  Java capability registry runs in-process.
+- M5 now has desktop integration for process-isolated tool plugins. Capability-
+  level RPC, public SDK packaging, model/context/storage plugin slots and upgrade
+  compatibility remain.
 - M6 now configures the JDK 17 `jlink` compression flag and runs Node integration
   tests after building the bundled runtime. Clean Windows runner and release
   verification remain pending.

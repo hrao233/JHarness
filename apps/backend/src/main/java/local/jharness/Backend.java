@@ -41,6 +41,7 @@ import local.jharness.agent.DurableApprovalStore;
 import local.jharness.agent.DurableConversation;
 import local.jharness.agent.SessionArchive;
 import local.jharness.memory.ProjectMemory;
+import local.jharness.plugin.ExternalPluginManager;
 import local.jharness.search.SessionSearchIndex;
 
 public final class Backend {
@@ -51,6 +52,7 @@ public final class Backend {
     private final Object bookmarkLock = new Object();
     private final Path dataDirectory;
     private final SessionSearchIndex sessionSearch;
+    private final ExternalPluginManager externalPlugins;
     private final ConversationRuntime conversations = new ConversationRuntime(this::event, Backend::describe);
     private final DurableConversation durableConversations =
             new DurableConversation(this::event, Backend::describe);
@@ -64,6 +66,7 @@ public final class Backend {
         this.protocol = protocol;
         this.dataDirectory = dataDirectory;
         this.sessionSearch = new SessionSearchIndex(dataDirectory.resolve("session-search.sqlite"));
+        this.externalPlugins = new ExternalPluginManager(dataDirectory);
     }
 
     public static void main(String[] args) throws Exception {
@@ -92,6 +95,7 @@ public final class Backend {
         } finally {
             conversations.close();
             durableConversations.close();
+            externalPlugins.close();
             workers.shutdownNow();
         }
     }
@@ -123,6 +127,11 @@ public final class Backend {
                 case "context" -> sessionContext(params);
                 case "forkSession" -> forkSession(params);
                 case "exportSession" -> exportSession(params);
+                case "listExternalPlugins" -> externalPlugins.list();
+                case "installExternalPlugin" -> installExternalPlugin(params);
+                case "setExternalPluginEnabled" -> externalPlugins.setEnabled(
+                        required(params, "pluginId"), params.path("enabled").asBoolean(false));
+                case "uninstallExternalPlugin" -> externalPlugins.uninstall(required(params, "pluginId"));
                 case "steer" -> durableConversations.steer(
                         identifier(params, "runId"), required(params, "message"));
                 case "approvals" -> listApprovals(params);
@@ -411,6 +420,10 @@ public final class Backend {
                 params.path("format").asText("markdown"));
     }
 
+    private ExternalPluginManager.Status installExternalPlugin(JsonNode params) {
+        return externalPlugins.install(Path.of(required(params, "directory")).toAbsolutePath().normalize());
+    }
+
     private Map<String, Boolean> answers(JsonNode params) {
         var answers = new LinkedHashMap<String, Boolean>();
         for (var entry : params.path("answers").properties()) {
@@ -441,7 +454,7 @@ public final class Backend {
         Model auxiliary =
                 autoMemory || permission.equals("assist") ? model(params, true) : model;
         return new ConversationRuntime.Request(workspace(params), project, runtimeContext, message,
-                task, model, auxiliary, autoMemory, permission);
+                task, model, auxiliary, autoMemory, permission, externalPlugins.tools());
     }
 
     private List<DurableApprovalStore.ApprovalRecord> listApprovals(JsonNode params) throws Exception {

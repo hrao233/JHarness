@@ -7,6 +7,7 @@ import io.agentscope.core.model.Model;
 import io.agentscope.core.session.SessionKey;
 import io.agentscope.core.session.SessionLog;
 import io.agentscope.core.skill.repository.FileSystemSkillRepository;
+import io.agentscope.core.tool.AgentTool;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.harness.agent.filesystem.local.LocalFilesystem;
@@ -59,7 +60,8 @@ public final class ConversationRuntime implements AutoCloseable {
 
     public record Request(
             Path workspace, Path project, RuntimeContext context, Msg message, String task,
-            Model model, Model auxiliary, boolean autoMemory, String permission) {}
+            Model model, Model auxiliary, boolean autoMemory, String permission,
+            List<AgentTool> pluginTools) {}
 
     private record Approval(
             String runId, DurableApprovalStore store, CompletableFuture<Boolean> decision) {}
@@ -93,6 +95,7 @@ public final class ConversationRuntime implements AutoCloseable {
         var command = new ProjectCommand(request.project(), requireApproval);
         try {
             var toolkit = new Toolkit();
+            request.pluginTools().forEach(toolkit::registerTool);
             var review = permission.equals("assist") ? new WriteReview(request.auxiliary(), request.task()) : null;
             toolkit.registerTool(new ProjectTools(request.project(), (operation, path, before, after, deniedMessage, action) ->
                     executeWrite(runId, permission, review, requireApproval, operation, path, before, after,
@@ -124,7 +127,8 @@ public final class ConversationRuntime implements AutoCloseable {
         var builder = HarnessAgent.builder().name("JHarness").agentId(AGENT_ID)
                 .sysPrompt(PROMPT).model(request.model()).workspace(request.workspace())
                 .filesystem(new LocalFilesystemSpec().project(request.project()))
-                .sessionLogStore(store(request.workspace())).toolkit(toolkit).toolsConfig(allowedTools())
+                .sessionLogStore(store(request.workspace())).toolkit(toolkit)
+                .toolsConfig(allowedTools(request))
                 .disableFilesystemTools().disableShellTool().disableWebTools().enableTaskList()
                 .compaction(CompactionConfig.builder().flushBeforeCompact(request.autoMemory())
                         .model(request.autoMemory() ? request.auxiliary() : request.model()).build())
@@ -142,10 +146,11 @@ public final class ConversationRuntime implements AutoCloseable {
         return builder;
     }
 
-    private static ToolsConfig allowedTools() {
+    private static ToolsConfig allowedTools(Request request) {
         var names = new ArrayList<>(List.of("list_files", "read_file", "search_files", "search_text", "edit_file",
                 "create_file", "run_command", "memory_save", "memory_get", "memory_search",
                 "session_search", "session_list", "session_history", "load_skill_through_path", "web_fetch"));
+        request.pluginTools().forEach(tool -> names.add(tool.getName()));
         String tavilyKey = System.getenv("TAVILY_API_KEY");
         if (tavilyKey != null && !tavilyKey.isBlank()) names.add("web_search");
         var config = new ToolsConfig();

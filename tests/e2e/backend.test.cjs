@@ -6,7 +6,7 @@ const { once } = require('node:events');
 const { randomUUID } = require('node:crypto');
 const { createInterface } = require('node:readline');
 const { existsSync } = require('node:fs');
-const { mkdtemp, mkdir, readFile, writeFile, rm } = require('node:fs/promises');
+const { copyFile, mkdtemp, mkdir, readFile, writeFile, rm } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const path = require('node:path');
 
@@ -212,6 +212,36 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     assert.ok(continuedBranch.length > 2);
     assert.equal(continuedBranch.at(-1).role, 'assistant');
     steps = originalSteps;
+    const pluginSource = path.resolve(__dirname, '..', 'fixtures', 'plugin-echo');
+    const pluginDirectory = path.join(root, 'plugin-echo');
+    await mkdir(pluginDirectory);
+    await copyFile(path.join(pluginSource, 'plugin.cjs'), path.join(pluginDirectory, 'plugin.cjs'));
+    const pluginManifest = JSON.parse(await readFile(path.join(pluginSource, 'jharness-plugin.json'), 'utf8'));
+    pluginManifest.executable = process.execPath;
+    pluginManifest.arguments = [path.join(pluginDirectory, 'plugin.cjs')];
+    await writeFile(path.join(pluginDirectory, 'jharness-plugin.json'), JSON.stringify(pluginManifest));
+    assert.deepEqual(await call('listExternalPlugins'), []);
+    const installedPlugin = await call('installExternalPlugin', { directory: pluginDirectory });
+    assert.equal(installedPlugin.id, 'fixture.echo');
+    assert.equal(installedPlugin.enabled, false);
+    assert.equal(installedPlugin.tools[0].name, 'plugin_echo');
+    assert.equal((await call('setExternalPluginEnabled', {
+      pluginId: 'fixture.echo', enabled: true
+    })).enabled, true);
+    const pluginSteps = steps;
+    steps = [['plugin_echo', { text: 'PLUGIN-ECHO-42' }, 'PLUGIN-ECHO-42']];
+    const pluginRun = randomUUID();
+    const pluginContext = { ...context, sessionId: randomUUID() };
+    const pluginRequestStart = requests.length;
+    await call('chat', { ...pluginContext, ...model, runId: pluginRun,
+      permission: 'full', message: '调用外部工具插件' });
+    await waitEvent(pluginRun, 'done');
+    assert.ok(requests[pluginRequestStart].body.tools.some(tool => tool.function.name === 'plugin_echo'));
+    assert.match(JSON.stringify(requests.at(-1).body.messages.filter(message => message.role === 'tool')),
+      /PLUGIN-ECHO-42/);
+    assert.equal(await call('uninstallExternalPlugin', { pluginId: 'fixture.echo' }), true);
+    assert.deepEqual(await call('listExternalPlugins'), []);
+    steps = pluginSteps;
     const search = await call('searchSessions', { query: 'orchid-28', sessions: [{ ...context, title: 'Fixture' }] });
     assert.equal(search[0].messageId, history[1].id);
     assert.match(search[0].excerpt, /ORCHID-28/);

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { BookOpen, Brain, Download, GitPullRequest, House, Images, ListChecks, Puzzle, RefreshCw, ScanText, Search, Settings, X }
+import { BookOpen, Brain, Download, GitPullRequest, House, Images, ListChecks, Plus, Power, Puzzle, RefreshCw,
+  ScanText, Search, Settings, Trash2, X }
   from 'lucide-react';
 
 export function Navigation({ showSidebar, home, attachImage, openPanel, openSettings, busy, project, session }) {
@@ -43,14 +44,24 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
   const [tasks, setTasks] = useState(null);
   const [context, setContext] = useState(null);
   const [exportState, setExportState] = useState(null);
+  const [externalPlugins, setExternalPlugins] = useState([]);
+  const [pluginBusy, setPluginBusy] = useState('');
   useEffect(() => { dialog.current.showModal(); }, []);
   useEffect(() => {
-    if (!project || (panel !== 'plugins' && panel !== 'review')) return;
+    if (panel !== 'plugins' && (panel !== 'review' || !project)) return;
     let live = true;
     setResult(null);
     setError('');
-    const read = panel === 'plugins' ? api.projectParts : api.review;
-    read(project.id).then(value => { if (live) setResult(value); })
+    const read = panel === 'plugins'
+      ? Promise.all([
+        project ? api.projectParts(project.id) : Promise.resolve([]),
+        api.externalPlugins()
+      ]).then(([parts, plugins]) => {
+        if (live) setExternalPlugins(plugins);
+        return parts;
+      })
+      : api.review(project.id);
+    read.then(value => { if (live) setResult(value); })
       .catch(error => { if (live) setError(errorText(error)); });
     return () => { live = false; };
   }, [panel, project?.id, revision]);
@@ -120,6 +131,45 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
         : { busy: '', message: '已取消导出。' });
     } catch (failure) {
       setExportState({ busy: '', error: errorText(failure) });
+    }
+  }
+
+  async function installExternalPlugin() {
+    setPluginBusy('install');
+    setError('');
+    try {
+      const installed = await api.installExternalPlugin();
+      if (installed) setRevision(value => value + 1);
+    } catch (failure) {
+      setError(errorText(failure));
+    } finally {
+      setPluginBusy('');
+    }
+  }
+
+  async function toggleExternalPlugin(plugin) {
+    setPluginBusy(plugin.id);
+    setError('');
+    try {
+      const next = await api.setExternalPlugin(plugin.id, !plugin.enabled);
+      setExternalPlugins(previous => previous.map(item => item.id === next.id ? next : item));
+    } catch (failure) {
+      setError(errorText(failure));
+    } finally {
+      setPluginBusy('');
+    }
+  }
+
+  async function uninstallExternalPlugin(plugin) {
+    setPluginBusy(plugin.id);
+    setError('');
+    try {
+      await api.uninstallExternalPlugin(plugin.id);
+      setExternalPlugins(previous => previous.filter(item => item.id !== plugin.id));
+    } catch (failure) {
+      setError(errorText(failure));
+    } finally {
+      setPluginBusy('');
     }
   }
 
@@ -239,15 +289,42 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
         </> : <p className="muted">当前会话还没有模型请求记录。</p>}
       </div>}
     </>}
-    {panel === 'plugins' && <div className="nav-list">
-      {!project && <p className="muted">打开项目后查看项目的 Skills 与插件。</p>}
-      {project && !result && !error && <p className="muted">正在读取项目…</p>}
-      {result?.map(part => <button key={part.kind + part.source} className="menu-row" disabled={busy}
-        onClick={() => { addPart(part); close(); }}>
-        <Puzzle size={17}/><span className="menu-copy">{part.name}<small>{part.source}</small></span>
-      </button>)}
-      {result?.length === 0 && <p className="muted">当前项目还没有可用的 Skill 或插件。</p>}
-    </div>}
+    {panel === 'plugins' && <>
+      <div className="review-head"><span>项目资源与已安装工具</span>
+        <button type="button" className="secondary" disabled={!!pluginBusy}
+          onClick={installExternalPlugin}><Plus size={15}/>安装工具插件</button>
+      </div>
+      <div className="nav-list plugin-list">
+        <div className="side-label">项目 Skill 与插件</div>
+        {!project && <p className="muted">打开项目后查看项目内资源。</p>}
+        {project && !result && !error && <p className="muted">正在读取项目…</p>}
+        {result?.map(part => <button key={part.kind + part.source} className="menu-row" disabled={busy}
+          onClick={() => { addPart(part); close(); }}>
+          <Puzzle size={17}/><span className="menu-copy">{part.name}<small>{part.source}</small></span>
+        </button>)}
+        {project && result?.length === 0 && <p className="muted">当前项目还没有可用的 Skill 或插件。</p>}
+        <div className="side-label">外部工具插件</div>
+        {externalPlugins.map(plugin => <div className="external-plugin" key={plugin.id}>
+          <div className="external-plugin-head">
+            <span className="menu-copy">
+              <strong>{plugin.name || plugin.id}</strong>
+              <small>{plugin.id}{plugin.version ? ' · ' + plugin.version : ''}</small>
+            </span>
+            <button type="button" className="secondary" disabled={!!pluginBusy}
+              aria-pressed={plugin.enabled} onClick={() => toggleExternalPlugin(plugin)}>
+              <Power size={15}/>{plugin.enabled ? '已启用' : '已停用'}
+            </button>
+            <button type="button" className="secondary" aria-label={'卸载 ' + plugin.name}
+              disabled={!!pluginBusy} onClick={() => uninstallExternalPlugin(plugin)}><Trash2 size={15}/></button>
+          </div>
+          {plugin.description && <p>{plugin.description}</p>}
+          <div className="plugin-tools">{plugin.tools?.map(tool => <code key={tool.name}>{tool.name}</code>)}</div>
+          {plugin.error && <p className="error-text" role="alert">{plugin.error}</p>}
+          {plugin.diagnostics && <details><summary>插件诊断</summary><pre>{plugin.diagnostics}</pre></details>}
+        </div>)}
+        {externalPlugins.length === 0 && <p className="muted">尚未显式安装外部工具插件。</p>}
+      </div>
+    </>}
     {panel === 'review' && <>
       <div className="review-head"><span>{project?.name}</span>
         <button type="button" className="secondary" onClick={() => setRevision(value => value + 1)}>刷新</button></div>

@@ -24,6 +24,7 @@ async function main() {
     assert.match(smoke.text, /JHarness/);
     assert.match(smoke.taskCenter, /任务中心/);
     assert.match(smoke.taskCenter, /没有运行中或等待处理的任务/);
+    assert.match(smoke.plugins, /尚未显式安装外部工具插件/);
     await verifyInterruptedApproval(path.join(data, 'approval'));
     await verifyRecoverableTask(path.join(data, 'task'));
     console.log('PACKAGED_GUI_SMOKE_OK');

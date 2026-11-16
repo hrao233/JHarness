@@ -330,6 +330,19 @@ function register() {
     if (!project) return [];
     return (await projectParts(project.directory)).map(({ text, ...part }) => ({ ...part, label: label(part) }));
   });
+  ipcMain.handle('jh:external-plugins', () => call('listExternalPlugins'));
+  ipcMain.handle('jh:install-external-plugin', async () => {
+    const result = await dialog.showOpenDialog(win, {
+      title: '安装工具插件',
+      properties: ['openDirectory']
+    });
+    if (result.canceled || !result.filePaths[0]) return null;
+    return call('installExternalPlugin', { directory: result.filePaths[0] });
+  });
+  ipcMain.handle('jh:set-external-plugin', (_, pluginId, enabled) =>
+    call('setExternalPluginEnabled', { pluginId, enabled: enabled === true }));
+  ipcMain.handle('jh:uninstall-external-plugin', (_, pluginId) =>
+    call('uninstallExternalPlugin', { pluginId }));
   ipcMain.handle('jh:test-model', (_, input) => {
     const model = modelInput(input);
     const effort = resolveEffort(model, input.testEffort);
@@ -515,10 +528,20 @@ async function smokeTaskCenter() {
   button.click();
   const dialog = await waitFor(() => document.querySelector('dialog.nav-tasks'), 'Task center did not open');
   await waitFor(() => dialog.innerText.includes('没有运行中或等待处理的任务'), 'Task center did not load');
+  dialog.querySelector('.dialog-head button').click();
+  const pluginButton = await waitFor(
+    () => document.querySelector('button[title="Skills 与插件"]'), 'Plugin entry missing');
+  pluginButton.click();
+  const pluginDialog = await waitFor(
+    () => document.querySelector('dialog.nav-plugins'), 'Plugin dialog did not open');
+  await waitFor(
+    () => pluginDialog.innerText.includes('尚未显式安装外部工具插件'),
+    'External plugin empty state did not load');
   return {
     title: document.title,
     text: document.body.innerText,
     taskCenter: dialog.innerText,
+    plugins: pluginDialog.innerText,
     url: location.href
   };
 }

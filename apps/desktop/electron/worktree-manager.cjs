@@ -149,6 +149,58 @@ function createManager(worktreeRoot) {
     };
   }
 
+  async function review(record) {
+    if (!record?.path || !record?.baseCommit) throw new Error('工作树记录无效。');
+    const current = await status(record);
+    if (!current.exists) throw new Error('工作树目录已不存在。');
+    if (current.dirty) throw new Error('工作树包含未提交修改。请先提交后再审阅合并。');
+    const range = record.baseCommit + '..' + (current.branch || 'HEAD');
+    const [stat, patch, commits] = await Promise.all([
+      text(['diff', '--stat', record.baseCommit + '...' + (current.branch || 'HEAD')], record.path),
+      text(['diff', '--no-ext-diff', '--no-textconv', record.baseCommit + '...' + (current.branch || 'HEAD')],
+        record.path),
+      text(['log', '--format=%h %s', range], record.path)
+    ]);
+    return {
+      branch: current.branch,
+      baseCommit: record.baseCommit,
+      ahead: current.ahead,
+      dirty: false,
+      canMerge: current.ahead > 0,
+      stat,
+      patch: patch.length <= 512 * 1024 ? patch : patch.slice(0, 512 * 1024) + '\n[补丁已截断]',
+      commits: commits.split(/\r?\n/).filter(Boolean).slice(0, 100)
+    };
+  }
+
+  async function integrate(record, parentRoot) {
+    if (!record?.path || !record?.branch) throw new Error('工作树记录无效。');
+    const current = await status(record);
+    if (!current.exists) throw new Error('工作树目录已不存在。');
+    if (current.dirty) throw new Error('工作树包含未提交修改。请先提交后再应用。');
+    if (current.ahead < 1) throw new Error('工作树没有待应用的提交。');
+    const parent = await repository(parentRoot);
+    const parentChanges = await text(
+      ['status', '--porcelain=v1', '-z', '--untracked-files=normal'], parent.root);
+    if (parentChanges) throw new Error('主工作区包含未提交修改。请先提交或清理后再应用工作树。');
+    try {
+      await git(['merge', '--no-commit', '--no-ff', record.branch], parent.root);
+    } catch (error) {
+      await git(['merge', '--abort'], parent.root).catch(() => {});
+      throw new Error('工作树合并发生冲突，已撤销主工作区中的合并。请先在隔离工作树中解决分叉。');
+    }
+    const [stat, staged] = await Promise.all([
+      text(['diff', '--cached', '--stat'], parent.root),
+      text(['diff', '--cached', '--name-only'], parent.root)
+    ]);
+    return {
+      branch: record.branch,
+      stat,
+      files: staged.split(/\r?\n/).filter(Boolean),
+      committed: false
+    };
+  }
+
   async function remove(record, { force = false } = {}) {
     if (!record?.path || !record?.repoRoot || !within(root, record.path)) {
       throw new Error('工作树记录无效。');
@@ -212,7 +264,7 @@ function createManager(worktreeRoot) {
     }
   }
 
-  return { root, create, status, source, remove, list };
+  return { root, create, status, source, review, integrate, remove, list };
 }
 
 module.exports = { createManager, within };

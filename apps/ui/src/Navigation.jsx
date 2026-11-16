@@ -62,6 +62,8 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
   const [worktreeStatus, setWorktreeStatus] = useState(null);
   const [worktreeBusy, setWorktreeBusy] = useState('');
   const [worktreeName, setWorktreeName] = useState('');
+  const [worktreeReview, setWorktreeReview] = useState(null);
+  const [worktreeIntegration, setWorktreeIntegration] = useState(null);
   const [criterionCommands, setCriterionCommands] = useState({});
   const [criterionBusy, setCriterionBusy] = useState('');
   useEffect(() => { dialog.current.showModal(); }, []);
@@ -155,6 +157,8 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
     if (panel !== 'worktrees' || !project) return;
     let live = true;
     setWorktreeStatus(null);
+    setWorktreeReview(null);
+    setWorktreeIntegration(null);
     setWorktreeName('');
     setError('');
     api.worktreeStatus(project.id).then(value => {
@@ -342,6 +346,37 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
       await api.removeWorktree(project.id, !!risky);
       await onWorktreesChanged(null, project.id);
       close();
+    } catch (failure) {
+      setError(errorText(failure));
+    } finally {
+      setWorktreeBusy('');
+    }
+  }
+
+  async function reviewWorktree() {
+    if (!project?.worktree) return;
+    setWorktreeBusy('review');
+    setError('');
+    setWorktreeIntegration(null);
+    try {
+      setWorktreeReview(await api.reviewWorktree(project.id));
+    } catch (failure) {
+      setError(errorText(failure));
+    } finally {
+      setWorktreeBusy('');
+    }
+  }
+
+  async function integrateWorktree() {
+    if (!project?.worktree || !worktreeReview?.canMerge) return;
+    if (!confirm('将隔离工作树的已提交改动应用到主工作区并暂存？主工作区必须保持干净。')) return;
+    setWorktreeBusy('integrate');
+    setError('');
+    try {
+      const result = await api.integrateWorktree(project.id);
+      setWorktreeIntegration(result);
+      setWorktreeReview(null);
+      setRevision(value => value + 1);
     } catch (failure) {
       setError(errorText(failure));
     } finally {
@@ -678,8 +713,31 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
         </div>
         <div className="worktree-actions">
           <button type="button" className="secondary" disabled={!!worktreeBusy || busy}
+            onClick={reviewWorktree}><GitPullRequest size={15}/>审阅待合并改动</button>
+          <button type="button" className="secondary" disabled={!!worktreeBusy || busy}
             onClick={removeWorktree}><Trash2 size={15}/>移除工作树</button>
         </div>
+        {worktreeReview && <div className="worktree-review">
+          <div className="report-section-head"><strong>隔离分支改动</strong>
+            <small>{worktreeReview.ahead} 个提交</small></div>
+          <pre className="worktree-stat">{worktreeReview.stat || '没有文件差异。'}</pre>
+          {!!worktreeReview.commits.length && <ul className="worktree-commits">
+            {worktreeReview.commits.map(commit => <li key={commit}><code>{commit}</code></li>)}
+          </ul>}
+          <details><summary>查看补丁</summary>
+            <pre className="worktree-patch">{worktreeReview.patch || '没有补丁。'}</pre>
+          </details>
+          <div className="change-set-actions">
+            <button type="button" className="primary"
+              disabled={!worktreeReview.canMerge || !!worktreeBusy || busy}
+              onClick={integrateWorktree}>应用到主工作区</button>
+          </div>
+        </div>}
+        {worktreeIntegration && <div className="worktree-integration" role="status">
+          <CircleCheck size={17}/>
+          <span><strong>已应用到主工作区并暂存</strong>
+            <small>{worktreeIntegration.files.length} 个文件；尚未提交。</small></span>
+        </div>}
       </section>}
       <section className="worktree-list">
         <div className="side-label">已有工作树</div>

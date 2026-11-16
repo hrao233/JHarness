@@ -46,6 +46,16 @@ test('creates, inspects and safely removes isolated git worktrees', { timeout: 3
     await git(committed.path, ['add', 'change.txt']);
     await git(committed.path, ['commit', '-m', 'isolated change']);
     assert.equal((await manager.status(committed)).ahead, 1);
+    const review = await manager.review(committed);
+    assert.equal(review.canMerge, true);
+    assert.match(review.patch, /change\.txt/);
+    assert.match(review.commits[0], /isolated change/);
+    const integration = await manager.integrate(committed, repository);
+    assert.equal(integration.committed, false);
+    assert.deepEqual(integration.files, ['change.txt']);
+    assert.equal(await readFile(path.join(repository, 'change.txt'), 'utf8'), 'CHANGE');
+    await git(repository, ['reset', '--hard', 'HEAD']);
+    await git(repository, ['clean', '-fd']);
     await assert.rejects(manager.remove(committed), /尚未合并/);
     await manager.remove(committed, { force: true });
 

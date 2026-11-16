@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld('jharness', {
     ipcRenderer.invoke('jh:change-sets', project, session, runId),
   createWorktree: (project, name = '') => ipcRenderer.invoke('jh:worktree-create', project, name),
   worktreeStatus: project => ipcRenderer.invoke('jh:worktree-status', project),
+  reviewWorktree: project => ipcRenderer.invoke('jh:worktree-review', project),
+  integrateWorktree: project => ipcRenderer.invoke('jh:worktree-integrate', project),
   removeWorktree: (project, force = false) => ipcRenderer.invoke('jh:worktree-remove', project, force),
   report: (project, session) => ipcRenderer.invoke('jh:report', project, session),
   verifyCriterion: (project, session, runId, criterionId, commandId) =>

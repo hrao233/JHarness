@@ -283,6 +283,18 @@ function register() {
       ? managedWorktrees().status(project.worktree)
       : managedWorktrees().source(project.directory);
   });
+  ipcMain.handle('jh:worktree-review', async (_, projectId) => {
+    const project = settings.projects.find(item => item.id === projectId);
+    if (!project?.worktree) throw new Error('当前项目不是隔离工作树。');
+    return managedWorktrees().review(project.worktree);
+  });
+  ipcMain.handle('jh:worktree-integrate', async (_, projectId) => {
+    const project = settings.projects.find(item => item.id === projectId);
+    if (!project?.worktree) throw new Error('当前项目不是隔离工作树。');
+    const parent = settings.projects.find(item => item.id === project.worktree.parentProjectId);
+    if (!parent || parent.worktree) throw new Error('找不到工作树的来源项目。');
+    return managedWorktrees().integrate(project.worktree, parent.directory);
+  });
   ipcMain.handle('jh:worktree-remove', async (_, projectId, force = false) => {
     const index = settings.projects.findIndex(item => item.id === projectId);
     const project = settings.projects[index];

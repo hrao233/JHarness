@@ -194,6 +194,10 @@ payloads and existing downstream imports stay compatible.
   its own branch.
 - Fixed the packaged Electron allowlist to include the new worktree manager and
   added packaged-GUI coverage for opening the isolation panel.
+- Added isolated-worktree review and integration. Review shows bounded patch,
+  diff stat and commit subjects; integration requires clean source and worktree
+  checkouts, merges with `--no-commit --no-ff`, leaves staged changes for user
+  inspection and aborts on conflict.
 - Added `acceptance_write` and host-authorized shell-exit verification. Criteria
   begin as `PENDING`; only a user-selected command receipt from the same run can
   produce `PASSED`, `FAILED` or `UNKNOWN`. The report retains command identity,
@@ -261,8 +265,8 @@ checkpoint/report correlation, and command approval across a durable resume.
 - M4 now has a reviewable project-work slice: task plans, command/test receipts,
   artifacts, file checkpoints, diffs, safe per-file restore and guarded
   whole-run restore, isolated Git worktrees and deterministic shell-evidence
-  verification. User-reviewed worktree integration and broader semantic
-  verifiers remain.
+  verification, plus user-reviewed worktree integration. Broader semantic
+  verifiers and automated commit authoring remain.
 - M6 now configures the JDK 17 `jlink` compression flag and runs Node integration
   tests after building the bundled runtime. Clean Windows runner and release
   verification remain pending.

@@ -329,6 +329,12 @@ force confirmation runs `git worktree remove --force`, prunes administrative ent
 `jharness/*` branch. The packaged Electron file list must include the worktree manager module; the
 packaged GUI smoke asserts that the isolation panel renders.
 
+Before integration, review diffs `<baseCommit>...<branch>`, lists commits and bounds the displayed
+patch. Integration requires a clean worktree, at least one commit beyond the base and a clean source
+project. It runs `git merge --no-commit --no-ff <branch>` in the source checkout, then reports the
+staged files. The result deliberately remains uncommitted so the user can inspect or amend it.
+A failed merge runs `git merge --abort`; the isolated branch is not deleted automatically.
+
 ### Session search projection
 
 Session recall uses a rebuildable SQLite FTS5 database under the local data

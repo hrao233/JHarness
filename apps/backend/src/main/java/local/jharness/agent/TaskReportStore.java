@@ -13,6 +13,7 @@ import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -43,6 +44,30 @@ public final class TaskReportStore {
             long revision,
             long updatedAt,
             List<PlanStep> steps) {}
+
+    public enum CriterionStatus {
+        PENDING,
+        PASSED,
+        FAILED,
+        UNKNOWN
+    }
+
+    public record AcceptanceCriterion(
+            String id,
+            String content,
+            CriterionStatus status,
+            String commandId,
+            int expectedExitCode,
+            String verifier,
+            long verifiedAt,
+            String reason) {}
+
+    public record Acceptance(
+            String sessionId,
+            String runId,
+            long revision,
+            long updatedAt,
+            List<AcceptanceCriterion> criteria) {}
 
     public enum CommandOutcome {
         SUCCEEDED,
@@ -79,6 +104,7 @@ public final class TaskReportStore {
             String runId,
             long updatedAt,
             Plan plan,
+            Acceptance acceptance,
             List<CommandEvidence> commands,
             List<Artifact> artifacts,
             List<ProjectCheckpointStore.Summary> checkpoints) {}
@@ -109,6 +135,86 @@ public final class TaskReportStore {
 
     public Plan plan(String sessionId, String runId) {
         return readPlan(segment(sessionId, "会话"), segment(runId, "任务"));
+    }
+
+    public Acceptance saveAcceptanceCriteria(
+            String sessionId, String runId, List<String> criteria) {
+        String session = segment(sessionId, "会话");
+        String run = segment(runId, "任务");
+        List<String> normalized = normalizeCriteria(criteria);
+        synchronized (lock) {
+            Acceptance prior = readAcceptance(session, run);
+            var previous = new LinkedHashMap<String, AcceptanceCriterion>();
+            if (prior != null) {
+                prior.criteria().forEach(item -> previous.put(item.content(), item));
+            }
+            var saved = new ArrayList<AcceptanceCriterion>();
+            for (String content : normalized) {
+                AcceptanceCriterion existing = previous.get(content);
+                saved.add(existing != null ? existing : new AcceptanceCriterion(
+                        UUID.randomUUID().toString(),
+                        content,
+                        CriterionStatus.PENDING,
+                        "",
+                        0,
+                        "",
+                        0,
+                        ""));
+            }
+            var acceptance = new Acceptance(
+                    session,
+                    run,
+                    prior == null ? 1 : prior.revision() + 1,
+                    System.currentTimeMillis(),
+                    List.copyOf(saved));
+            write(acceptanceFile(session, run), acceptance);
+            return acceptance;
+        }
+    }
+
+    public Acceptance acceptance(String sessionId, String runId) {
+        return readAcceptance(segment(sessionId, "会话"), segment(runId, "任务"));
+    }
+
+    public AcceptanceCriterion verifyCriterion(
+            String sessionId,
+            String runId,
+            String criterionId,
+            String commandId,
+            int expectedExitCode) {
+        String session = segment(sessionId, "会话");
+        String run = segment(runId, "任务");
+        segment(criterionId, "验收标准");
+        segment(commandId, "命令证据");
+        if (expectedExitCode < 0 || expectedExitCode > 255)
+            throw new IllegalArgumentException("期望退出码必须在 0 到 255 之间。");
+        synchronized (lock) {
+            Acceptance current = readAcceptance(session, run);
+            if (current == null) throw new IllegalArgumentException("此运行还没有验收标准。");
+            AcceptanceCriterion criterion = current.criteria().stream()
+                    .filter(item -> item.id().equals(criterionId))
+                    .findFirst()
+                    .orElseThrow(() -> new IllegalArgumentException("找不到验收标准。"));
+            CommandEvidence command = commands(session, run).stream()
+                    .filter(item -> item.id().equals(commandId))
+                    .findFirst()
+                    .orElseThrow(() -> new IllegalArgumentException("找不到同一运行中的命令证据。"));
+            AcceptanceCriterion verified = verify(criterion, command, expectedExitCode);
+            var updated = new ArrayList<>(current.criteria());
+            for (int i = 0; i < updated.size(); i++) {
+                if (updated.get(i).id().equals(criterionId)) {
+                    updated.set(i, verified);
+                    break;
+                }
+            }
+            write(acceptanceFile(session, run), new Acceptance(
+                    session,
+                    run,
+                    current.revision() + 1,
+                    System.currentTimeMillis(),
+                    List.copyOf(updated)));
+            return verified;
+        }
     }
 
     public CommandEvidence recordCommand(
@@ -240,6 +346,7 @@ public final class TaskReportStore {
         var reports = new ArrayList<TaskReport>();
         for (String run : runs) {
             Plan plan = readPlan(session, run);
+            Acceptance acceptance = readAcceptance(session, run);
             List<CommandEvidence> commands = commands(session, run);
             List<Artifact> artifacts = artifacts(session, run);
             List<ProjectCheckpointStore.Summary> owned = checkpoints.stream()
@@ -248,13 +355,17 @@ public final class TaskReportStore {
             long updatedAt = Math.max(
                     plan == null ? 0 : plan.updatedAt(),
                     Math.max(
-                            commands.stream().mapToLong(CommandEvidence::finishedAt).max().orElse(0),
+                            acceptance == null ? 0 : acceptance.updatedAt(),
                             Math.max(
-                                    artifacts.stream().mapToLong(Artifact::createdAt).max().orElse(0),
-                                    owned.stream().mapToLong(ProjectCheckpointStore.Summary::updatedAt)
-                                            .max().orElse(0))));
+                                    commands.stream().mapToLong(CommandEvidence::finishedAt).max().orElse(0),
+                                    Math.max(
+                                            artifacts.stream().mapToLong(Artifact::createdAt).max().orElse(0),
+                                            owned.stream()
+                                                    .mapToLong(ProjectCheckpointStore.Summary::updatedAt)
+                                                    .max().orElse(0)))));
             if (updatedAt == 0) continue;
-            reports.add(new TaskReport(run, updatedAt, plan, commands, artifacts, owned));
+            reports.add(new TaskReport(
+                    run, updatedAt, plan, acceptance, commands, artifacts, owned));
         }
         reports.sort(Comparator.comparingLong(TaskReport::updatedAt).reversed());
         return List.copyOf(reports.stream().limit(100).toList());
@@ -265,6 +376,16 @@ public final class TaskReportStore {
         if (!Files.isRegularFile(file)) return null;
         try {
             return JSON.readValue(file.toFile(), Plan.class);
+        } catch (IOException error) {
+            return null;
+        }
+    }
+
+    private Acceptance readAcceptance(String session, String run) {
+        Path file = acceptanceFile(session, run);
+        if (!Files.isRegularFile(file)) return null;
+        try {
+            return JSON.readValue(file.toFile(), Acceptance.class);
         } catch (IOException error) {
             return null;
         }
@@ -333,6 +454,64 @@ public final class TaskReportStore {
         return List.copyOf(result);
     }
 
+    private static List<String> normalizeCriteria(List<String> criteria) {
+        if (criteria == null) return List.of();
+        if (criteria.size() > 20)
+            throw new IllegalArgumentException("每次最多保存 20 项验收标准。");
+        var result = new ArrayList<String>();
+        for (String criterion : criteria) {
+            String content = bounded(criterion, MAX_STEP_LENGTH).strip();
+            if (content.isEmpty()) throw new IllegalArgumentException("验收标准不能为空。");
+            if (!result.contains(content)) result.add(content);
+        }
+        return List.copyOf(result);
+    }
+
+    private static AcceptanceCriterion verify(
+            AcceptanceCriterion criterion,
+            CommandEvidence command,
+            int expectedExitCode) {
+        long now = System.currentTimeMillis();
+        String verifier = "shell-exit-v1:" + expectedExitCode;
+        if (command.outputTruncated()) {
+            return result(criterion, CriterionStatus.UNKNOWN, command, expectedExitCode,
+                    verifier, now, "命令输出被截断，无法形成完整退出码证据。");
+        }
+        if (command.exitCode() == null || command.outcome() == CommandOutcome.UNKNOWN) {
+            return result(criterion, CriterionStatus.UNKNOWN, command, expectedExitCode,
+                    verifier, now, "命令退出结果未知。");
+        }
+        if ((command.exitCode() == 0) != (command.outcome() == CommandOutcome.SUCCEEDED)) {
+            return result(criterion, CriterionStatus.UNKNOWN, command, expectedExitCode,
+                    verifier, now, "退出码与命令结果不一致。");
+        }
+        if (command.exitCode() != expectedExitCode) {
+            return result(criterion, CriterionStatus.FAILED, command, expectedExitCode,
+                    verifier, now, "命令退出码不符合期望。");
+        }
+        return result(criterion, CriterionStatus.PASSED, command, expectedExitCode,
+                verifier, now, "命令返回期望退出码；此结论不覆盖其他语义验收。");
+    }
+
+    private static AcceptanceCriterion result(
+            AcceptanceCriterion criterion,
+            CriterionStatus status,
+            CommandEvidence command,
+            int expectedExitCode,
+            String verifier,
+            long verifiedAt,
+            String reason) {
+        return new AcceptanceCriterion(
+                criterion.id(),
+                criterion.content(),
+                status,
+                command.id(),
+                expectedExitCode,
+                verifier,
+                verifiedAt,
+                reason);
+    }
+
     private static CommandOutcome parseOutcome(String value) {
         if (value == null) return CommandOutcome.UNKNOWN;
         return switch (value.toUpperCase(Locale.ROOT)) {
@@ -352,6 +531,10 @@ public final class TaskReportStore {
 
     private Path planFile(String session, String run) {
         return runDirectory(session, run).resolve("plan.json");
+    }
+
+    private Path acceptanceFile(String session, String run) {
+        return runDirectory(session, run).resolve("acceptance.json");
     }
 
     private Path commandDirectory(String session, String run) {

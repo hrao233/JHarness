@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { BookOpen, Brain, CircleCheck, CircleDashed, ClipboardList, Download, ExternalLink,
+import { BookOpen, Brain, CircleCheck, CircleDashed, CircleX, ClipboardList, Download, ExternalLink,
   FileBox, GitBranch, GitPullRequest, House, Images, ListChecks, Plus, Power, Puzzle, RefreshCw,
   RotateCcw, ScanText, Search, Settings, SquareTerminal, Trash2, X }
   from 'lucide-react';
@@ -62,6 +62,8 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
   const [worktreeStatus, setWorktreeStatus] = useState(null);
   const [worktreeBusy, setWorktreeBusy] = useState('');
   const [worktreeName, setWorktreeName] = useState('');
+  const [criterionCommands, setCriterionCommands] = useState({});
+  const [criterionBusy, setCriterionBusy] = useState('');
   useEffect(() => { dialog.current.showModal(); }, []);
   useEffect(() => {
     if (panel !== 'plugins' && (panel !== 'review' || !project)) return;
@@ -134,6 +136,7 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
     let live = true;
     setReports(null);
     setChangeSet(null);
+    setCriterionCommands({});
     setError('');
     api.report(project.id, session.id).then(value => {
       if (live) setReports(value);
@@ -346,6 +349,21 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
     }
   }
 
+  async function verifyCriterion(report, criterion) {
+    const commandId = criterionCommands[criterion.id] || criterion.commandId;
+    if (!project || !session || !commandId) return;
+    setCriterionBusy(criterion.id);
+    setError('');
+    try {
+      await api.verifyCriterion(project.id, session.id, report.runId, criterion.id, commandId);
+      setRevision(value => value + 1);
+    } catch (failure) {
+      setError(errorText(failure));
+    } finally {
+      setCriterionBusy('');
+    }
+  }
+
   return <dialog ref={dialog} className={'dialog nav-dialog nav-' + panel} aria-label={titles[panel]}
     onCancel={event => { event.preventDefault(); close(); }}>
     <div className="dialog-head"><h2>{titles[panel]}</h2>
@@ -493,6 +511,52 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
               })}
             </ol>
           </section> : <p className="muted report-section">这次任务没有记录执行计划。</p>}
+          <section className="report-section">
+            <div className="report-section-head"><strong>验收标准</strong>
+              <small>{report.acceptance?.criteria?.length || 0} 项</small></div>
+            {!report.acceptance?.criteria?.length && <p className="muted">
+              这次任务没有记录验收标准。
+            </p>}
+            {report.acceptance?.criteria?.map(criterion => {
+              const Icon = criterion.status === 'PASSED' ? CircleCheck
+                : criterion.status === 'FAILED' || criterion.status === 'UNKNOWN'
+                  ? CircleX : CircleDashed;
+              const command = report.commands.find(item => item.id === criterion.commandId);
+              return <div className={'acceptance-row acceptance-' + criterion.status.toLowerCase()}
+                key={criterion.id}>
+                <Icon size={16}/>
+                <span className="acceptance-copy">
+                  <strong>{criterion.content}</strong>
+                  <small>{criterion.status === 'PASSED' ? '命令证据已通过'
+                    : criterion.status === 'FAILED' ? '命令证据未通过'
+                      : criterion.status === 'UNKNOWN' ? '证据不足，尚未通过'
+                        : '等待确定性证据'}</small>
+                  {criterion.reason && <small>{criterion.reason}</small>}
+                  {command && <small><code>{command.command}</code></small>}
+                </span>
+                <div className="acceptance-actions">
+                  <select aria-label={'为“' + criterion.content + '”选择命令证据'}
+                    value={criterionCommands[criterion.id] || criterion.commandId || ''}
+                    disabled={!report.commands.length || !!criterionBusy || busy}
+                    onChange={event => setCriterionCommands(previous => ({
+                      ...previous, [criterion.id]: event.target.value
+                    }))}>
+                    <option value="">选择命令</option>
+                    {report.commands.map(item => <option key={item.id} value={item.id}>
+                      {item.exitCode === null ? '未知' : '退出码 ' + item.exitCode}
+                      {' · '}{item.command.slice(0, 60)}
+                    </option>)}
+                  </select>
+                  <button type="button" className="secondary"
+                    disabled={(!criterionCommands[criterion.id] && !criterion.commandId)
+                      || !!criterionBusy || busy}
+                    onClick={() => verifyCriterion(report, criterion)}>
+                    {criterionBusy === criterion.id ? '核验中…' : '按退出码核验'}
+                  </button>
+                </div>
+              </div>;
+            })}
+          </section>
           <section className="report-section">
             <div className="report-section-head"><strong>命令与验证</strong><small>{report.commands.length} 条</small></div>
             {report.commands.length === 0 && <p className="muted">没有运行项目命令。</p>}

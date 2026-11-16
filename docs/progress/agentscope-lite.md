@@ -194,6 +194,13 @@ payloads and existing downstream imports stay compatible.
   its own branch.
 - Fixed the packaged Electron allowlist to include the new worktree manager and
   added packaged-GUI coverage for opening the isolation panel.
+- Added `acceptance_write` and host-authorized shell-exit verification. Criteria
+  begin as `PENDING`; only a user-selected command receipt from the same run can
+  produce `PASSED`, `FAILED` or `UNKNOWN`. The report retains command identity,
+  expected code, verifier ID, timestamp and reason.
+- Verification refuses truncated output, unknown outcomes and mismatched
+  exit/outcome evidence. Rewriting the criterion list preserves the status and ID
+  of unchanged text instead of silently resetting a verified criterion.
 
 ## Lightweight Runtime
 
@@ -226,11 +233,11 @@ npm run package:win
 
 Last verified on 2026-11-16:
 
-- `mvn -B -T1C clean verify`: 5087 tests, 0 failures, 0 errors, 56 skipped;
+- `mvn -B -T1C clean verify`: 5088 tests, 0 failures, 0 errors, 56 skipped;
 - `npm test`: 6 tests, 0 failures;
 - `npm run build:ui`: success;
 - `npm run package:win`: success, including `PACKAGED_GUI_SMOKE_OK`;
-- shaded backend JAR: 22,570,723 bytes (21.5 MiB).
+- shaded backend JAR: 22,579,167 bytes (21.5 MiB).
 
 The cross-process Node test launches the shaded backend JAR with the bundled
 Java runtime and verifies model requests, tool permissions, streaming events,
@@ -253,8 +260,9 @@ checkpoint/report correlation, and command approval across a durable resume.
   compatibility remain.
 - M4 now has a reviewable project-work slice: task plans, command/test receipts,
   artifacts, file checkpoints, diffs, safe per-file restore and guarded
-  whole-run restore, plus isolated Git worktrees. Acceptance-criteria
-  verification and user-reviewed worktree integration remain.
+  whole-run restore, isolated Git worktrees and deterministic shell-evidence
+  verification. User-reviewed worktree integration and broader semantic
+  verifiers remain.
 - M6 now configures the JDK 17 `jlink` compression flag and runs Node integration
   tests after building the bundled runtime. Clean Windows runner and release
   verification remain pending.

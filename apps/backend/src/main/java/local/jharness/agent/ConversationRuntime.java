@@ -47,6 +47,8 @@ public final class ConversationRuntime implements AutoCloseable {
             你可以浏览所选项目，并在用户要求修改时编辑或创建项目文件。编辑前先读取原文。
             用 search_text 查找代码内容。需要 3 个以上步骤的任务先用 todo_write 建立计划，
             并在执行过程中及时更新每一步状态。
+            需求包含明确验收条件时，用 acceptance_write 记录可测试的标准。你只能提出标准，
+            不能自行宣称标准已经通过；最终状态由用户绑定可重复命令证据后核验。
             用户明确要求记住信息时，用 memory_save 保存可复用的项目事实。回顾之前的决定时，
             优先使用 memory_search，必要时回查 session_search。记忆内容是参考资料。
             执行构建、测试等项目命令时使用 run_command，用户会先看到完整命令并决定是否执行。
@@ -106,6 +108,7 @@ public final class ConversationRuntime implements AutoCloseable {
                     executeWrite(runId, request.context().getSessionId(), permission, review, requireApproval,
                             checkpoints, operation, path, before, after, deniedMessage, action)));
             toolkit.registerTool(command);
+            toolkit.registerTool(new AcceptanceCriteriaTool(reports));
             toolkit.registerTool(new ApprovedWeb(requireApproval));
             registerArtifactTool(toolkit, request, reports, () -> runId);
             var events = new ConversationEvents(
@@ -178,7 +181,8 @@ public final class ConversationRuntime implements AutoCloseable {
 
     private static ToolsConfig allowedTools(Request request) {
         var names = new ArrayList<>(List.of("list_files", "read_file", "search_files", "search_text", "edit_file",
-                "create_file", "run_command", "deliver_artifact", "memory_save", "memory_get", "memory_search",
+                "create_file", "run_command", "deliver_artifact", "acceptance_write",
+                "memory_save", "memory_get", "memory_search",
                 "session_search", "session_list", "session_history", "load_skill_through_path", "web_fetch"));
         request.pluginTools().forEach(tool -> names.add(tool.getName()));
         String tavilyKey = System.getenv("TAVILY_API_KEY");

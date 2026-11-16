@@ -156,10 +156,11 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     assert.ok(requests.every(request => request.path === '/v1/chat/completions' && request.auth === 'Bearer fixture-key'));
     assert.ok(requests.filter(request => request.body.tools?.length).every(request =>
       request.body.tools.every(tool => ['read_file', 'list_files', 'search_files', 'search_text', 'edit_file',
-        'create_file', 'run_command', 'deliver_artifact', 'todo_write', 'memory_save', 'memory_get', 'memory_search',
+        'create_file', 'run_command', 'deliver_artifact', 'acceptance_write', 'todo_write',
+        'memory_save', 'memory_get', 'memory_search',
         'session_search', 'session_list', 'session_history', 'load_skill_through_path', 'web_fetch',
         'web_search'].includes(tool.function.name))));
-    assert.ok(['todo_write', 'memory_save', 'memory_search', 'memory_get', 'session_search',
+    assert.ok(['todo_write', 'acceptance_write', 'memory_save', 'memory_search', 'memory_get', 'session_search',
       'session_list', 'session_history', 'search_text', 'load_skill_through_path'].every(name =>
       firstChat.tools.some(tool => tool.function.name === name)), JSON.stringify(firstChat.tools.map(tool => tool.function.name)));
     const exited = once(child, 'exit');
@@ -354,6 +355,7 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     steps = [
       ['run_command', { command: "[IO.File]::WriteAllText([IO.Path]::Combine((Get-Location).Path, 'denied.txt'), 'unexpected')" }],
       ['run_command', { command }],
+      ['acceptance_write', { criteria: ['命令以退出码 0 完成'] }],
     ];
     const commandContext = { ...context, sessionId: randomUUID() };
     await call('chat', { ...commandContext, ...model, runId: terminal,
@@ -380,6 +382,17 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     assert.equal(commandReport.commands[0].exitCode, 7);
     assert.equal(commandReport.commands[0].outcome, 'FAILED');
     assert.match(commandReport.commands[0].output, /完成/);
+    assert.equal(commandReport.acceptance.criteria.length, 1);
+    assert.equal(commandReport.acceptance.criteria[0].status, 'PENDING');
+    const verifiedCriterion = await call('verifyCriterion', {
+      ...commandContext,
+      runId: terminal,
+      criterionId: commandReport.acceptance.criteria[0].id,
+      commandId: commandReport.commands[0].id,
+      expectedExitCode: 0
+    });
+    assert.equal(verifiedCriterion.status, 'FAILED');
+    assert.match(verifiedCriterion.reason, /退出码/);
     const commandResults = JSON.stringify(requests.at(-1).body.messages.filter(message => message.role === 'tool'));
     assert.match(commandResults, /命令未获批准/);
     assert.match(commandResults, /退出码 7/);

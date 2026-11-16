@@ -416,6 +416,7 @@ public final class DurableConversation implements AutoCloseable {
                     (operation, path, before, after, denied, action) -> action.get(),
                     reports,
                     currentRun::get));
+            toolkit.registerTool(new AcceptanceCriteriaTool(reports));
             ConversationRuntime.registerArtifactTool(
                     toolkit, request, reports, currentRun::get);
             for (String name : CONFIRMED_TOOLS)
@@ -424,6 +425,7 @@ public final class DurableConversation implements AutoCloseable {
             tools.setStrictAllow(true);
             var allowed = new ArrayList<>(FILE_TOOLS);
             allowed.add("deliver_artifact");
+            allowed.add("acceptance_write");
             request.pluginTools().forEach(tool -> allowed.add(tool.getName()));
             tools.setAllow(allowed);
             events = new ConversationEvents(

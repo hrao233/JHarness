@@ -147,6 +147,12 @@ public final class Backend {
                 case "taskReport" -> taskReport(params);
                 case "taskArtifact" -> new TaskReportStore(workspace(params)).artifact(
                         identifier(params, "sessionId"), identifier(params, "artifactId"));
+                case "verifyCriterion" -> new TaskReportStore(workspace(params)).verifyCriterion(
+                        identifier(params, "sessionId"),
+                        identifier(params, "runId"),
+                        identifier(params, "criterionId"),
+                        identifier(params, "commandId"),
+                        params.path("expectedExitCode").asInt(0));
                 case "steer" -> durableConversations.steer(
                         identifier(params, "runId"), required(params, "message"));
                 case "approvals" -> listApprovals(params);

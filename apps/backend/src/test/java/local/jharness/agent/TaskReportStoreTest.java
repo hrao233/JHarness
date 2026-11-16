@@ -140,6 +140,67 @@ class TaskReportStoreTest {
         assertEquals(2, reports.reports(sessionId, List.of()).size());
     }
 
+    @Test
+    void verifiesAcceptanceOnlyFromDeterministicShellEvidence() throws Exception {
+        Path workspace = Files.createDirectories(temporary.resolve("workspace-acceptance"));
+        String sessionId = UUID.randomUUID().toString();
+        String runId = UUID.randomUUID().toString();
+        var reports = new TaskReportStore(workspace);
+        var acceptance = reports.saveAcceptanceCriteria(
+                sessionId,
+                runId,
+                List.of("Automated test command exits successfully", "Second criterion"));
+        assertEquals(2, acceptance.criteria().size());
+        assertEquals(TaskReportStore.CriterionStatus.PENDING,
+                acceptance.criteria().get(0).status());
+
+        long now = System.currentTimeMillis();
+        var passedCommand = reports.recordCommand(
+                sessionId, runId, "mvn test", now, now + 10, 0, "SUCCEEDED", false, "BUILD SUCCESS");
+        var verified = reports.verifyCriterion(
+                sessionId,
+                runId,
+                acceptance.criteria().get(0).id(),
+                passedCommand.id(),
+                0);
+        assertEquals(TaskReportStore.CriterionStatus.PASSED, verified.status());
+        assertEquals("shell-exit-v1:0", verified.verifier());
+
+        var truncatedCommand = reports.recordCommand(
+                sessionId, runId, "large output", now, now + 20, 0, "SUCCEEDED", true, "truncated");
+        var unknown = reports.verifyCriterion(
+                sessionId,
+                runId,
+                acceptance.criteria().get(1).id(),
+                truncatedCommand.id(),
+                0);
+        assertEquals(TaskReportStore.CriterionStatus.UNKNOWN, unknown.status());
+
+        var failedCommand = reports.recordCommand(
+                sessionId, runId, "mvn test", now, now + 30, 1, "FAILED", false, "BUILD FAILURE");
+        var failed = reports.verifyCriterion(
+                sessionId,
+                runId,
+                acceptance.criteria().get(1).id(),
+                failedCommand.id(),
+                0);
+        assertEquals(TaskReportStore.CriterionStatus.FAILED, failed.status());
+
+        var rewritten = reports.saveAcceptanceCriteria(
+                sessionId,
+                runId,
+                List.of("Automated test command exits successfully", "New criterion"));
+        assertEquals(verified.id(), rewritten.criteria().get(0).id());
+        assertEquals(TaskReportStore.CriterionStatus.PASSED,
+                rewritten.criteria().get(0).status());
+        assertThrows(IllegalArgumentException.class, () -> reports.verifyCriterion(
+                sessionId,
+                runId,
+                rewritten.criteria().get(0).id(),
+                UUID.randomUUID().toString(),
+                0));
+    }
+
     private static void writeUnchecked(Path file, String text) {
         try {
             Files.writeString(file, text, StandardCharsets.UTF_8);

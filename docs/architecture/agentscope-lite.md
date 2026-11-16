@@ -285,6 +285,8 @@ This is a guarded multi-file operation, not a filesystem-wide atomic transaction
 `TaskReportStore` projects durable, user-reviewable evidence for each session/run:
 
 - `todo_write` arguments are validated and stored as the latest full plan revision;
+- `acceptance_write` records a full replacement list of proposed criteria, preserving status and
+  identity for unchanged criterion text;
 - `run_command` writes a receipt with exit code, producer outcome, duration and bounded output;
 - `deliver_artifact` copies a file from the sandboxed project filesystem into the application data
   directory under the owning session/run, recording its source path, size and SHA-256;
@@ -299,6 +301,14 @@ owned by the selected session are exposed to Electron.
 The report schema is an append-oriented projection, not a second execution log. The session journal
 remains authoritative for task and tool state; deleting report projections does not make an
 uncertain side effect safe to retry.
+
+Acceptance verification is host-authorized and runs only over an already persisted receipt from the
+same session/run. The verifier requires an explicit expected exit code, consistent producer outcome,
+no truncated output and a non-unknown exit code. Matching the expected code produces `PASSED`;
+a different known code produces `FAILED`; incomplete or contradictory evidence produces `UNKNOWN`.
+The criterion text remains unchanged, and the report retains the verifier identity, command ID,
+expected code, timestamp and reason. This verifies shell evidence only, never a broader semantic
+claim such as visual correctness or requirement completeness.
 
 ### Isolated Git worktrees
 

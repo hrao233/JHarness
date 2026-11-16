@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('jharness', {
   worktreeStatus: project => ipcRenderer.invoke('jh:worktree-status', project),
   removeWorktree: (project, force = false) => ipcRenderer.invoke('jh:worktree-remove', project, force),
   report: (project, session) => ipcRenderer.invoke('jh:report', project, session),
+  verifyCriterion: (project, session, runId, criterionId, commandId) =>
+    ipcRenderer.invoke('jh:verify-criterion', project, session, runId, criterionId, commandId),
   openArtifact: (project, session, id) => ipcRenderer.invoke('jh:open-artifact', project, session, id),
   exportSession: (project, session, format, title) =>
     ipcRenderer.invoke('jh:export-session', project, session, format, title),

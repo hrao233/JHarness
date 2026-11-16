@@ -1,0 +1,411 @@
+/*
+ * Copyright 2024-2026 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.agentscope.core.agent.accumulator;
+
+import io.agentscope.core.message.ContentBlock;
+import io.agentscope.core.message.ToolCallState;
+import io.agentscope.core.message.ToolUseBlock;
+import io.agentscope.core.util.JsonUtils;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Tool calls accumulator for accumulating streaming tool call chunks.
+ *
+ * <p>This accumulator supports multiple parallel tool calls and handles:
+ *
+ * <ul>
+ *   <li>Tool name and ID accumulation
+ *   <li>Incremental parameter merging
+ *   <li>Raw JSON content accumulation and parsing
+ *   <li>Placeholder name handling (e.g., "__fragment__")
+ * </ul>
+ * @hidden
+ */
+public class ToolCallsAccumulator implements ContentAccumulator<ToolUseBlock> {
+
+    private static final Logger LOG = LoggerFactory.getLogger(ToolCallsAccumulator.class);
+
+    // Map to support multiple parallel tool calls
+    // Key: tool identifier (ID, name, or index)
+    private final Map<String, ToolCallBuilder> builders = new LinkedHashMap<>();
+    private int nextIndex = 0;
+
+    // Track the last tool call key for streaming chunks without ID
+    // This is needed when models return fragments with placeholder names and empty IDs
+    private String lastToolCallKey = null;
+
+    /** Builder for a single tool call. */
+    private static class ToolCallBuilder {
+        String toolId;
+        String name;
+        Map<String, Object> args = new HashMap<>();
+        StringBuilder rawContent = new StringBuilder();
+        Map<String, Object> metadata = new HashMap<>();
+        // Name of the exception from the last failed JSON parse of rawContent, cleared on a
+        // successful parse; only used to report the failure once at finalization
+        String parseFailure;
+        boolean parseWarned;
+        ToolCallState state;
+
+        void merge(ToolUseBlock block) {
+            // Update ID if present
+            if (this.toolId == null && block.getId() != null && !block.getId().isEmpty()) {
+                this.toolId = block.getId();
+            }
+
+            // Update name (ignore placeholders)
+            if (block.getName() != null
+                    && !block.getName().isEmpty()
+                    && !isPlaceholder(block.getName())) {
+                this.name = block.getName();
+            }
+
+            // Merge parameters. Skip null values so a partial/null map from an early
+            // stream chunk cannot wipe previously accumulated non-null arguments.
+            if (block.getInput() != null) {
+                for (Map.Entry<String, Object> entry : block.getInput().entrySet()) {
+                    if (entry.getValue() != null) {
+                        this.args.put(entry.getKey(), entry.getValue());
+                    } else if (!this.args.containsKey(entry.getKey())) {
+                        this.args.put(entry.getKey(), null);
+                    }
+                }
+            }
+
+            // Accumulate raw content (for parsing complete JSON)
+            if (block.getContent() != null) {
+                this.rawContent.append(block.getContent());
+            }
+
+            // Merge metadata (e.g., thoughtSignature for Gemini 3 Pro)
+            if (block.getMetadata() != null && !block.getMetadata().isEmpty()) {
+                this.metadata.putAll(block.getMetadata());
+            }
+
+            this.state = block.getState();
+        }
+
+        ToolUseBlock build() {
+            return build(false);
+        }
+
+        ToolUseBlock build(boolean truncated) {
+            Map<String, Object> finalArgs = new HashMap<>(args);
+            String rawContentStr = this.rawContent.toString();
+
+            // Always attempt to parse the fully accumulated raw JSON. Early stream chunks may
+            // look like complete objects ({...}) but still contain null/incomplete values;
+            // the final raw content is the source of truth for missing or null keys.
+            if (!rawContentStr.isEmpty()) {
+                try {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> parsed =
+                            JsonUtils.getJsonCodec().fromJson(rawContentStr, Map.class);
+                    parseFailure = null;
+                    if (parsed != null) {
+                        for (Map.Entry<String, Object> entry : parsed.entrySet()) {
+                            if (entry.getValue() == null) {
+                                continue;
+                            }
+                            Object existing = finalArgs.get(entry.getKey());
+                            if (existing == null || !finalArgs.containsKey(entry.getKey())) {
+                                finalArgs.put(entry.getKey(), entry.getValue());
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    // Incomplete JSON prefixes are expected while streamed fragments are still
+                    // arriving, so build() stays silent here; buildAllToolCalls() reports the
+                    // failure once at finalization if the raw content never became valid JSON.
+                    // Only the exception name is kept: its message may quote raw arguments,
+                    // which can contain credentials or other sensitive data.
+                    parseFailure = e.getClass().getSimpleName();
+                }
+            }
+
+            // Always validate rawContent is a legal JSON object before using it
+            // as content. This prevents persisting malformed JSON fragments
+            // (e.g. when streaming was interrupted mid-arguments). Non-empty but
+            // invalid raw content means the arguments were truncated or corrupt;
+            // the fact is preserved as a metadata marker so the acting phase can
+            // refuse execution instead of silently running the call with {}.
+            String contentStr;
+            Map<String, Object> finalMetadata = metadata;
+            boolean malformed;
+            if (rawContentStr.isEmpty()) {
+                contentStr = "{}";
+                // Without a completed block or any parsed arguments, an output-limit stop
+                // cannot establish that an empty tool-call start was a complete no-arg call.
+                malformed = truncated && finalArgs.isEmpty();
+            } else if (JsonUtils.isValidJsonObject(rawContentStr)) {
+                contentStr = rawContentStr;
+                malformed = false;
+            } else {
+                contentStr = "{}";
+                malformed = true;
+            }
+            if (malformed) {
+                finalMetadata = new HashMap<>(metadata);
+                finalMetadata.put(ToolUseBlock.METADATA_MALFORMED_ARGUMENTS, true);
+            }
+
+            return ToolUseBlock.builder()
+                    .id(toolId != null ? toolId : generateId())
+                    .name(name)
+                    .input(finalArgs)
+                    .content(contentStr)
+                    .metadata(finalMetadata.isEmpty() ? null : finalMetadata)
+                    .state(state)
+                    .build();
+        }
+
+        /**
+         * Emits at most one sanitized warning when the final accumulated arguments are marked
+         * malformed.
+         *
+         * <p>Called only from the finalization boundary ({@link #buildAllToolCalls(boolean)}),
+         * not from per-fragment builds, because incomplete JSON prefixes are normal mid-stream.
+         * The warning omits the raw arguments (they may contain credentials, PII, or user
+         * documents) and carries no stack trace.
+         */
+        private void warnIfMalformedOnce(ToolUseBlock block, boolean truncated) {
+            if (!block.hasMalformedArguments() || parseWarned) {
+                return;
+            }
+            parseWarned = true;
+            String cause =
+                    parseFailure != null
+                            ? parseFailure
+                            : (truncated ? "TruncatedEmptyArguments" : "NotAJsonObject");
+            LOG.warn(
+                    "Tool call '{}' (id '{}') has malformed arguments after the stream ended"
+                            + " (raw length: {}); the call will be rejected before execution."
+                            + " Cause: {}",
+                    name != null && !name.isEmpty() ? name : "<unnamed>",
+                    block.getId(),
+                    rawContent.length(),
+                    cause);
+        }
+
+        private boolean isPlaceholder(String name) {
+            // Common placeholder names
+            return "__fragment__".equals(name)
+                    || "__pending__".equals(name)
+                    || (name != null && name.startsWith("__"));
+        }
+
+        private String generateId() {
+            return "tool_call_" + System.currentTimeMillis();
+        }
+    }
+
+    /**
+     * @hidden
+     */
+    @Override
+    public void add(ToolUseBlock block) {
+        if (block == null) {
+            return;
+        }
+
+        // Determine which tool call this block belongs to
+        String key = determineKey(block);
+
+        // Get or create the corresponding builder
+        ToolCallBuilder builder = builders.computeIfAbsent(key, k -> new ToolCallBuilder());
+
+        // Merge the block
+        builder.merge(block);
+    }
+
+    /**
+     * Determine the key for a tool call (to distinguish multiple parallel calls).
+     *
+     * <p>Priority:
+     *
+     * <ol>
+     *   <li>Use tool ID if available (non-empty)
+     *   <li>Use tool name if available (non-placeholder, non-empty)
+     *   <li>If this is a fragment (placeholder or empty continuation name) and a last tool
+     *       call key exists, reuse it
+     *   <li>Otherwise, use index for chunks without any identifier
+     * </ol>
+     */
+    private String determineKey(ToolUseBlock block) {
+        // 1. Prefer tool ID if non-empty
+        if (block.getId() != null && !block.getId().isEmpty()) {
+            String key = block.getId();
+            // Remember this key if it's not a placeholder
+            if (block.getName() != null && !isPlaceholder(block.getName())) {
+                lastToolCallKey = key;
+            }
+            return key;
+        }
+
+        // 2. Use tool name (non-placeholder)
+        if (block.getName() != null
+                && !block.getName().isEmpty()
+                && !isPlaceholder(block.getName())) {
+            String key = "name:" + block.getName();
+            lastToolCallKey = key;
+            return key;
+        }
+
+        // 3. If this is a fragment (placeholder or empty continuation name) and we
+        //    have a last key, reuse it
+        boolean emptyContinuationName = block.getName() != null && block.getName().isEmpty();
+        if ((isPlaceholder(block.getName()) || emptyContinuationName) && lastToolCallKey != null) {
+            return lastToolCallKey;
+        }
+
+        // 4. Use index (for chunks without any identifier)
+        String key = "index:" + nextIndex++;
+        lastToolCallKey = key;
+        return key;
+    }
+
+    private boolean isPlaceholder(String name) {
+        return name != null && name.startsWith("__");
+    }
+
+    /**
+     * @hidden
+     */
+    @Override
+    public boolean hasContent() {
+        return !builders.isEmpty();
+    }
+
+    /**
+     * @hidden
+     */
+    @Override
+    public ContentBlock buildAggregated() {
+        List<ToolUseBlock> toolCalls = buildAllToolCalls();
+
+        // If only one tool call, return it
+        // If multiple, return the last one (or could return a special multi-call block)
+        if (toolCalls.isEmpty()) {
+            return null;
+        }
+
+        return toolCalls.get(toolCalls.size() - 1);
+    }
+
+    /**
+     * Build all accumulated tool calls.
+     *
+     * @hidden
+     * @return List of tool calls
+     */
+    public List<ToolUseBlock> buildAllToolCalls() {
+        return buildAllToolCalls(false);
+    }
+
+    /**
+     * Builds calls, rejecting ambiguous empty starts when output stopped at its token limit.
+     *
+     * <p>This is the finalization boundary: malformed calls retain the upstream marker used to
+     * reject execution, and also emit one sanitized diagnostic warning.
+     */
+    public List<ToolUseBlock> buildAllToolCalls(boolean truncated) {
+        return builders.values().stream()
+                .map(
+                        builder -> {
+                            ToolUseBlock block = builder.build(truncated);
+                            builder.warnIfMalformedOnce(block, truncated);
+                            return block;
+                        })
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Get accumulated tool call by ID.
+     *
+     * <p>If the ID is null or empty, or if no builder is found for the given ID,
+     * this method falls back to using the lastToolCallKey.
+     *
+     * @param id The tool call ID to look up
+     * @return The accumulated ToolUseBlock, or null if not found
+     */
+    public ToolUseBlock getAccumulatedToolCall(String id) {
+        if (id != null && !id.isEmpty()) {
+            // First try to find by ID directly
+            ToolCallBuilder builder = builders.get(id);
+            if (builder != null) {
+                return builder.build();
+            }
+        }
+
+        // Fallback to lastToolCallKey if ID is empty or not found
+        if (lastToolCallKey != null) {
+            ToolCallBuilder builder = builders.get(lastToolCallKey);
+            if (builder != null) {
+                return builder.build();
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Get all accumulated tool calls.
+     *
+     * <p>This is an alias for {@link #buildAllToolCalls()} for API consistency.
+     *
+     * @return List of all accumulated ToolUseBlocks
+     */
+    public List<ToolUseBlock> getAllAccumulatedToolCalls() {
+        return buildAllToolCalls();
+    }
+
+    /**
+     * Get the ID of the current (last) tool call being accumulated.
+     *
+     * <p>This is useful for enriching fragment chunks with the correct tool call ID,
+     * allowing users to properly concatenate streaming chunks.
+     *
+     * @return The current tool call ID, or null if no tool call is being accumulated
+     */
+    public String getCurrentToolCallId() {
+        if (lastToolCallKey == null) {
+            return null;
+        }
+
+        ToolCallBuilder builder = builders.get(lastToolCallKey);
+        if (builder == null) {
+            return null;
+        }
+
+        return builder.toolId;
+    }
+
+    /**
+     * @hidden
+     */
+    @Override
+    public void reset() {
+        builders.clear();
+        nextIndex = 0;
+        lastToolCallKey = null;
+    }
+}

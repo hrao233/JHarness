@@ -9,33 +9,20 @@
     </parent>
     <artifactId>jharness-backend</artifactId>
     <properties>
-        <maven.compiler.release>17</maven.compiler.release>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <agentscope.version>2.1.0-SNAPSHOT</agentscope.version>
+        <maven.compiler.release>${java.version}</maven.compiler.release>
     </properties>
-    <dependencyManagement>
-        <dependencies>
-            <dependency>
-                <groupId>io.agentscope</groupId>
-                <artifactId>agentscope-bom</artifactId>
-                <version>${agentscope.version}</version>
-                <type>pom</type>
-                <scope>import</scope>
-            </dependency>
-        </dependencies>
-    </dependencyManagement>
     <dependencies>
         <dependency>
-            <groupId>io.agentscope</groupId>
-            <artifactId>agentscope-core</artifactId>
+            <groupId>local.jharness</groupId>
+            <artifactId>jharness-agent-core</artifactId>
         </dependency>
         <dependency>
-            <groupId>io.agentscope</groupId>
-            <artifactId>agentscope-harness</artifactId>
+            <groupId>local.jharness</groupId>
+            <artifactId>jharness-agent-harness</artifactId>
         </dependency>
         <dependency>
-            <groupId>io.agentscope</groupId>
-            <artifactId>agentscope-extensions-model-openai</artifactId>
+            <groupId>local.jharness</groupId>
+            <artifactId>jharness-model-openai</artifactId>
         </dependency>
         <dependency>
             <groupId>org.slf4j</groupId>

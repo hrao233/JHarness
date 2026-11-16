@@ -4,6 +4,7 @@ release/
 runtime/
 target/
 apps/backend/target/
+**/.flattened-pom.xml
 build/
 .idea/
 *.log

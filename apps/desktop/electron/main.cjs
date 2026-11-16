@@ -6,6 +6,7 @@ const { createInterface } = require('node:readline');
 const { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } = require('node:fs');
 const path = require('node:path');
 const { importAttachment, projectParts, label } = require('./context-parts.cjs');
+const { createManager } = require('./worktree-manager.cjs');
 const git = promisify(execFile);
 
 let win;
@@ -15,11 +16,19 @@ let settings;
 let settingsFile;
 let quitting = false;
 let bookmarkMigration;
+let worktreeManager;
 const pending = new Map();
 const attachments = new Map();
 const effortValues = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const deepseekEfforts = ['none', 'low', 'high', 'max'];
 const smokeMode = process.argv.includes('--jharness-smoke');
+
+function managedWorktrees() {
+  if (!worktreeManager) {
+    worktreeManager = createManager(path.join(app.getPath('userData'), 'worktrees'));
+  }
+  return worktreeManager;
+}
 
 function fastTier(profile) {
   if (profile.provider !== 'compatible') return '';
@@ -237,6 +246,57 @@ function register() {
       if (error.stderr?.includes('not a git repository')) throw new Error('当前目录没有 Git 仓库。');
       throw new Error('无法读取当前项目的 Git 状态。');
     }
+  });
+  ipcMain.handle('jh:worktree-create', async (_, projectId, requestedName = '') => {
+    const parent = settings.projects.find(item => item.id === projectId);
+    if (!parent) throw new Error('找不到项目。');
+    if (parent.worktree) throw new Error('不能从隔离工作树继续创建嵌套工作树。');
+    const created = await managedWorktrees().create({
+      projectRoot: parent.directory,
+      label: typeof requestedName === 'string' ? requestedName : ''
+    });
+    const project = {
+      id: randomUUID(),
+      directory: created.path,
+      name: parent.name + ' · ' + created.branch.replace(/^jharness\//, ''),
+      sessions: [],
+      worktree: {
+        ...created,
+        parentProjectId: parent.id,
+        parentProjectName: parent.name
+      }
+    };
+    settings.projects.unshift(project);
+    try {
+      persist();
+    } catch (error) {
+      settings.projects.shift();
+      await managedWorktrees().remove(created, { force: true }).catch(() => {});
+      throw error;
+    }
+    return project;
+  });
+  ipcMain.handle('jh:worktree-status', async (_, projectId) => {
+    const project = settings.projects.find(item => item.id === projectId);
+    if (!project) throw new Error('找不到项目。');
+    return project.worktree
+      ? managedWorktrees().status(project.worktree)
+      : managedWorktrees().source(project.directory);
+  });
+  ipcMain.handle('jh:worktree-remove', async (_, projectId, force = false) => {
+    const index = settings.projects.findIndex(item => item.id === projectId);
+    const project = settings.projects[index];
+    if (!project) throw new Error('找不到项目。');
+    if (!project.worktree) throw new Error('当前项目不是隔离工作树。');
+    await managedWorktrees().remove(project.worktree, { force: force === true });
+    settings.projects.splice(index, 1);
+    try {
+      persist();
+    } catch (error) {
+      settings.projects.splice(index, 0, project);
+      throw error;
+    }
+    return true;
   });
   ipcMain.handle('jh:project', async () => {
     const result = await dialog.showOpenDialog(win, { title: '打开项目', properties: ['openDirectory'] });
@@ -554,6 +614,17 @@ async function smokeInterruptedApproval() {
     'Task report empty state did not load');
   result.reports = reportDialog.innerText;
   reportDialog.querySelector('.dialog-head button').click();
+  const worktreeButton = [...document.querySelectorAll('button')]
+    .find(button => button.title === '隔离工作树');
+  if (!worktreeButton) throw new Error('Worktree entry missing');
+  worktreeButton.click();
+  const worktreeDialog = await waitFor(
+    () => document.querySelector('dialog.nav-worktrees'), 'Worktree dialog did not open');
+  await waitFor(
+    () => worktreeDialog.innerText.includes('隔离工作树'),
+    'Worktree panel did not render');
+  result.worktrees = worktreeDialog.innerText;
+  worktreeDialog.querySelector('.dialog-head button').click();
   const checkpointButton = [...document.querySelectorAll('button')]
     .find(button => button.title === '检查点');
   if (!checkpointButton) throw new Error('Checkpoint entry missing');

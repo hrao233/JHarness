@@ -300,6 +300,25 @@ The report schema is an append-oriented projection, not a second execution log. 
 remains authoritative for task and tool state; deleting report projections does not make an
 uncertain side effect safe to retry.
 
+### Isolated Git worktrees
+
+The desktop can create a Git worktree from the currently opened repository root. The checked-out
+project must contain a `.git` entry; arbitrary parent directories are not searched so a temporary
+project inside an unrelated home repository cannot be silently treated as that repository.
+
+Creation uses the current `HEAD` rather than fetching a remote tip. The new branch is
+`jharness/<slug>-<uuid8>`, and the checkout lives under the JHarness app-data `worktrees/` directory,
+not inside the source project. The desktop records the parent project, base branch, base commit and
+source dirty-file count in settings and exposes the worktree as a separate project/session scope.
+Uncommitted source changes are deliberately not copied; the UI shows the dirty-file count before
+creation.
+
+Removal computes `git status --porcelain` and `git rev-list --count <baseCommit>..HEAD` in the
+worktree. Dirty files or commits beyond the recorded base block removal by default. Only an explicit
+force confirmation runs `git worktree remove --force`, prunes administrative entries and deletes the
+`jharness/*` branch. The packaged Electron file list must include the worktree manager module; the
+packaged GUI smoke asserts that the isolation panel renders.
+
 ### Session search projection
 
 Session recall uses a rebuildable SQLite FTS5 database under the local data

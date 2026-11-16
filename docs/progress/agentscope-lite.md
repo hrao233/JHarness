@@ -184,6 +184,16 @@ payloads and existing downstream imports stay compatible.
   path retain the correct order across restarts.
 - Added unit and E2E coverage for repeated writes, created-file deletion,
   conflict-wide refusal and successful three-file restore.
+- Added desktop-managed isolated Git worktrees. A current-HEAD checkout is
+  created on a `jharness/*` branch under app data and registered as a separate
+  project scope. Source dirty-file counts are shown but uncommitted changes are
+  not copied.
+- Worktree status tracks dirty files and commits ahead of the recorded base.
+  Removal refuses dirty trees and unmerged commits unless the user explicitly
+  forces cleanup. The manager sweeps failed creation, worktree admin entries and
+  its own branch.
+- Fixed the packaged Electron allowlist to include the new worktree manager and
+  added packaged-GUI coverage for opening the isolation panel.
 
 ## Lightweight Runtime
 
@@ -217,7 +227,7 @@ npm run package:win
 Last verified on 2026-11-16:
 
 - `mvn -B -T1C clean verify`: 5087 tests, 0 failures, 0 errors, 56 skipped;
-- `npm test`: 5 tests, 0 failures;
+- `npm test`: 6 tests, 0 failures;
 - `npm run build:ui`: success;
 - `npm run package:win`: success, including `PACKAGED_GUI_SMOKE_OK`;
 - shaded backend JAR: 22,570,723 bytes (21.5 MiB).
@@ -243,8 +253,8 @@ checkpoint/report correlation, and command approval across a durable resume.
   compatibility remain.
 - M4 now has a reviewable project-work slice: task plans, command/test receipts,
   artifacts, file checkpoints, diffs, safe per-file restore and guarded
-  whole-run restore. Worktree isolation and acceptance-criteria verification
-  remain.
+  whole-run restore, plus isolated Git worktrees. Acceptance-criteria
+  verification and user-reviewed worktree integration remain.
 - M6 now configures the JDK 17 `jlink` compression flag and runs Node integration
   tests after building the bundled runtime. Clean Windows runner and release
   verification remain pending.

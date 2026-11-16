@@ -18,7 +18,7 @@ cpSync(electron, output, { recursive: true, filter: file => path.basename(file) 
 const resources = path.join(output, 'resources');
 const app = path.join(resources, 'app');
 mkdirSync(path.join(app, 'desktop'), { recursive: true });
-for (const file of ['main.cjs', 'preload.cjs', 'context-parts.cjs']) {
+for (const file of ['main.cjs', 'preload.cjs', 'context-parts.cjs', 'worktree-manager.cjs']) {
   copyFileSync(path.join(desktop, file), path.join(app, 'desktop', file));
 }
 const { name, productName, version } = require('../../package.json');

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { BookOpen, Brain, CircleCheck, CircleDashed, ClipboardList, Download, ExternalLink,
-  FileBox, GitPullRequest, House, Images, ListChecks, Plus, Power, Puzzle, RefreshCw, RotateCcw,
-  ScanText, Search, Settings, SquareTerminal, Trash2, X }
+  FileBox, GitBranch, GitPullRequest, House, Images, ListChecks, Plus, Power, Puzzle, RefreshCw,
+  RotateCcw, ScanText, Search, Settings, SquareTerminal, Trash2, X }
   from 'lucide-react';
 
 export function Navigation({ showSidebar, home, attachImage, openPanel, openSettings, busy, project, session }) {
@@ -14,6 +14,7 @@ export function Navigation({ showSidebar, home, attachImage, openPanel, openSett
     { label: '搜索会话', Icon: Search, action: () => openPanel('search') },
     { label: '任务中心', Icon: ListChecks, action: () => openPanel('tasks') },
     { label: '任务报告', Icon: ClipboardList, action: () => openPanel('reports'), disabled: !session },
+    { label: '隔离工作树', Icon: GitBranch, action: () => openPanel('worktrees'), disabled: !project },
     { label: '上下文', Icon: ScanText, action: () => openPanel('context'), disabled: !session },
     { label: '检查点', Icon: RotateCcw, action: () => openPanel('checkpoints'), disabled: !project },
     { label: '代码审查', Icon: GitPullRequest, action: () => openPanel('review'), disabled: !project }
@@ -28,7 +29,8 @@ export function Navigation({ showSidebar, home, attachImage, openPanel, openSett
 
 const titles = {
   library: '资料库', plugins: 'Skills 与插件', search: '搜索会话', tasks: '任务中心',
-  reports: '任务报告', context: '上下文', checkpoints: '检查点', review: '代码审查'
+  reports: '任务报告', worktrees: '隔离工作树', context: '上下文', checkpoints: '检查点',
+  review: '代码审查'
 };
 const taskStatus = {
   queued: '排队中', running: '运行中', suspended: '等待审批',
@@ -36,7 +38,7 @@ const taskStatus = {
 };
 
 export function NavigationPanel({ panel, close, projects, project, bookmarks, openChat, removeBookmark,
-    copy, addPart, busy, api, errorText, session }) {
+    copy, addPart, busy, api, errorText, session, onWorktreesChanged, openWorktree }) {
   const dialog = useRef(null);
   const [query, setQuery] = useState('');
   const [result, setResult] = useState(null);
@@ -57,6 +59,9 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
   const [changeSet, setChangeSet] = useState(null);
   const [changeSetBusy, setChangeSetBusy] = useState('');
   const [changeSetNotice, setChangeSetNotice] = useState('');
+  const [worktreeStatus, setWorktreeStatus] = useState(null);
+  const [worktreeBusy, setWorktreeBusy] = useState('');
+  const [worktreeName, setWorktreeName] = useState('');
   useEffect(() => { dialog.current.showModal(); }, []);
   useEffect(() => {
     if (panel !== 'plugins' && (panel !== 'review' || !project)) return;
@@ -142,6 +147,20 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
     setChangeSet(null);
     setChangeSetNotice('');
   }, [panel, project?.id, session?.id]);
+
+  useEffect(() => {
+    if (panel !== 'worktrees' || !project) return;
+    let live = true;
+    setWorktreeStatus(null);
+    setWorktreeName('');
+    setError('');
+    api.worktreeStatus(project.id).then(value => {
+      if (live) setWorktreeStatus(value);
+    }).catch(failure => {
+      if (live) setError(errorText(failure));
+    });
+    return () => { live = false; };
+  }, [api, errorText, panel, project?.id, revision]);
 
   const needle = query.trim().toLowerCase();
   useEffect(() => {
@@ -289,6 +308,41 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
       setError(errorText(failure));
     } finally {
       setChangeSetBusy('');
+    }
+  }
+
+  async function createWorktree() {
+    if (!project || project.worktree) return;
+    setWorktreeBusy('create');
+    setError('');
+    try {
+      const created = await api.createWorktree(project.id, worktreeName.trim());
+      await onWorktreesChanged(created);
+      close();
+    } catch (failure) {
+      setError(errorText(failure));
+    } finally {
+      setWorktreeBusy('');
+    }
+  }
+
+  async function removeWorktree() {
+    if (!project?.worktree) return;
+    const risky = worktreeStatus && (worktreeStatus.dirty || worktreeStatus.ahead > 0);
+    const warning = risky
+      ? '此工作树包含未提交修改或未合并提交。继续会永久丢弃这些内容，确定移除吗？'
+      : '移除此隔离工作树及其 JHarness 会话记录？';
+    if (!confirm(warning)) return;
+    setWorktreeBusy('remove');
+    setError('');
+    try {
+      await api.removeWorktree(project.id, !!risky);
+      await onWorktreesChanged(null, project.id);
+      close();
+    } catch (failure) {
+      setError(errorText(failure));
+    } finally {
+      setWorktreeBusy('');
     }
   }
 
@@ -516,6 +570,66 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
           </section>
         </details>)}
       </div>}
+    </>}
+    {panel === 'worktrees' && <>
+      <div className="review-head"><span>{project?.name || '项目'}的隔离工作树</span>
+        <button type="button" className="secondary" onClick={() => setRevision(value => value + 1)}>
+          <RefreshCw size={15}/>刷新
+        </button>
+      </div>
+      {project && !project.worktree && <section className="worktree-create">
+        <p className="muted">从当前 Git 提交创建独立分支和目录。未提交修改不会复制到工作树。</p>
+        {worktreeStatus?.source && <div className="worktree-source-state">
+          <GitBranch size={15}/><span>{worktreeStatus.branch}</span>
+          <small className={worktreeStatus.dirty ? 'state-conflict' : 'state-ready'}>
+            {worktreeStatus.dirty
+              ? worktreeStatus.changedFiles + ' 项未提交修改，不会复制'
+              : '来源工作区干净'}
+          </small>
+        </div>}
+        <div className="worktree-create-row">
+          <input maxLength={40} value={worktreeName} aria-label="工作树名称"
+            placeholder="例如 fix-login" onChange={event => setWorktreeName(event.target.value)}/>
+          <button type="button" className="primary" disabled={!!worktreeBusy || busy} onClick={createWorktree}>
+            <GitBranch size={15}/>创建工作树
+          </button>
+        </div>
+      </section>}
+      {project?.worktree && <section className="worktree-current">
+        <div className="worktree-heading">
+          <GitBranch size={18}/><span><strong>{project.worktree.branch}</strong>
+            <small>{project.worktree.parentProjectName || project.name}</small></span>
+          <span className={'task-state ' + (worktreeStatus?.dirty || worktreeStatus?.ahead
+            ? 'state-interrupted' : 'state-completed')}>
+            {!worktreeStatus ? '读取中' : !worktreeStatus.exists ? '目录缺失'
+              : worktreeStatus.dirty ? '有未提交修改'
+                : worktreeStatus.ahead > 0 ? worktreeStatus.ahead + ' 个提交待处理' : '干净'}
+          </span>
+        </div>
+        <code className="worktree-path">{project.directory}</code>
+        <div className="worktree-metrics">
+          <span><b>{worktreeStatus?.changedFiles ?? 0}</b> 项修改</span>
+          <span><b>{worktreeStatus?.ahead ?? 0}</b> 个新提交</span>
+          <span>起始提交 <code>{project.worktree.baseCommit?.slice(0, 8)}</code></span>
+        </div>
+        <div className="worktree-actions">
+          <button type="button" className="secondary" disabled={!!worktreeBusy || busy}
+            onClick={removeWorktree}><Trash2 size={15}/>移除工作树</button>
+        </div>
+      </section>}
+      <section className="worktree-list">
+        <div className="side-label">已有工作树</div>
+        {projects.filter(item => item.worktree).map(item => <button type="button" className="menu-row"
+          key={item.id} disabled={busy || item.id === project?.id}
+          onClick={() => { close(); openWorktree(item); }}>
+          <GitBranch size={16}/><span className="menu-copy">
+            <strong>{item.worktree.branch}</strong>
+            <small>{item.worktree.parentProjectName || item.name}</small>
+          </span>
+        </button>)}
+        {!projects.some(item => item.worktree)
+          && <p className="muted">还没有隔离工作树。</p>}
+      </section>
     </>}
     {panel === 'checkpoints' && <>
       <div className="review-head"><span>{project?.name || '项目'} 的文件检查点</span>

@@ -15,6 +15,9 @@ contextBridge.exposeInMainWorld('jharness', {
     ipcRenderer.invoke('jh:restore-change-set', project, session, runId),
   changeSets: (project, session, runId) =>
     ipcRenderer.invoke('jh:change-sets', project, session, runId),
+  createWorktree: (project, name = '') => ipcRenderer.invoke('jh:worktree-create', project, name),
+  worktreeStatus: project => ipcRenderer.invoke('jh:worktree-status', project),
+  removeWorktree: (project, force = false) => ipcRenderer.invoke('jh:worktree-remove', project, force),
   report: (project, session) => ipcRenderer.invoke('jh:report', project, session),
   openArtifact: (project, session, id) => ipcRenderer.invoke('jh:open-artifact', project, session, id),
   exportSession: (project, session, format, title) =>

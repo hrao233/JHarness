@@ -101,6 +101,27 @@ function App() {
     }
   }
 
+  async function worktreesChanged(created, removedId) {
+    const state = await refresh();
+    if (created) {
+      const target = state.projects.find(item => item.id === created.id);
+      if (target) await select(target, target.sessions[0]);
+      return;
+    }
+    if (removedId && selected?.project === removedId) {
+      const target = state.projects[0];
+      if (target) {
+        await select(target, target.sessions[0]);
+      } else {
+        selection.current = { project: null, session: null };
+        setSelected(null);
+        setItems([]);
+        setTask(null);
+        setNotice('');
+      }
+    }
+  }
+
   useEffect(() => {
     refresh().then(state => {
       const p = state.projects[0];
@@ -501,7 +522,8 @@ function App() {
         projects: previous.projects.map(p => p.id === project.id ? { ...p, autoMemory: enabled } : p) }))}/>}
     {panel && panel !== 'memory' && <NavigationPanel key={panel} panel={panel} close={() => setPanel(null)} projects={data.projects}
       project={project} session={session} bookmarks={bookmarks} openChat={openChat} removeBookmark={removeBookmark}
-      copy={copy} addPart={part => appendParts([part])} busy={!!run} api={api} errorText={errText}/>}
+      copy={copy} addPart={part => appendParts([part])} busy={!!run} api={api} errorText={errText}
+      onWorktreesChanged={worktreesChanged} openWorktree={target => select(target, target.sessions[0])}/>}
     {showSettings && <ModelSettings models={data.models} defaultModelId={data.defaultModelId} selectedId={model?.id}
       close={() => setShowSettings(false)} onSave={({ savedModelId, ...state }) => {
         setData(state);

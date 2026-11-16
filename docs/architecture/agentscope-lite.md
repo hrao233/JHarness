@@ -240,6 +240,22 @@ Keeping only the transcript baseline avoids inheriting stale writer ownership,
 inbox commands or active tool state. The source session remains unchanged and
 continues to hold the complete raw history.
 
+### Session search projection
+
+Session recall uses a rebuildable SQLite FTS5 database under the local data
+directory. The append-only journals remain authoritative. A per-session committed
+head sequence skips reindexing unchanged sessions.
+
+Tokenization is deliberately small and deterministic:
+
+- lower-case Latin words and numbers;
+- adjacent character bigrams for contiguous CJK runs;
+- a unigram for a one-character CJK query.
+
+Queries combine generated tokens with `AND`, which favors precision for both
+English phrases and Chinese substrings. Removing the index only loses query
+speed; the next scan recreates it from the journals.
+
 ## 6. Session and Context Model
 
 The append-only session log is the source of truth. A database is a query and

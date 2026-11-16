@@ -141,6 +141,12 @@ payloads and existing downstream imports stay compatible.
 - Added a legacy v1 migration fixture that is loaded into the current journal,
   inspected, exported and branched. Added Chinese and English session-search
   expectations, including branch results.
+- Replaced linear cross-session message scanning with a rebuildable SQLite FTS5
+  projection. Latin words are lower-cased tokens; CJK runs use adjacent
+  character bigrams so phrase-like Chinese recall works without a native
+  tokenizer extension. Session head sequences skip unchanged reindexing.
+- Added FTS tests for Chinese, English, filenames and a 5,000-message query
+  budget. The append-only session journal remains the recovery source.
 
 ## Lightweight Runtime
 
@@ -173,11 +179,11 @@ npm run package:win
 
 Last verified on 2026-11-16:
 
-- `mvn -B -T1C clean verify`: 5079 tests, 0 failures, 0 errors;
+- `mvn -B -T1C clean verify`: 5081 tests, 0 failures, 0 errors;
 - `npm test`: 4 tests, 0 failures;
 - `npm run build:ui`: success;
 - `npm run package:win`: success, including `PACKAGED_GUI_SMOKE_OK`;
-- shaded backend JAR: 22,495,887 bytes (21.5 MiB).
+- shaded backend JAR: 22,506,037 bytes (21.5 MiB).
 
 The cross-process Node test launches the shaded backend JAR with the bundled
 Java runtime and verifies model requests, tool permissions, streaming events,
@@ -189,9 +195,10 @@ workspace edits, memory, web approval, cancellation and session recovery.
   a pending approval task. The remaining increment is packaged fault injection
   while an approved tool is executing and when its outcome is unknown.
 - M3 now exposes recent model context, message-level session branching, source
-  navigation, Markdown/JSON export, a v1 migration sample and Chinese/English
-  search expectations. A branch records its source and begins from a clean state
-  baseline. A broader migration corpus and recall quality evaluation remain.
+  navigation, Markdown/JSON export, a v1 migration sample and a rebuildable
+  SQLite FTS5 recall index with CJK bigram tokens. A branch records its source
+  and begins from a clean state baseline. A broader migration corpus and scored
+  recall quality evaluation remain.
 - M5 adds capability-level RPC and desktop plugin integration. The process
   host currently provides lifecycle management and request transport, and the
   Java capability registry runs in-process.

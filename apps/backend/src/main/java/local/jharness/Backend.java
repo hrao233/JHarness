@@ -28,7 +28,9 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -39,6 +41,7 @@ import local.jharness.agent.DurableApprovalStore;
 import local.jharness.agent.DurableConversation;
 import local.jharness.agent.SessionArchive;
 import local.jharness.memory.ProjectMemory;
+import local.jharness.search.SessionSearchIndex;
 
 public final class Backend {
     private static final String USER_ID = "local";
@@ -47,6 +50,7 @@ public final class Backend {
     private final PrintStream protocol;
     private final Object bookmarkLock = new Object();
     private final Path dataDirectory;
+    private final SessionSearchIndex sessionSearch;
     private final ConversationRuntime conversations = new ConversationRuntime(this::event, Backend::describe);
     private final DurableConversation durableConversations =
             new DurableConversation(this::event, Backend::describe);
@@ -59,6 +63,7 @@ public final class Backend {
     private Backend(PrintStream protocol, Path dataDirectory) {
         this.protocol = protocol;
         this.dataDirectory = dataDirectory;
+        this.sessionSearch = new SessionSearchIndex(dataDirectory.resolve("session-search.sqlite"));
     }
 
     public static void main(String[] args) throws Exception {
@@ -149,6 +154,10 @@ public final class Backend {
     private List<ChatMessage> history(JsonNode params) throws Exception {
         var context = context(params);
         var log = ConversationRuntime.openSession(workspace(params), context);
+        return visibleHistory(log);
+    }
+
+    private List<ChatMessage> visibleHistory(io.agentscope.core.session.SessionLog log) {
         var history = new ArrayList<ChatMessage>();
         int turn = 0;
         for (Msg message : SessionViews.transcript(log).messages()) {
@@ -165,30 +174,52 @@ public final class Backend {
     }
 
     private List<SearchMatch> searchSessions(JsonNode params) throws Exception {
-        String query = required(params, "query").toLowerCase(Locale.ROOT);
+        String query = required(params, "query");
+        String lower = query.toLowerCase(Locale.ROOT);
         var results = new ArrayList<SearchMatch>();
+        var allowed = new LinkedHashSet<String>();
         for (JsonNode session : params.path("sessions")) {
             String projectId = identifier(session, "projectId");
             String sessionId = identifier(session, "sessionId");
-            if (session.path("title").asText().toLowerCase(Locale.ROOT).contains(query)
-                    || session.path("projectName").asText().toLowerCase(Locale.ROOT).contains(query)) {
-                results.add(new SearchMatch(projectId, sessionId, null, ""));
-            } else {
-                for (ChatMessage message : history(session)) {
-                    String text = message.text();
-                    int index = text.toLowerCase(Locale.ROOT).indexOf(query);
-                    if (index < 0) continue;
-                    int start = Math.min(text.length(), Math.max(index - 28, 0));
-                    int end = Math.min(text.length(), start + 125);
-                    String excerpt = (start > 0 ? "…" : "") + text.substring(start, end).strip()
-                            + (end < text.length() ? "…" : "");
-                    results.add(new SearchMatch(projectId, sessionId, message.id(), excerpt));
-                    break;
-                }
+            allowed.add(sessionId);
+            var log = ConversationRuntime.openSession(workspace(session), context(session));
+            if (sessionSearch.needsSync(sessionId, log.head().seq())) {
+                var messages = visibleHistory(log).stream()
+                        .map(message -> new SessionSearchIndex.Message(
+                                projectId,
+                                sessionId,
+                                message.id(),
+                                message.turn(),
+                                message.role(),
+                                message.text()))
+                        .toList();
+                sessionSearch.sync(sessionId, log.head().seq(), messages);
             }
+            if (session.path("title").asText().toLowerCase(Locale.ROOT).contains(lower)
+                    || session.path("projectName").asText().toLowerCase(Locale.ROOT).contains(lower)) {
+                results.add(new SearchMatch(projectId, sessionId, null, ""));
+            }
+        }
+        var seen = new HashSet<String>();
+        for (var match : sessionSearch.search(query, allowed)) {
+            String key = match.sessionId() + "\n" + match.messageId();
+            if (!seen.add(key)) continue;
+            results.add(new SearchMatch(
+                    match.projectId(),
+                    match.sessionId(),
+                    match.messageId(),
+                    excerpt(match.text(), query)));
             if (results.size() == 100) break;
         }
         return results;
+    }
+
+    private static String excerpt(String text, String query) {
+        int index = text.toLowerCase(Locale.ROOT).indexOf(query.toLowerCase(Locale.ROOT));
+        int start = Math.min(text.length(), Math.max(index < 0 ? 0 : index - 28, 0));
+        int end = Math.min(text.length(), start + 125);
+        return (start > 0 ? "…" : "") + text.substring(start, end).strip()
+                + (end < text.length() ? "…" : "");
     }
 
     private List<Bookmark> listBookmarks() throws Exception {

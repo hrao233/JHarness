@@ -53,6 +53,74 @@
         },
         "required": ["query"]
       }
+    },
+    {
+      "name": "browser_click",
+      "description": "Click the first element matching a CSS selector on a browser tab.",
+      "readOnly": false,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "selector": { "type": "string" },
+          "urlContains": { "type": "string" }
+        },
+        "required": ["selector"]
+      }
+    },
+    {
+      "name": "browser_fill",
+      "description": "Fill an input, textarea or contenteditable element and dispatch input/change events.",
+      "readOnly": false,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "selector": { "type": "string" },
+          "value": { "type": "string" },
+          "urlContains": { "type": "string" }
+        },
+        "required": ["selector", "value"]
+      }
+    },
+    {
+      "name": "browser_wait_for",
+      "description": "Wait until a CSS selector appears, up to 30 seconds.",
+      "readOnly": true,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "selector": { "type": "string" },
+          "urlContains": { "type": "string" },
+          "timeoutMs": { "type": "integer" }
+        },
+        "required": ["selector"]
+      }
+    },
+    {
+      "name": "browser_reload",
+      "description": "Reload a browser tab, bypassing cache.",
+      "readOnly": false,
+      "inputSchema": {
+        "type": "object",
+        "properties": { "urlContains": { "type": "string" } }
+      }
+    },
+    {
+      "name": "browser_back",
+      "description": "Navigate a browser tab back in history.",
+      "readOnly": false,
+      "inputSchema": {
+        "type": "object",
+        "properties": { "urlContains": { "type": "string" } }
+      }
+    },
+    {
+      "name": "browser_forward",
+      "description": "Navigate a browser tab forward in history.",
+      "readOnly": false,
+      "inputSchema": {
+        "type": "object",
+        "properties": { "urlContains": { "type": "string" } }
+      }
     }
   ]
 }

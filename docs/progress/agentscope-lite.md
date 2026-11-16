@@ -156,6 +156,10 @@ payloads and existing downstream imports stay compatible.
 - Added an optional Edge/Chrome DevTools Protocol plugin with status, tab listing,
   HTTP(S) navigation, visible-text extraction and Bing search. An E2E fixture
   validates its HTTP DevTools protocol against a local mock endpoint.
+- Extended the browser plugin with CDP-backed selector click, form fill,
+  selector wait, cache-bypassing reload and history back/forward. The E2E mock
+  now handles the WebSocket handshake and masked command frames directly, so the
+  plugin is tested without adding a WebSocket dependency.
 - Added conflict-aware file checkpoints around normal and durable project writes.
   Each checkpoint stores bounded before/after snapshots and tool status. The
   desktop can inspect diffs and restore one file only when its current hash

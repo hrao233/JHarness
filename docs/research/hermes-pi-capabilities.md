@@ -81,7 +81,7 @@ JHarness 还记录了每个会话已提交的 head sequence。head 未变化时�
 
 Pi 的扩展系统通过清单、安装状态和版本化宿主接口隔离扩展生命周期，Hermes 则把工具、钩子、上下文和渠道放在不同注册点。JHarness 的第一个桌面插件切片采用更窄的进程工具协议：清单只声明工具，安装不执行代码，启用后才懒启动独立进程。这样先验证安装、能力发现、调用、超时、诊断和卸载，再扩展模型、上下文、存储和渠道槽位。
 
-浏览器能力采用与 Hermes 可选工具集类似的思路：独立插件接入浏览器，而不是把浏览器状态写进核心 Agent。JHarness 选择 Chrome DevTools Protocol 作为 Edge 与 Chrome 的共同控制面，先实现页面导航、标签页、正文提取和网页检索，并把页面内容继续视为不可信证据。
+浏览器能力采用与 Hermes 可选工具集类似的思路：独立插件接入浏览器，而不是把浏览器状态写进核心 Agent。JHarness 选择 Chrome DevTools Protocol 作为 Edge 与 Chrome 的共同控制面，已实现页面导航、标签页、正文提取、网页检索，以及通过 `Runtime.evaluate` 完成的 CSS 选择器点击、表单填写和等待，`Page.reload` 刷新与 history 前进后退。页面内容继续视为不可信证据；交互操作仍受外部插件进程权限约束。
 
 Hermes 的检查点管理会在文件操作前后保存证据，并在恢复时处理用户后续手改；它用 shadow Git 对象库去重快照，并通过 agent-write ledger 区分 Agent 写入与用户后续修改。JHarness 的文件级模型保存有界 before/after 快照，以 SHA-256 判断当前内容是否仍等于任务结束状态。整组恢复沿用 Hermes 的“先全量预检、后执行”和“回退前留审计”原则：每个路径以最早 before 和最新 after 构成恢复契约，任一冲突阻止全部写入，部分失败则逆序撤销。
 

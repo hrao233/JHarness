@@ -68,17 +68,21 @@ async function openTab(url) {
   return { id: target.id, title: target.title, url: target.url || parsed.href };
 }
 
-async function evaluate(target, expression) {
+async function cdp(target, method, params = {}, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
+    if (!target?.webSocketDebuggerUrl) {
+      reject(new Error('No DevTools WebSocket target'));
+      return;
+    }
     const socket = new WebSocket(target.webSocketDebuggerUrl);
     const timer = setTimeout(() => {
       socket.close();
-      reject(new Error('DevTools evaluation timed out'));
-    }, 15000);
+      reject(new Error('DevTools command timed out'));
+    }, timeoutMs);
     socket.addEventListener('open', () => socket.send(JSON.stringify({
       id: 1,
-      method: 'Runtime.evaluate',
-      params: { expression, returnByValue: true, awaitPromise: true }
+      method,
+      params
     })));
     socket.addEventListener('message', event => {
       const message = JSON.parse(event.data);
@@ -86,14 +90,27 @@ async function evaluate(target, expression) {
       clearTimeout(timer);
       socket.close();
       if (message.error) reject(new Error(message.error.message));
-      else if (message.result?.exceptionDetails) reject(new Error(message.result.exceptionDetails.text));
-      else resolve(message.result?.result?.value);
+      else resolve(message.result);
     });
     socket.addEventListener('error', () => {
       clearTimeout(timer);
       reject(new Error('DevTools WebSocket failed'));
     });
   });
+}
+
+async function evaluate(target, expression, timeoutMs = 15000) {
+  const result = await cdp(target, 'Runtime.evaluate', {
+    expression,
+    returnByValue: true,
+    awaitPromise: true
+  }, timeoutMs);
+  if (result?.exceptionDetails) {
+    const detail = result.exceptionDetails.exception?.description
+      || result.exceptionDetails.text || 'Evaluation failed';
+    throw new Error(String(detail).slice(0, 1000));
+  }
+  return result?.result?.value;
 }
 
 async function pageTarget(urlContains = '') {
@@ -139,12 +156,92 @@ async function search({ query, maxResults = 8 } = {}) {
   return { query: String(query).trim(), url, results: results || [] };
 }
 
+function selector(value) {
+  const result = String(value || '').trim();
+  if (!result || result.length > 1000) throw new Error('selector is required');
+  return result;
+}
+
+async function click({ urlContains = '', selector: targetSelector } = {}) {
+  const target = await pageTarget(urlContains);
+  if (!target) throw new Error('No browser page target');
+  const css = selector(targetSelector);
+  const value = await evaluate(target, `(() => {
+    const element = document.querySelector(${JSON.stringify(css)});
+    if (!element) return { found: false };
+    element.scrollIntoView({ block: "center", inline: "center" });
+    element.click();
+    return {
+      found: true,
+      tag: element.tagName.toLowerCase(),
+      text: String(element.innerText || element.value || "").slice(0, 500)
+    };
+  })()`);
+  if (!value?.found) throw new Error('Element not found: ' + css);
+  return { ...value, selector: css, url: target.url };
+}
+
+async function fill({ urlContains = '', selector: targetSelector, value = '' } = {}) {
+  const target = await pageTarget(urlContains);
+  if (!target) throw new Error('No browser page target');
+  const css = selector(targetSelector);
+  const text = String(value);
+  if (text.length > 10000) throw new Error('value is too large');
+  const result = await evaluate(target, `(() => {
+    const element = document.querySelector(${JSON.stringify(css)});
+    if (!element) return { found: false };
+    const value = ${JSON.stringify(text)};
+    if (element.isContentEditable) element.textContent = value;
+    else element.value = value;
+    element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+    return { found: true, tag: element.tagName.toLowerCase(), length: value.length };
+  })()`);
+  if (!result?.found) throw new Error('Element not found: ' + css);
+  return { ...result, selector: css, url: target.url };
+}
+
+async function waitFor({ urlContains = '', selector: targetSelector, timeoutMs = 5000 } = {}) {
+  const target = await pageTarget(urlContains);
+  if (!target) throw new Error('No browser page target');
+  const css = selector(targetSelector);
+  const budget = Math.max(100, Math.min(Number(timeoutMs) || 5000, 30000));
+  const deadline = Date.now() + budget;
+  while (Date.now() < deadline) {
+    const found = await evaluate(target, `Boolean(document.querySelector(${JSON.stringify(css)}))`);
+    if (found) return { found: true, selector: css, url: target.url };
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }
+  return { found: false, selector: css, url: target.url, timedOut: true };
+}
+
+async function reload({ urlContains = '' } = {}) {
+  const target = await pageTarget(urlContains);
+  if (!target) throw new Error('No browser page target');
+  await cdp(target, 'Page.reload', { ignoreCache: true });
+  return { reloaded: true, url: target.url };
+}
+
+async function history(direction, { urlContains = '' } = {}) {
+  if (!['back', 'forward'].includes(direction)) throw new Error('Invalid history direction');
+  const target = await pageTarget(urlContains);
+  if (!target) throw new Error('No browser page target');
+  await evaluate(target, `history.${direction}()`);
+  return { direction, url: target.url };
+}
+
 async function invoke(tool, input = {}) {
   if (tool === 'browser_status') return status();
   if (tool === 'browser_tabs') return { tabs: await tabs() };
   if (tool === 'browser_open') return openTab(input.url);
   if (tool === 'browser_extract') return extract(input);
   if (tool === 'browser_search') return search(input);
+  if (tool === 'browser_click') return click(input);
+  if (tool === 'browser_fill') return fill(input);
+  if (tool === 'browser_wait_for') return waitFor(input);
+  if (tool === 'browser_reload') return reload(input);
+  if (tool === 'browser_back') return history('back', input);
+  if (tool === 'browser_forward') return history('forward', input);
   throw new Error(`Unknown tool: ${tool}`);
 }
 

@@ -65,4 +65,4 @@ npm run package:win
 
 `npm test` 使用本地模拟模型服务验证 Java 管道、模型请求、工具权限、流式回复和跨进程会话恢复。设置页的「测试连接」可验证实际账号。打包目录已包含 Java 运行时，使用者可以直接启动。Git 追踪源码和锁文件。
 
-架构与迁移决策见 `docs/architecture/`、`docs/decisions/` 和 `docs/research/`。
+架构、迁移决策和当前进度见 `docs/architecture/`、`docs/decisions/`、`docs/research/` 和 `docs/progress/`。

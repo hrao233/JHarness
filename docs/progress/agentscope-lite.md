@@ -153,6 +153,9 @@ payloads and existing downstream imports stay compatible.
 - Added a process-plugin integration test and an E2E conversation that installs a
   Node.js echo plugin, exposes it to the model, invokes it and verifies the tool
   result reaches the next model request.
+- Added an optional Edge/Chrome DevTools Protocol plugin with status, tab listing,
+  HTTP(S) navigation, visible-text extraction and Bing search. An E2E fixture
+  validates its HTTP DevTools protocol against a local mock endpoint.
 
 ## Lightweight Runtime
 
@@ -186,7 +189,7 @@ npm run package:win
 Last verified on 2026-11-16:
 
 - `mvn -B -T1C clean verify`: 5082 tests, 0 failures, 0 errors;
-- `npm test`: 4 tests, 0 failures;
+- `npm test`: 5 tests, 0 failures;
 - `npm run build:ui`: success;
 - `npm run package:win`: success, including `PACKAGED_GUI_SMOKE_OK`;
 - shaded backend JAR: 22,523,560 bytes (21.5 MiB).

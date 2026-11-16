@@ -78,3 +78,5 @@ Hermes 的会话召回不是对 JSON 文件做全量字符串扫描，而是把�
 JHarness 还记录了每个会话已提交的 head sequence。head 未变化时跳过历史投影重建；索引损坏或删除后，下一次扫描可以从追加式会话日志重新生成。当前实现参考 Hermes `hermes_state.py`、`hermes_state_fts.py` 和 `hermes_state_search.py` 的职责划分，而不是复制其 Python/SQLite 代码。
 
 Pi 的扩展系统通过清单、安装状态和版本化宿主接口隔离扩展生命周期，Hermes 则把工具、钩子、上下文和渠道放在不同注册点。JHarness 的第一个桌面插件切片采用更窄的进程工具协议：清单只声明工具，安装不执行代码，启用后才懒启动独立进程。这样先验证安装、能力发现、调用、超时、诊断和卸载，再扩展模型、上下文、存储和渠道槽位。
+
+浏览器能力采用与 Hermes 可选工具集类似的思路：独立插件接入浏览器，而不是把浏览器状态写进核心 Agent。JHarness 选择 Chrome DevTools Protocol 作为 Edge 与 Chrome 的共同控制面，先实现页面导航、标签页、正文提取和网页检索，并把页面内容继续视为不可信证据。

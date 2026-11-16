@@ -19,7 +19,8 @@ const resources = path.join(output, 'resources');
 const app = path.join(resources, 'app');
 mkdirSync(path.join(app, 'desktop'), { recursive: true });
 mkdirSync(path.join(app, 'cli'), { recursive: true });
-for (const file of ['main.cjs', 'preload.cjs', 'context-parts.cjs', 'worktree-manager.cjs']) {
+for (const file of ['main.cjs', 'preload.cjs', 'context-parts.cjs',
+  'worktree-manager.cjs', 'data-maintenance.cjs']) {
   copyFileSync(path.join(desktop, file), path.join(app, 'desktop', file));
 }
 copyFileSync(path.join(root, 'apps', 'cli', 'jharness-cli.cjs'),

@@ -26,6 +26,10 @@ test('backend jar and packaged directory stay within size budgets', async () => 
       existsSync(path.join(release, 'jharness-cli.cmd')),
       true,
       'packaged app must include the CLI launcher');
+    assert.equal(
+      existsSync(path.join(release, 'resources', 'app', 'desktop', 'data-maintenance.cjs')),
+      true,
+      'packaged app must include the data-maintenance module');
     const releaseBytes = await directoryBytes(release);
     assert.ok(releaseBytes <= 450 * 1024 * 1024, `packaged directory is ${releaseBytes} bytes`);
   }

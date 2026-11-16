@@ -354,6 +354,20 @@ projects absent from the desktop lives in `cli-projects.json`. When a session is
 desktop project, the CLI atomically rewrites the settings file; the desktop should not be persisting
 unrelated settings at the exact same moment.
 
+### Backup and restore
+
+Data backup is a directory format rooted by `manifest.json` with format/version, top-level entries,
+file count, byte count and a per-file size/SHA-256 list. The backup includes desktop settings and all
+workspace/session data, while excluding rebuildable session-search SQLite files, temporary files,
+CLI-only project mappings and isolated worktree checkouts. The source and destination cannot overlap.
+Creation is bounded to 50,000 files and 2 GiB.
+
+Inspection validates manifest shape, entry names, path containment, file sizes and every SHA-256
+before the UI enables restore. Restore first creates a complete safety backup of the current data,
+then replaces each manifest entry and deletes the derived search index so it rebuilds. The renderer
+shows a confirmation and the Electron main process requires no active runs before restore. A short
+relaunch follows so in-memory settings cannot overwrite the restored file.
+
 ### Session search projection
 
 Session recall uses a rebuildable SQLite FTS5 database under the local data

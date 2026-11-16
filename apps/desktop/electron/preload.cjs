@@ -20,6 +20,11 @@ contextBridge.exposeInMainWorld('jharness', {
   reviewWorktree: project => ipcRenderer.invoke('jh:worktree-review', project),
   integrateWorktree: project => ipcRenderer.invoke('jh:worktree-integrate', project),
   removeWorktree: (project, force = false) => ipcRenderer.invoke('jh:worktree-remove', project, force),
+  maintenanceStatus: () => ipcRenderer.invoke('jh:maintenance-status'),
+  createBackup: () => ipcRenderer.invoke('jh:maintenance-create-backup'),
+  inspectBackup: () => ipcRenderer.invoke('jh:maintenance-inspect-backup'),
+  restoreBackup: directory => ipcRenderer.invoke('jh:maintenance-restore', directory),
+  openDataDirectory: () => ipcRenderer.invoke('jh:maintenance-open-data'),
   report: (project, session) => ipcRenderer.invoke('jh:report', project, session),
   verifyCriterion: (project, session, runId, criterionId, commandId) =>
     ipcRenderer.invoke('jh:verify-criterion', project, session, runId, criterionId, commandId),

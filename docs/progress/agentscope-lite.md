@@ -209,6 +209,11 @@ payloads and existing downstream imports stay compatible.
 - Added packaged CLI support through `jharness-cli.cmd` and Electron's
   `ELECTRON_RUN_AS_NODE` mode. The CLI test validates the same desktop session
   and workspace path, and packaged smoke verifies the launcher.
+- Added versioned desktop-data backup, inspection and restore. Manifests include
+  every file's size and SHA-256; restore refuses tampered backups, creates a
+  safety snapshot of current data first and relaunches the application.
+- Added a data-maintenance desktop panel with project/session/file/byte metrics,
+  native backup selection, integrity preview and packaged GUI smoke coverage.
 - Added `acceptance_write` and host-authorized shell-exit verification. Criteria
   begin as `PENDING`; only a user-selected command receipt from the same run can
   produce `PASSED`, `FAILED` or `UNKNOWN`. The report retains command identity,
@@ -249,7 +254,7 @@ npm run package:win
 Last verified on 2026-11-16:
 
 - `mvn -B -T1C clean verify`: 5088 tests, 0 failures, 0 errors, 56 skipped;
-- `npm test`: 7 tests, 0 failures;
+- `npm test`: 8 tests, 0 failures;
 - `npm run build:ui`: success;
 - `npm run package:win`: success, including `PACKAGED_GUI_SMOKE_OK`;
 - shaded backend JAR: 22,579,167 bytes (21.5 MiB).
@@ -284,6 +289,8 @@ checkpoint/report correlation, and command approval across a durable resume.
 - M6 now configures the JDK 17 `jlink` compression flag and runs Node integration
   tests after building the bundled runtime. Clean Windows runner and release
   verification remain pending.
+- M9 now has local data status, backup, integrity inspection and guarded restore.
+  Named configuration profiles, selective restore and diagnostics export remain.
 
 The [maturity roadmap](../roadmap/jharness.md) defines the product acceptance
 scenarios and the next delivery increments.

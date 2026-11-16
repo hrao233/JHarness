@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { BookOpen, Brain, CircleCheck, CircleDashed, CircleX, ClipboardList, Download, ExternalLink,
-  FileBox, GitBranch, GitPullRequest, House, Images, ListChecks, Plus, Power, Puzzle, RefreshCw,
-  RotateCcw, ScanText, Search, Settings, SquareTerminal, Trash2, X }
+  Database, FileBox, GitBranch, GitPullRequest, House, Images, ListChecks, Plus, Power, Puzzle,
+  RefreshCw, RotateCcw, ScanText, Search, Settings, SquareTerminal, Trash2, X }
   from 'lucide-react';
 
 export function Navigation({ showSidebar, home, attachImage, openPanel, openSettings, busy, project, session }) {
@@ -15,6 +15,7 @@ export function Navigation({ showSidebar, home, attachImage, openPanel, openSett
     { label: '任务中心', Icon: ListChecks, action: () => openPanel('tasks') },
     { label: '任务报告', Icon: ClipboardList, action: () => openPanel('reports'), disabled: !session },
     { label: '隔离工作树', Icon: GitBranch, action: () => openPanel('worktrees'), disabled: !project },
+    { label: '数据与运维', Icon: Database, action: () => openPanel('maintenance') },
     { label: '上下文', Icon: ScanText, action: () => openPanel('context'), disabled: !session },
     { label: '检查点', Icon: RotateCcw, action: () => openPanel('checkpoints'), disabled: !project },
     { label: '代码审查', Icon: GitPullRequest, action: () => openPanel('review'), disabled: !project }
@@ -30,11 +31,18 @@ export function Navigation({ showSidebar, home, attachImage, openPanel, openSett
 const titles = {
   library: '资料库', plugins: 'Skills 与插件', search: '搜索会话', tasks: '任务中心',
   reports: '任务报告', worktrees: '隔离工作树', context: '上下文', checkpoints: '检查点',
-  review: '代码审查'
+  maintenance: '数据与运维', review: '代码审查'
 };
 const taskStatus = {
   queued: '排队中', running: '运行中', suspended: '等待审批',
   interrupted: '已中断', failed: '失败', completed: '已完成', cancelled: '已取消', rejected: '已拒绝'
+};
+const formatBytes = value => {
+  const bytes = Number(value) || 0;
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KiB';
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MiB';
+  return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GiB';
 };
 
 export function NavigationPanel({ panel, close, projects, project, bookmarks, openChat, removeBookmark,
@@ -66,6 +74,10 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
   const [worktreeIntegration, setWorktreeIntegration] = useState(null);
   const [criterionCommands, setCriterionCommands] = useState({});
   const [criterionBusy, setCriterionBusy] = useState('');
+  const [maintenanceStatus, setMaintenanceStatus] = useState(null);
+  const [backupPreview, setBackupPreview] = useState(null);
+  const [backupCreated, setBackupCreated] = useState(null);
+  const [maintenanceBusy, setMaintenanceBusy] = useState('');
   useEffect(() => { dialog.current.showModal(); }, []);
   useEffect(() => {
     if (panel !== 'plugins' && (panel !== 'review' || !project)) return;
@@ -168,6 +180,21 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
     });
     return () => { live = false; };
   }, [api, errorText, panel, project?.id, revision]);
+
+  useEffect(() => {
+    if (panel !== 'maintenance') return;
+    let live = true;
+    setMaintenanceStatus(null);
+    setBackupPreview(null);
+    setBackupCreated(null);
+    setError('');
+    api.maintenanceStatus().then(value => {
+      if (live) setMaintenanceStatus(value);
+    }).catch(failure => {
+      if (live) setError(errorText(failure));
+    });
+    return () => { live = false; };
+  }, [api, errorText, panel, revision]);
 
   const needle = query.trim().toLowerCase();
   useEffect(() => {
@@ -381,6 +408,47 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
       setError(errorText(failure));
     } finally {
       setWorktreeBusy('');
+    }
+  }
+
+  async function createBackup() {
+    setMaintenanceBusy('backup');
+    setError('');
+    setBackupCreated(null);
+    try {
+      setBackupCreated(await api.createBackup());
+    } catch (failure) {
+      setError(errorText(failure));
+    } finally {
+      setMaintenanceBusy('');
+    }
+  }
+
+  async function inspectBackup() {
+    setMaintenanceBusy('inspect');
+    setError('');
+    setBackupPreview(null);
+    try {
+      setBackupPreview(await api.inspectBackup());
+    } catch (failure) {
+      setError(errorText(failure));
+    } finally {
+      setMaintenanceBusy('');
+    }
+  }
+
+  async function restoreBackup() {
+    if (!backupPreview) return;
+    if (!confirm('恢复此备份会替换当前设置和项目 workspace。应用会先创建安全快照并自动重启。继续吗？')) return;
+    setMaintenanceBusy('restore');
+    setError('');
+    try {
+      setBackupCreated(await api.restoreBackup(backupPreview.path));
+      setBackupPreview(null);
+    } catch (failure) {
+      setError(errorText(failure));
+    } finally {
+      setMaintenanceBusy('');
     }
   }
 
@@ -752,6 +820,54 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
         {!projects.some(item => item.worktree)
           && <p className="muted">还没有隔离工作树。</p>}
       </section>
+    </>}
+    {panel === 'maintenance' && <>
+      <div className="review-head"><span>本地数据与恢复</span>
+        <button type="button" className="secondary" onClick={() => setRevision(value => value + 1)}>
+          <RefreshCw size={15}/>刷新
+        </button>
+      </div>
+      {!maintenanceStatus && !error && <p className="muted">正在读取数据状态…</p>}
+      {maintenanceStatus && <section className="maintenance-status">
+        <code>{maintenanceStatus.path}</code>
+        <div className="context-metrics">
+          <span><b>{maintenanceStatus.projects}</b>个项目</span>
+          <span><b>{maintenanceStatus.sessions}</b>个会话</span>
+          <span><b>{maintenanceStatus.files}</b>个文件</span>
+          <span><b>{formatBytes(maintenanceStatus.bytes)}</b>数据量</span>
+        </div>
+        <div className="maintenance-actions">
+          <button type="button" className="secondary" onClick={() => api.openDataDirectory()}>
+            <Database size={15}/>打开数据目录
+          </button>
+          <button type="button" className="secondary" disabled={!!maintenanceBusy}
+            onClick={createBackup}><Download size={15}/>创建备份</button>
+          <button type="button" className="secondary" disabled={!!maintenanceBusy}
+            onClick={inspectBackup}><RotateCcw size={15}/>检查备份</button>
+        </div>
+      </section>}
+      {backupCreated && <section className="maintenance-result" role="status">
+        <CircleCheck size={17}/>
+        <span><strong>{backupCreated.restored ? '恢复完成' : '备份已创建'}</strong>
+          <small>{backupCreated.path || '正在重启 JHarness…'}</small></span>
+      </section>}
+      {backupPreview && <section className="maintenance-preview">
+        <div className="report-section-head"><strong>备份预检</strong>
+          <small>{new Date(backupPreview.createdAt).toLocaleString()}</small></div>
+        <code>{backupPreview.path}</code>
+        <div className="context-metrics">
+          <span><b>{backupPreview.files}</b>个文件</span>
+          <span><b>{formatBytes(backupPreview.bytes)}</b>大小</span>
+          <span><b>{backupPreview.entries.length}</b>个数据项</span>
+        </div>
+        <p className="muted">已校验清单和全部文件哈希。恢复前会再创建一份当前数据快照。</p>
+        <div className="change-set-actions">
+          <button type="button" className="secondary"
+            onClick={() => setBackupPreview(null)}>取消</button>
+          <button type="button" className="primary" disabled={!!maintenanceBusy}
+            onClick={restoreBackup}>恢复并重启</button>
+        </div>
+      </section>}
     </>}
     {panel === 'checkpoints' && <>
       <div className="review-head"><span>{project?.name || '项目'} 的文件检查点</span>

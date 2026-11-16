@@ -7,6 +7,7 @@ const { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } = requi
 const path = require('node:path');
 const { importAttachment, projectParts, label } = require('./context-parts.cjs');
 const { createManager } = require('./worktree-manager.cjs');
+const maintenance = require('./data-maintenance.cjs');
 const git = promisify(execFile);
 
 let win;
@@ -310,6 +311,33 @@ function register() {
     }
     return true;
   });
+  ipcMain.handle('jh:maintenance-status', () => maintenance.status(app.getPath('userData')));
+  ipcMain.handle('jh:maintenance-create-backup', async () => {
+    const selected = await dialog.showOpenDialog(win, {
+      title: '选择备份保存位置',
+      properties: ['openDirectory', 'createDirectory']
+    });
+    if (selected.canceled || !selected.filePaths[0]) return null;
+    return maintenance.createBackup(app.getPath('userData'), selected.filePaths[0]);
+  });
+  ipcMain.handle('jh:maintenance-inspect-backup', async () => {
+    const selected = await dialog.showOpenDialog(win, {
+      title: '选择 JHarness 备份目录',
+      properties: ['openDirectory']
+    });
+    if (selected.canceled || !selected.filePaths[0]) return null;
+    return maintenance.inspectBackup(selected.filePaths[0]);
+  });
+  ipcMain.handle('jh:maintenance-restore', async (_, backupDirectory) => {
+    if (activeRuns.size) throw new Error('请等待所有任务结束后再恢复数据。');
+    const result = await maintenance.restoreBackup(app.getPath('userData'), backupDirectory);
+    setTimeout(() => {
+      app.relaunch();
+      app.exit(0);
+    }, 900);
+    return result;
+  });
+  ipcMain.handle('jh:maintenance-open-data', () => shell.openPath(app.getPath('userData')));
   ipcMain.handle('jh:project', async () => {
     const result = await dialog.showOpenDialog(win, { title: '打开项目', properties: ['openDirectory'] });
     if (result.canceled) return null;
@@ -641,6 +669,17 @@ async function smokeInterruptedApproval() {
     'Worktree panel did not render');
   result.worktrees = worktreeDialog.innerText;
   worktreeDialog.querySelector('.dialog-head button').click();
+  const maintenanceButton = [...document.querySelectorAll('button')]
+    .find(button => button.title === '数据与运维');
+  if (!maintenanceButton) throw new Error('Maintenance entry missing');
+  maintenanceButton.click();
+  const maintenanceDialog = await waitFor(
+    () => document.querySelector('dialog.nav-maintenance'), 'Maintenance dialog did not open');
+  await waitFor(
+    () => maintenanceDialog.innerText.includes('本地数据与恢复'),
+    'Maintenance panel did not render');
+  result.maintenance = maintenanceDialog.innerText;
+  maintenanceDialog.querySelector('.dialog-head button').click();
   const checkpointButton = [...document.querySelectorAll('button')]
     .find(button => button.title === '检查点');
   if (!checkpointButton) throw new Error('Checkpoint entry missing');

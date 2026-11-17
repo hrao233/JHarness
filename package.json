@@ -9,6 +9,7 @@
     "cli": "node apps/cli/jharness-cli.cjs",
     "start": "electron .",
     "package:win": "npm run build:ui && node packaging/windows/package.cjs && node tests/packaged-app/smoke.cjs",
+    "verify:release": "node packaging/windows/verify-release.cjs",
     "test": "node --test apps/desktop/test/*.test.cjs tests/e2e/*.test.cjs tests/budgets/*.test.cjs",
     "check:budgets": "node --test tests/budgets/*.test.cjs"
   },

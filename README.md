@@ -41,6 +41,7 @@ CLI 会读取桌面 `settings.json`，复用已有项目 ID 和最新/指定会�
 左侧「数据与运维」显示本地项目、会话、文件和数据量，可打开数据目录、创建完整备份、预检备份并恢复。备份包含桌面设置和全部项目 workspace，排除隔离工作树与可重建搜索索引；每个文件带 SHA-256，恢复前会校验并自动创建当前数据的安全快照。
 
 左侧「自动任务」可创建固定间隔或执行一次的 durable 任务，每个定义拥有独立项目会话和运行记录。支持暂停、恢复、立即运行、取消和失败重跑；同一自动任务已有活动运行时不会重复触发。调度只在桌面应用运行期间生效，等待审批的任务可在任务中心继续。
+
 - 闪电按钮独立控制生成速度。兼容接口可在模型设置里指定服务商支持的 `fast` 或 `priority`，开启后实际发送 `service_tier`，可能产生额外用量费用。DeepSeek 官方接口使用标准档。最终速度取决于服务商和账号。
 - 右侧模型按钮打开推理强度滑块。DeepSeek 官方支持关闭、低、高和极高，后端分别发送 `thinking` 和 `reasoning_effort`。没有已选档位时优先选「高」，其次选配置中的第一个档位。兼容接口可勾选模型支持的强度，全部取消时不发送推理参数。连接测试可以带上具体推理强度和快速档位。
 - 左侧分别显示最近会话和项目。项目行的「＋」会在该项目新建会话，项目名前的箭头展开或收起会话。
@@ -98,5 +99,7 @@ npm run package:win
 `mvn clean verify` 会运行 Core、Harness、OpenAI 模型适配器和后端模块的完整测试。`npm test` 使用本地模拟模型服务验证 Java 管道、模型请求、工具权限、流式回复和跨进程会话恢复。设置页的「测试连接」可验证实际账号。打包目录已包含 Java 运行时，使用者可以直接启动。Git 追踪源码和锁文件。
 
 `npm run package:win` 还会隐藏启动打包后的 Electron 应用，等待 React 渲染完成后检查页面文本，避免生成只因路径错误而白屏的 EXE。实际可用产物位于 `release/win-unpacked/JHarness.exe`。
+
+Windows 便携包包含 [版本说明](docs/releases/0.1.0.md)和逐文件 SHA-256 清单。清单记录构建时的 Git 提交和工作区状态；校验会检查包内文件是否有缺失、多出或变化。用 `npm run verify:release` 校验本地包，下载 CI 构建并解压后可用 `npm run verify:release -- <解压目录>` 校验。
 
 [产品成熟度路线图](docs/roadmap/jharness.md)列出了当前状态、后续阶段和每阶段的验收场景。[迁移进度](docs/progress/agentscope-lite.md)记录 AgentScope Lite 的迁移结果与验证。[架构](docs/architecture/agentscope-lite.md)、[设计决策](docs/decisions/)和[调研](docs/research/harness-landscape.md)提供技术背景。

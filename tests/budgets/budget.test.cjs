@@ -34,6 +34,14 @@ test('backend jar and packaged directory stay within size budgets', async () => 
       existsSync(path.join(release, 'resources', 'app', 'desktop', 'automation-store.cjs')),
       true,
       'packaged app must include the automation store module');
+    assert.equal(
+      existsSync(path.join(release, 'release-manifest.json')),
+      true,
+      'packaged app must include its release manifest');
+    assert.equal(
+      existsSync(path.join(release, 'RELEASE_NOTES.md')),
+      true,
+      'packaged app must include release notes');
     const releaseBytes = await directoryBytes(release);
     assert.ok(releaseBytes <= 450 * 1024 * 1024, `packaged directory is ${releaseBytes} bytes`);
   }

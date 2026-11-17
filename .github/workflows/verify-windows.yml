@@ -33,3 +33,11 @@ jobs:
         run: npm run package:win
       - name: Recheck package budgets
         run: npm run check:budgets
+      - name: Retain verified Windows bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: JHarness-windows-x64-${{ github.sha }}
+          path: release/win-unpacked/
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 14

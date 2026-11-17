@@ -7,6 +7,7 @@ const { mkdir, mkdtemp, readFile, rm, stat, writeFile } = require('node:fs/promi
 const { tmpdir } = require('node:os');
 const path = require('node:path');
 const { createInterface } = require('node:readline');
+const { verifyManifest } = require('../../apps/desktop/electron/release-manifest.cjs');
 
 const executable = path.resolve(__dirname, '..', '..', 'release', 'win-unpacked', 'JHarness.exe');
 
@@ -18,6 +19,8 @@ main().catch(error => {
 async function main() {
   const data = await mkdtemp(path.join(tmpdir(), 'jharness-gui-smoke-'));
   try {
+    const verified = await verifyManifest(path.join(__dirname, '..', '..', 'release', 'win-unpacked'));
+    assert.equal(verified.version, require('../../package.json').version);
     const cliHelp = await command(path.join(__dirname, '..', '..', 'release', 'win-unpacked',
       'jharness-cli.cmd'), ['--help']);
     assert.match(cliHelp, /JHarness CLI/);

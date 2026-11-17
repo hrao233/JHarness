@@ -297,8 +297,10 @@ checkpoint/report correlation, and command approval across a durable resume.
   verification, plus user-reviewed worktree integration. Broader semantic
   verifiers and automated commit authoring remain.
 - M6 now configures the JDK 17 `jlink` compression flag and runs Node integration
-  tests after building the bundled runtime. Clean Windows runner and release
-  verification remain pending.
+  tests after building the bundled runtime. Packaging generates version notes and
+  a SHA-256 inventory with source commit and workspace state; the smoke test
+  checks all bundled files and CI is configured to retain the verified bundle.
+  A clean Windows runner and upgrade from a prior distribution remain unverified.
 - M9 now has local data status, backup, integrity inspection and guarded restore.
   Named configuration profiles, selective restore and diagnostics export remain.
 

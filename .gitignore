@@ -1,7 +1,7 @@
 node_modules/
-dist/
-release/
-runtime/
+/dist/
+/release/
+/runtime/
 target/
 apps/backend/target/
 **/.flattened-pom.xml

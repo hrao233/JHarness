@@ -1,5 +1,6 @@
 package local.jharness.search;
 
+import io.agentscope.core.util.JsonUtils;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -11,6 +12,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 
 /**
@@ -18,7 +20,8 @@ import java.util.Set;
  *
  * <p>Latin words are indexed as lower-case tokens. CJK runs are indexed as adjacent bigrams,
  * which keeps phrase-like recall useful without requiring a language-specific SQLite extension.
- * The append-only session journal remains the source of truth.
+ * Results containing the literal phrase precede token-only matches, with BM25 ordering within
+ * each group. The append-only session journal remains the source of truth.
  */
 public final class SessionSearchIndex {
     public record Message(
@@ -119,25 +122,29 @@ public final class SessionSearchIndex {
         if (allowedSessions.isEmpty()) return List.of();
         String expression = queryExpression(query);
         if (expression.isBlank()) return List.of();
+        String phrase = query.strip().toLowerCase(Locale.ROOT);
+        String scope = JsonUtils.getJsonCodec().toJson(allowedSessions);
         synchronized (lock) {
             try (var connection = connect()) {
                 initialize(connection);
                 try (var statement = connection.prepareStatement("""
-                        SELECT project_id, session_id, message_id, turn, role, text, bm25(message_search)
+                        SELECT project_id, session_id, message_id, turn, role, text,
+                               bm25(message_search) AS score
                         FROM message_search
                         WHERE message_search MATCH ?
-                        ORDER BY bm25(message_search), session_id, turn
-                        LIMIT 500
+                          AND session_id IN (SELECT value FROM json_each(?))
+                        ORDER BY (instr(lower(text), ?) > 0) DESC, score, session_id, turn, message_id
+                        LIMIT 100
                         """)) {
                     statement.setString(1, expression);
+                    statement.setString(2, scope);
+                    statement.setString(3, phrase);
                     var matches = new ArrayList<Match>();
                     try (var result = statement.executeQuery()) {
-                        while (result.next() && matches.size() < 100) {
-                            String sessionId = result.getString(2);
-                            if (!allowedSessions.contains(sessionId)) continue;
+                        while (result.next()) {
                             matches.add(new Match(
                                     result.getString(1),
-                                    sessionId,
+                                    result.getString(2),
                                     result.getString(3),
                                     result.getInt(4),
                                     result.getString(5),

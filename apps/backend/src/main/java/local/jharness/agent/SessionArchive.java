@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
@@ -25,6 +26,8 @@ public final class SessionArchive {
     private static final int MAX_PREVIEW = 240;
     private static final int MAX_MESSAGES = 32;
     private static final int MAX_ITEMS = 48;
+    private static final Set<String> TRANSCRIPT_EVENTS = Set.of(
+            "message/user", "message/assistant", "tool/result", "turn/output");
 
     public record ContextItem(String kind, String source, String revision) {}
 
@@ -134,12 +137,13 @@ public final class SessionArchive {
             String messageId) {
         if (target.head().seq() != 0)
             throw new IllegalArgumentException("目标会话已经包含数据，不能作为分叉目标。");
-        long cutoff = messageId == null || messageId.isBlank()
+        boolean atHead = messageId == null || messageId.isBlank();
+        long cutoff = atHead
                 ? source.head().seq()
                 : messageSequence(source, messageId);
         if (cutoff < 1) throw new IllegalArgumentException("此消息不可用于分叉。");
-        var messages = messagesThrough(source, cutoff);
-        var state = AgentState.builder().context(messages).build();
+        var messages = messagesThrough(source, cutoff, atHead ? null : messageId);
+        var state = AgentState.builder().sessionId(branchSessionId).context(messages).build();
         var copied = new ArrayList<SessionEvent>();
         copied.add(new SessionEvent(
                 1,
@@ -255,21 +259,16 @@ public final class SessionArchive {
                 false);
     }
 
-    private static List<Msg> messagesThrough(SessionLog log, long cutoff) {
+    private static List<Msg> messagesThrough(SessionLog log, long cutoff, String messageId) {
         var messages = new LinkedHashMap<String, Msg>();
         for (var event : log.scan(0, cutoff)) {
             if (event.type().equals("migration/baseline")) {
-                Object state = event.data().get("stateJson");
-                if (state instanceof String value) {
-                    for (var message : AgentState.fromJsonString(value).getContext())
-                        messages.putIfAbsent(message.getId(), message);
+                for (var message : baselineMessages(event)) {
+                    messages.putIfAbsent(message.getId(), message);
+                    if (event.seq() == cutoff && messageId != null
+                            && messageId.equals(message.getId())) break;
                 }
-            } else if (List.of(
-                                    "message/user",
-                                    "message/assistant",
-                                    "tool/result",
-                                    "turn/output")
-                            .contains(event.type())) {
+            } else if (TRANSCRIPT_EVENTS.contains(event.type())) {
                 Object value = event.data().get("message");
                 if (value != null) {
                     Msg message = JSON.convertValue(value, Msg.class);
@@ -281,13 +280,23 @@ public final class SessionArchive {
         return List.copyOf(messages.values());
     }
 
+    private static List<Msg> baselineMessages(SessionEvent event) {
+        Object state = event.data().get("stateJson");
+        return state instanceof String value
+                ? AgentState.fromJsonString(value).getContext() : List.of();
+    }
+
     private static long messageSequence(SessionLog log, String messageId) {
         long found = 0;
         for (var event : log.scan(0, log.head().seq())) {
-            Object message = event.data().get("message");
-            if (message instanceof Map<?, ?> value
-                    && messageId.equals(String.valueOf(value.get("id")))) {
-                found = event.seq();
+            if (found == 0 && event.type().equals("migration/baseline")) {
+                if (baselineMessages(event).stream().anyMatch(message -> messageId.equals(message.getId())))
+                    found = event.seq();
+            } else if (TRANSCRIPT_EVENTS.contains(event.type())
+                    && (found == 0 || event.type().equals("turn/output"))) {
+                Object message = event.data().get("message");
+                if (message instanceof Map<?, ?> value && messageId.equals(value.get("id")))
+                    found = event.seq();
             }
         }
         return found;

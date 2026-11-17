@@ -1,0 +1,15 @@
+{
+  "events": [
+    {
+      "schemaVersion": 1,
+      "eventId": "legacy-import-event",
+      "seq": 1,
+      "occurredAt": 1700000000001,
+      "type": "migration/baseline",
+      "executionRunId": "legacy-import-operation",
+      "turnId": null,
+      "required": true,
+      "payloadJson": "{\"stateJson\":\"{\\\"session_id\\\":\\\"legacy-import\\\",\\\"user_id\\\":\\\"local\\\",\\\"summary\\\":\\\"旧版摘要\\\",\\\"context\\\":[{\\\"id\\\":\\\"legacy-import-user\\\",\\\"name\\\":null,\\\"role\\\":\\\"USER\\\",\\\"content\\\":[{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"核对旧版迁移记录，保留 SessionArchive 的原始消息。\\\"}],\\\"metadata\\\":{\\\"jharnessDisplay\\\":\\\"核对旧版迁移记录\\\"},\\\"timestamp\\\":\\\"2023-11-14 22:13:20.000\\\",\\\"usage\\\":null},{\\\"id\\\":\\\"legacy-import-assistant\\\",\\\"name\\\":\\\"JHarness\\\",\\\"role\\\":\\\"ASSISTANT\\\",\\\"content\\\":[{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"旧版记录包含两条原始消息，分叉应保留它们的 ID。\\\"}],\\\"timestamp\\\":\\\"2023-11-14 22:13:21.000\\\"}],\\\"reply_id\\\":\\\"legacy-import-reply\\\",\\\"cur_iter\\\":2}\",\"coverage\":\"baseline_only\",\"source\":\"agent_state.json\",\"sourceVersion\":3}"
+    }
+  ]
+}

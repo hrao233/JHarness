@@ -190,13 +190,13 @@ public final class Backend {
     private List<ChatMessage> history(JsonNode params) throws Exception {
         var context = context(params);
         var log = ConversationRuntime.openSession(workspace(params), context);
-        return visibleHistory(log);
+        return visibleHistory(SessionViews.transcript(log));
     }
 
-    private List<ChatMessage> visibleHistory(io.agentscope.core.session.SessionLog log) {
+    private List<ChatMessage> visibleHistory(SessionViews.Transcript transcript) {
         var history = new ArrayList<ChatMessage>();
         int turn = 0;
-        for (Msg message : SessionViews.transcript(log).messages()) {
+        for (Msg message : transcript.messages()) {
             boolean user = message.getRole() == MsgRole.USER;
             if ((!user && message.getRole() != MsgRole.ASSISTANT) || message.getTextContent().isBlank()) continue;
             if (user) turn++;
@@ -220,7 +220,8 @@ public final class Backend {
             allowed.add(sessionId);
             var log = ConversationRuntime.openSession(workspace(session), context(session));
             if (sessionSearch.needsSync(sessionId, log.head().seq())) {
-                var messages = visibleHistory(log).stream()
+                var transcript = SessionViews.transcript(log);
+                var messages = visibleHistory(transcript).stream()
                         .map(message -> new SessionSearchIndex.Message(
                                 projectId,
                                 sessionId,
@@ -229,7 +230,7 @@ public final class Backend {
                                 message.role(),
                                 message.text()))
                         .toList();
-                sessionSearch.sync(sessionId, log.head().seq(), messages);
+                sessionSearch.sync(sessionId, transcript.asOfSeq(), messages);
             }
             if (session.path("title").asText().toLowerCase(Locale.ROOT).contains(lower)
                     || session.path("projectName").asText().toLowerCase(Locale.ROOT).contains(lower)) {

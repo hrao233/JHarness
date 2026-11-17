@@ -79,6 +79,10 @@ Hermes 的会话召回不是对 JSON 文件做全量字符串扫描，而是把�
 
 JHarness 还记录了每个会话已提交的 head sequence。head 未变化时跳过历史投影重建；索引损坏或删除后，下一次扫描可以从追加式会话日志重新生成。当前实现参考 Hermes `hermes_state.py`、`hermes_state_fts.py` 和 `hermes_state_search.py` 的职责划分，而不是复制其 Python/SQLite 代码。
 
+Hermes 构造 FTS 查询时把会话和角色等过滤条件放进 SQL，再执行排序和分页。其 CJK 索引保留相邻 bigram 的位置，连续词元可以用 FTS 短语查询匹配。JHarness 的词元集合会去重，无法从词元位置重建连续性，因此先筛选可见会话和必要词元，再用原文中的连续短语排在普通 BM25 命中之前。这个顺序也避免了已移除会话占满候选窗口。[Hermes 查询构造](https://github.com/NousResearch/hermes-agent/blob/009afb3ac5405274f6efc749c1421d0117868010/hermes_state_search.py#L928-L944) · [Hermes CJK 分词](https://github.com/NousResearch/hermes-agent/blob/009afb3ac5405274f6efc749c1421d0117868010/hermes_state_fts.py#L20-L52)
+
+Pi 把旧线性会话升级为带 `id` 和 `parentId` 的树，并把压缩保留边界从数组位置改成稳定 ID。构造模型上下文时先从当前分支沿父链得到路径，再选最近一次压缩及保留边界之后的条目。JHarness 的旧会话基线在单个事件里保存多条带 ID 的消息，所以派生分支需要同时定位事件序号和基线内的消息，模型上下文压缩也应独立于原始历史。[Pi v1 迁移](https://github.com/earendil-works/pi/blob/b4afdddf44e059c67ccf5097e5317d913521b470/packages/coding-agent/src/core/session-manager.ts#L286-L312) · [Pi 上下文投影](https://github.com/earendil-works/pi/blob/b4afdddf44e059c67ccf5097e5317d913521b470/packages/coding-agent/src/core/session-manager.ts#L475-L511)
+
 Pi 的扩展系统通过清单、安装状态和版本化宿主接口隔离扩展生命周期，Hermes 则把工具、钩子、上下文和渠道放在不同注册点。JHarness 的第一个桌面插件切片采用更窄的进程工具协议：清单只声明工具，安装不执行代码，启用后才懒启动独立进程。这样先验证安装、能力发现、调用、超时、诊断和卸载，再扩展模型、上下文、存储和渠道槽位。
 
 浏览器能力采用与 Hermes 可选工具集类似的思路：独立插件接入浏览器，而不是把浏览器状态写进核心 Agent。JHarness 选择 Chrome DevTools Protocol 作为 Edge 与 Chrome 的共同控制面，已实现页面导航、标签页、正文提取、网页检索，以及通过 `Runtime.evaluate` 完成的 CSS 选择器点击、表单填写和等待，`Page.reload` 刷新与 history 前进后退。页面内容继续视为不可信证据；交互操作仍受外部插件进程权限约束。

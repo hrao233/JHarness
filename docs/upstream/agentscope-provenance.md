@@ -14,7 +14,8 @@ declared version, file counts, line counts and aggregate SHA-256 digests.
 
 - Maven revision: `2.1.0-SNAPSHOT`
 - Java target: 17
-- License: Apache License 2.0
+- License: [Apache License 2.0](../../licenses/AgentScope-Apache-2.0.txt), copied from the
+  upstream snapshot. The bundled Windows build includes the same license text.
 
 ## Source Size
 

@@ -12,11 +12,12 @@ const output = path.join(root, 'release', 'win-unpacked');
 const desktop = path.join(root, 'apps', 'desktop', 'electron');
 const { name, productName, version } = require('../../package.json');
 const notes = path.join(root, 'docs', 'releases', version + '.md');
+const agentScopeLicense = path.join(root, 'licenses', 'AgentScope-Apache-2.0.txt');
 if (process.platform !== 'win32' || process.arch !== 'x64') {
   throw new Error('This packaging command requires Windows x64.');
 }
 for (const input of [backend, path.join(runtime, 'bin', 'java.exe'),
-  path.join(root, 'dist', 'index.html'), notes]) {
+  path.join(root, 'dist', 'index.html'), notes, agentScopeLicense]) {
   if (!existsSync(input)) throw new Error('Build prerequisite missing: ' + input);
 }
 function git(args) {
@@ -63,6 +64,7 @@ writeFileSync(path.join(output, 'jharness-cli.cmd'),
   '@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n'
     + '"%~dp0JHarness.exe" "%~dp0resources\\app\\cli\\jharness-cli.cjs" %*\r\n');
 copyFileSync(notes, path.join(output, 'RELEASE_NOTES.md'));
+copyFileSync(agentScopeLicense, path.join(output, path.basename(agentScopeLicense)));
 console.log(executable);
 createManifest(output, { version, commit, sourceDirty })
   .then(manifest => console.log('Manifest: ' + manifest.path))

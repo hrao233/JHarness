@@ -275,6 +275,13 @@ workspace edits, memory, web approval, cancellation and session recovery.
 It also verifies plan persistence, command receipts, artifact metadata and bytes,
 checkpoint/report correlation, and command approval across a durable resume.
 
+The packaged desktop smoke also configures a loopback mock model through the
+settings dialog, opens a fixture project from the sidebar, and waits for the
+first streamed chunk before the mock issues a file creation request. It checks
+the preview and file absence before clicking approval, checks the written bytes
+and final reply, then relaunches the app and reads the saved conversation. The
+fixture preconfigures the project directory.
+
 ## Follow-up Work
 
 - M2 now includes uncertain tool-result reconciliation and packaged recovery of
@@ -285,8 +292,13 @@ checkpoint/report correlation, and command approval across a durable resume.
 - M3 now exposes recent model context, message-level session branching, source
   navigation, Markdown/JSON export, a v1 migration sample and a rebuildable
   SQLite FTS5 recall index with CJK bigram tokens. A branch records its source
-  and begins from a clean state baseline. A broader migration corpus and scored
-  recall quality evaluation remain.
+  and begins from a clean state baseline. The search index records the source
+  sequence of the actual transcript snapshot and filters to visible sessions
+  before ranking. On eight labeled Chinese, English, and mixed queries, literal
+  phrase priority raised MRR@3 from 0.625 to 1.0; recall at three remained 1.0.
+  Reopened v1 archive fixtures cover model-context compaction and nested forks
+  from message IDs stored inside a baseline event. Broader recall evaluation and
+  context/token usage metrics remain.
 - M5 now has desktop integration for process-isolated tool plugins. Capability-
   level RPC, public SDK packaging, model/context/storage plugin slots and upgrade
   compatibility remain.
@@ -306,7 +318,10 @@ checkpoint/report correlation, and command approval across a durable resume.
   tests after building the bundled runtime. Packaging generates version notes and
   a SHA-256 inventory with source commit and workspace state; the smoke test
   checks all bundled files and CI is configured to retain the verified bundle.
-  A clean Windows runner and upgrade from a prior distribution remain unverified.
+  The clean runner exposed a nested Java source package excluded by the unanchored
+  runtime ignore rule. The rule is now scoped to the bundled runtime directory.
+  End-to-end clean-runner packaging and upgrade from a prior distribution remain
+  unverified.
 - M9 now has local data status, backup, integrity inspection and guarded restore.
   Named configuration profiles, selective restore and diagnostics export remain.
 

@@ -41,6 +41,7 @@ async function main() {
     assert.match(smoke.plugins, /尚未显式安装外部工具插件/);
     await verifyInterruptedApproval(path.join(data, 'approval'));
     await verifyRecoverableTask(path.join(data, 'task'));
+    await verifyDesktopConversation(path.join(data, 'conversation'));
     console.log('PACKAGED_GUI_SMOKE_OK');
   } finally {
     await rm(data, { recursive: true, force: true, maxRetries: 5 });
@@ -162,6 +163,100 @@ async function verifyRecoverableTask(data) {
     await assert.rejects(stat(path.join(directory, 'Recovery.txt')), { code: 'ENOENT' });
   } finally {
     if (backend) await backend.close();
+    server.closeAllConnections();
+    server.close();
+  }
+}
+
+async function verifyDesktopConversation(data) {
+  const directory = path.join(data, 'project');
+  await mkdir(directory, { recursive: true });
+  await writeFile(path.join(data, 'settings.json'), JSON.stringify({
+    models: [],
+    projects: [{ id: randomUUID(), name: 'Conversation smoke project', directory, sessions: [] }]
+  }));
+  const fixture = {
+    model: 'desktop-smoke-fixture',
+    key: 'fixture-key',
+    prompt: '创建一个需要我批准的文件',
+    lead: '正在准备写入预览。',
+    file: 'ConversationSmoke.txt',
+    content: 'Verified from the packaged desktop.',
+    reply: '已按批准内容创建文件。'
+  };
+  const target = path.join(directory, fixture.file);
+  let releaseStream;
+  const streamVisible = new Promise(resolve => { releaseStream = resolve; });
+  const stages = [];
+  let fixtureError;
+  const server = createServer(async (request, response) => {
+    try {
+      let raw = '';
+      for await (const chunk of request) raw += chunk;
+      const body = JSON.parse(raw);
+      assert.equal(request.url, '/v1/chat/completions');
+      assert.equal(request.headers.authorization, 'Bearer ' + fixture.key);
+      assert.equal(body.model, fixture.model);
+      assert.equal(body.stream, true);
+      const messages = body.messages;
+      const id = 'chatcmpl-' + randomUUID();
+      const stream = (delta, finish_reason = null) => response.write('data: ' + JSON.stringify({
+        id, object: 'chat.completion.chunk', created: 1, model: fixture.model,
+        choices: [{ index: 0, delta, finish_reason }]
+      }) + '\n\n');
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      if (stages.length === 0) {
+        assert.ok(messages.some(message => message.role === 'user'
+          && JSON.stringify(message.content).includes('Reply with OK.')));
+        stages.push('connection');
+        stream({ role: 'assistant', content: 'OK' }, 'stop');
+      } else if (stages.length === 1) {
+        assert.ok(messages.some(message => message.role === 'user'
+          && JSON.stringify(message.content).includes(fixture.prompt)));
+        assert.ok(body.tools.some(tool => tool.function.name === 'create_file'));
+        stages.push('preview');
+        stream({ role: 'assistant', content: fixture.lead });
+        // Release the tool call only after the first chunk is visible in the renderer.
+        await streamVisible;
+        stream({ tool_calls: [{ index: 0, id: 'desktop-smoke-file', type: 'function',
+          function: { name: 'create_file', arguments: JSON.stringify({
+            path: fixture.file, content: fixture.content
+          }) } }] }, 'tool_calls');
+      } else {
+        assert.deepEqual(stages, ['connection', 'preview']);
+        const result = messages.find(message => message.role === 'tool');
+        assert.equal(result?.tool_call_id, 'desktop-smoke-file');
+        assert.equal(await readFile(target, 'utf8'), fixture.content);
+        stages.push('approved');
+        stream({ role: 'assistant', content: fixture.reply }, 'stop');
+      }
+      response.end('data: [DONE]\n\n');
+    } catch (error) {
+      fixtureError ??= error;
+      if (!response.headersSent) response.writeHead(500);
+      response.end();
+    }
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  fixture.endpoint = 'http://127.0.0.1:' + server.address().port + '/v1';
+
+  try {
+    const live = await run(data, 'conversation', { fixture, releaseStream });
+    assert.deepEqual(stages, ['connection', 'preview', 'approved']);
+    assert.equal(await readFile(target, 'utf8'), fixture.content);
+    const reopened = await run(data, 'reopen', { fixture });
+    const expected = { prompt: fixture.prompt, reply: fixture.reply, session: fixture.prompt, url: live.url };
+    assert.deepEqual(live, expected);
+    assert.deepEqual(reopened, expected);
+    assert.deepEqual(stages, ['connection', 'preview', 'approved']);
+    assert.ifError(fixtureError);
+    console.log('PACKAGED_DESKTOP_CONVERSATION_OK');
+  } catch (error) {
+    if (fixtureError) throw new AggregateError([fixtureError, error], 'Packaged desktop conversation failed');
+    throw error;
+  } finally {
+    releaseStream();
     server.closeAllConnections();
     server.close();
   }
@@ -361,11 +456,11 @@ async function launchPackagedBackend(data) {
   };
 }
 
-async function run(data, mode = 'base') {
+async function run(data, mode = 'base', options) {
   const args = ['--jharness-smoke', '--enable-logging'];
-  if (mode === 'approval') args.push('--jharness-smoke-approval');
-  if (mode === 'task') args.push('--jharness-smoke-task');
-  const result = await launch(data, args, mode === 'base' ? 20000 : 30000);
+  if (mode !== 'base') args.push('--jharness-smoke-' + mode);
+  const timeout = mode === 'conversation' ? 65000 : mode === 'base' ? 20000 : 30000;
+  const result = await launch(data, args, timeout, options);
   assert.equal(result.code, 0, result.stdout + result.stderr);
   const prefix = 'JHARNESS_SMOKE_OK ';
   const marker = result.stdout.split(/\r?\n/).find(line => line.startsWith(prefix));
@@ -375,19 +470,26 @@ async function run(data, mode = 'base') {
   return smoke;
 }
 
-function launch(data, args, timeout) {
+function launch(data, args, timeout, { fixture, releaseStream } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, {
       env: {
         ...process.env,
         ELECTRON_ENABLE_LOGGING: '1',
-        JHARNESS_SMOKE_DATA: data
+        JHARNESS_SMOKE_DATA: data,
+        ...(fixture ? { JHARNESS_SMOKE_CONVERSATION: JSON.stringify(fixture) } : {})
       },
       windowsHide: true
     });
     let stdout = '';
     let stderr = '';
-    child.stdout.on('data', chunk => { stdout += chunk; });
+    child.stdout.on('data', chunk => {
+      stdout += chunk;
+      if (releaseStream && stdout.includes('JHARNESS_SMOKE_STREAM_VISIBLE')) {
+        releaseStream();
+        releaseStream = null;
+      }
+    });
     child.stderr.on('data', chunk => { stderr += chunk; });
     const timer = setTimeout(() => {
       child.kill();

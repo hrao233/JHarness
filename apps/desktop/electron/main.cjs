@@ -900,6 +900,115 @@ async function smokeRecoverableTask() {
   };
 }
 
+async function smokeConversationStage(stage, fixture) {
+  async function waitFor(check, message) {
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline) {
+      const value = check();
+      if (value) return value;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    const detail = document.querySelector('dialog[open] .error-text, .notice[role="alert"]');
+    throw new Error(message + (detail ? ': ' + detail.innerText : ''));
+  }
+
+  function button(root, text) {
+    return Array.from(root.querySelectorAll('button')).find(element => element.innerText.trim() === text);
+  }
+
+  function setValue(element, prototype, value, type = 'input') {
+    Object.getOwnPropertyDescriptor(prototype, 'value').set.call(element, value);
+    element.dispatchEvent(new Event(type, { bubbles: true }));
+  }
+
+  const send = () => document.querySelector('.composer button[aria-label="发送"]');
+  const reply = text => Array.from(document.querySelectorAll('.assistant-msg'))
+    .find(message => message.innerText.trim() === text);
+  const approval = () => Array.from(document.querySelectorAll('.approvals .approval-card'))
+    .find(card => card.querySelector('code')?.innerText === fixture.file);
+
+  if (stage === 'send') {
+    const settingsButton = await waitFor(
+      () => document.querySelector('button[aria-label="设置"]'), 'Model settings button missing');
+    settingsButton.click();
+    const dialog = await waitFor(
+      () => document.querySelector('dialog[open]'), 'Model settings dialog did not open');
+    setValue(dialog.querySelector('select'), HTMLSelectElement.prototype, 'compatible', 'change');
+    const endpoint = await waitFor(
+      () => dialog.querySelector('input[type="url"]'), 'Compatible provider did not expose its endpoint');
+    setValue(endpoint, HTMLInputElement.prototype, fixture.endpoint);
+    setValue(dialog.querySelector('input[required]:not([type])'), HTMLInputElement.prototype, fixture.model);
+    setValue(dialog.querySelector('input[type="password"]'), HTMLInputElement.prototype, fixture.key);
+    button(dialog, '测试连接').click();
+    await waitFor(() => dialog.querySelector('.success-text')?.innerText.includes(fixture.model),
+      'Connection test did not receive the mock model reply');
+    button(dialog, '保存').click();
+    await waitFor(() => !dialog.isConnected, 'Model settings did not save');
+
+    const project = await waitFor(
+      () => document.querySelector('.project-name'), 'Project picker did not load the fixture project');
+    project.click();
+    const permission = await waitFor(
+      () => document.querySelector('.permission-button'), 'Permission picker missing');
+    permission.click();
+    const ask = await waitFor(
+      () => document.querySelector('.permission-menu button.mode-ask'), 'Ask permission option missing');
+    ask.click();
+    const input = await waitFor(
+      () => document.querySelector('.composer textarea:not(:disabled)'), 'Composer did not open the project');
+    setValue(input, HTMLTextAreaElement.prototype, fixture.prompt);
+    const submit = await waitFor(() => send() && !send().disabled && send(), 'Prompt could not be submitted');
+    submit.click();
+    await waitFor(() => reply(fixture.lead), 'The first stream chunk did not render');
+    return;
+  }
+
+  if (stage === 'review') {
+    const card = await waitFor(approval, 'The file creation approval did not render');
+    card.querySelector('summary').click();
+    await waitFor(() => card.querySelector('details[open] .after')?.innerText === fixture.content,
+      'Approval did not display the proposed file contents');
+    return;
+  }
+
+  if (stage === 'approve') {
+    button(approval(), '批准这一次').click();
+    await waitFor(() => reply(fixture.reply) && send() && !approval(),
+      'The approved task did not finish in the conversation');
+  }
+
+  await waitFor(() => document.querySelector('.user-msg')?.innerText === fixture.prompt && reply(fixture.reply),
+    'Chat history did not contain the saved prompt and reply');
+  const saved = await waitFor(() => Array.from(document.querySelectorAll('.recent-session'))
+    .find(session => session.innerText.trim() === fixture.prompt),
+    'The completed conversation did not appear under recent sessions');
+  return { prompt: document.querySelector('.user-msg').innerText, reply: reply(fixture.reply).innerText.trim(),
+    session: saved.innerText.trim(), url: location.href };
+}
+
+async function smokeDesktopConversation(reopen) {
+  const data = process.env.JHARNESS_SMOKE_DATA;
+  if (!data) throw new Error('The conversation smoke test requires an isolated data directory');
+  const fixture = JSON.parse(process.env.JHARNESS_SMOKE_CONVERSATION);
+  async function runStage(stage) {
+    try {
+      return await win.webContents.executeJavaScript(
+        `(${smokeConversationStage.toString()})(${JSON.stringify(stage)}, ${JSON.stringify(fixture)})`);
+    } catch (error) {
+      throw new Error(stage + ': ' + error.message);
+    }
+  }
+  if (reopen) return runStage('reopen');
+
+  await runStage('send');
+  console.log('JHARNESS_SMOKE_STREAM_VISIBLE');
+  await runStage('review');
+  if (existsSync(path.join(data, 'project', fixture.file))) {
+    throw new Error('The file was written while approval was pending');
+  }
+  return runStage('approve');
+}
+
 app.setName('JHarness');
 if (smokeMode && process.env.JHARNESS_SMOKE_DATA) {
   app.setPath('userData', path.resolve(process.env.JHARNESS_SMOKE_DATA));
@@ -944,13 +1053,17 @@ else {
       win.webContents.once('did-finish-load', () => {
         const testApproval = process.argv.includes('--jharness-smoke-approval');
         const testTask = process.argv.includes('--jharness-smoke-task');
+        const testConversation = process.argv.includes('--jharness-smoke-conversation');
+        const reopenConversation = process.argv.includes('--jharness-smoke-reopen');
         const script = testApproval
           ? `(${smokeInterruptedApproval.toString()})()`
           : testTask
             ? `(${smokeRecoverableTask.toString()})()`
             : `(${smokeTaskCenter.toString()})()`;
         setTimeout(() => {
-          win.webContents.executeJavaScript(script)
+          const verification = testConversation || reopenConversation
+            ? smokeDesktopConversation(reopenConversation) : win.webContents.executeJavaScript(script);
+          verification
             .then(result => {
               console.log('JHARNESS_SMOKE_OK ' + JSON.stringify(result));
               app.quit();
@@ -959,7 +1072,7 @@ else {
               console.error('JHARNESS_SMOKE_ERROR ' + error.message);
               app.exit(1);
             });
-        }, testApproval ? 0 : 1200);
+        }, testApproval || testConversation || reopenConversation ? 0 : 1200);
       });
     }
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));

@@ -103,16 +103,27 @@ async function writeJson(file, value) {
   await fs.rename(temporary, file);
 }
 
+async function findDesktopProject(projects, project) {
+  const key = value => process.platform === 'win32' ? value.toLowerCase() : value;
+  const expected = key(project);
+  for (const item of Array.isArray(projects) ? projects : []) {
+    if (typeof item?.directory !== 'string') continue;
+    const directory = path.resolve(item.directory);
+    if (key(directory) === expected) return item;
+    // A saved project can use a directory junction or a Windows short path.
+    const resolved = await fs.realpath(directory).catch(() => null);
+    if (resolved && key(resolved) === expected) return item;
+  }
+  return null;
+}
+
 async function identity(options, dataDirectory) {
   const project = await fs.realpath(path.resolve(options.project));
   const stat = await fs.stat(project);
   if (!stat.isDirectory()) throw new Error('项目路径不是目录。');
   const settingsFile = path.join(dataDirectory, 'settings.json');
   const settings = await readJson(settingsFile, { projects: [] });
-  const desktop = Array.isArray(settings.projects)
-    ? settings.projects.find(item => typeof item.directory === 'string'
-      && path.resolve(item.directory).toLowerCase() === project.toLowerCase())
-    : null;
+  const desktop = await findDesktopProject(settings.projects, project);
   if (desktop) {
     const sessions = Array.isArray(desktop.sessions) ? desktop.sessions : [];
     const selected = options.session

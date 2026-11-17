@@ -2,7 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
-const { mkdir, mkdtemp, readFile, rm, writeFile } = require('node:fs/promises');
+const { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const path = require('node:path');
 const { createManager } = require('../electron/worktree-manager.cjs');
@@ -17,8 +17,11 @@ test('creates, inspects and safely removes isolated git worktrees', { timeout: 3
   const temporary = await mkdtemp(path.join(tmpdir(), 'jharness-worktree-'));
   const repository = path.join(temporary, 'repository');
   const worktrees = path.join(temporary, 'worktrees');
+  const worktreeAlias = path.join(temporary, 'worktrees-alias');
   await mkdir(repository);
   try {
+    await mkdir(worktrees);
+    await symlink(worktrees, worktreeAlias, process.platform === 'win32' ? 'junction' : 'dir');
     await git(repository, ['init']);
     await git(repository, ['config', 'user.name', 'JHarness Test']);
     await git(repository, ['config', 'user.email', 'test@example.invalid']);
@@ -26,9 +29,10 @@ test('creates, inspects and safely removes isolated git worktrees', { timeout: 3
     await git(repository, ['add', 'README.md']);
     await git(repository, ['commit', '-m', 'base']);
 
-    const manager = createManager(worktrees);
+    const manager = createManager(worktreeAlias);
     const isolated = await manager.create({ projectRoot: repository, label: 'Feature Work' });
     assert.match(isolated.branch, /^jharness\/feature-work-[a-f0-9]{8}$/);
+    assert.equal(path.dirname(isolated.path), await realpath(worktrees));
     assert.match(await readFile(path.join(isolated.path, 'README.md'), 'utf8'), /^BASE\r?\n$/);
     assert.equal((await manager.status(isolated)).dirty, false);
     assert.equal((await manager.list(repository)).some(item => item.path === isolated.path), true);
@@ -38,7 +42,8 @@ test('creates, inspects and safely removes isolated git worktrees', { timeout: 3
     assert.equal(dirty.dirty, true);
     assert.equal(dirty.changedFiles, 1);
     await assert.rejects(manager.remove(isolated), /未提交/);
-    await manager.remove(isolated, { force: true });
+    const legacyRecord = { ...isolated, path: path.join(worktreeAlias, isolated.id) };
+    await manager.remove(legacyRecord, { force: true });
     assert.equal((await manager.status(isolated)).exists, false);
 
     const committed = await manager.create({ projectRoot: repository, label: 'Committed' });

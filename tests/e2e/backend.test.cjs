@@ -6,7 +6,7 @@ const { once } = require('node:events');
 const { randomUUID } = require('node:crypto');
 const { createInterface } = require('node:readline');
 const { existsSync } = require('node:fs');
-const { copyFile, mkdtemp, mkdir, readFile, writeFile, rm } = require('node:fs/promises');
+const { copyFile, mkdtemp, mkdir, readFile, realpath, writeFile, rm } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const path = require('node:path');
 
@@ -370,7 +370,7 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
       if (!commandApproval) await new Promise(resolve => setTimeout(resolve, 100));
     }
     assert.equal(commandApproval?.data.after, command);
-    assert.equal(path.normalize(commandApproval.data.path), projectPath);
+    assert.equal(path.normalize(commandApproval.data.path), await realpath(projectPath));
     await assert.rejects(readFile(path.join(projectPath, 'denied.txt')), { code: 'ENOENT' });
     await assert.rejects(readFile(path.join(projectPath, 'command.txt')), { code: 'ENOENT' });
     await call('approve', { runId: terminal, approvalId: commandApproval.data.id, allow: true });

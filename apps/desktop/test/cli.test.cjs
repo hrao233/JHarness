@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
 const { existsSync } = require('node:fs');
-const { mkdir, mkdtemp, readFile, rm, writeFile } = require('node:fs/promises');
+const { mkdir, mkdtemp, readFile, rm, symlink, writeFile } = require('node:fs/promises');
 const { createServer } = require('node:http');
 const { randomUUID } = require('node:crypto');
 const { tmpdir } = require('node:os');
@@ -41,14 +41,16 @@ test('CLI reuses the desktop project and session runtime', { timeout: 45000 }, a
   assert.equal(existsSync(jar), true, 'build the backend JAR before CLI tests');
   const temporary = await mkdtemp(path.join(tmpdir(), 'jharness-cli-'));
   const project = path.join(temporary, 'project');
+  const alias = path.join(temporary, 'desktop-project');
   const data = path.join(temporary, 'data');
   await mkdir(project);
+  await symlink(project, alias, process.platform === 'win32' ? 'junction' : 'dir');
   await mkdir(data);
   await writeFile(path.join(project, 'README.md'), 'CLI PROJECT');
   const projectId = randomUUID();
   await writeFile(path.join(data, 'settings.json'), JSON.stringify({
     models: [],
-    projects: [{ id: projectId, directory: project, name: 'CLI project', sessions: [] }]
+    projects: [{ id: projectId, directory: alias, name: 'CLI project', sessions: [] }]
   }));
 
   let requests = 0;

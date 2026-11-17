@@ -71,6 +71,16 @@ async function repository(projectRoot) {
   };
 }
 
+async function resolveDirectory(directory) {
+  try {
+    return await fs.realpath(directory);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    // A deleted worktree directory can still have Git metadata to prune.
+    return path.join(await fs.realpath(path.dirname(directory)), path.basename(directory));
+  }
+}
+
 function createManager(worktreeRoot) {
   const root = path.resolve(worktreeRoot);
 
@@ -78,9 +88,11 @@ function createManager(worktreeRoot) {
     const repo = await repository(projectRoot);
     const id = randomUUID();
     const branch = 'jharness/' + slug(label) + '-' + id.slice(0, 8);
-    const target = path.join(root, id);
-    if (!within(root, target)) throw new Error('工作树目标目录无效。');
     await fs.mkdir(root, { recursive: true });
+    // Git records the on-disk path, which can differ from a Windows short path or junction.
+    const directory = await fs.realpath(root);
+    const target = path.join(directory, id);
+    if (!within(directory, target)) throw new Error('工作树目标目录无效。');
     try {
       await git(['worktree', 'add', '-b', branch, target, repo.head], repo.root);
       return {
@@ -202,13 +214,23 @@ function createManager(worktreeRoot) {
   }
 
   async function remove(record, { force = false } = {}) {
-    if (!record?.path || !record?.repoRoot || !within(root, record.path)) {
+    if (!record?.path || !record?.repoRoot) {
       throw new Error('工作树记录无效。');
     }
-    const current = await status(record);
+    const saved = path.resolve(record.path);
+    const [directory, parent] = await Promise.all([
+      resolveDirectory(root),
+      resolveDirectory(path.dirname(saved))
+    ]);
+    if (path.relative(directory, parent) !== '') throw new Error('工作树记录无效。');
+    const target = path.join(directory, path.basename(saved));
+    const current = await status({ ...record, path: target });
     if (!current.exists) {
       await pruneBranches(record.repoRoot, record.branch);
       return current;
+    }
+    if (path.relative(target, await fs.realpath(target)) !== '') {
+      throw new Error('工作树记录无效。');
     }
     if (current.dirty && !force) {
       throw new Error('工作树包含未提交的修改。请先提交或丢弃后再移除。');
@@ -218,12 +240,12 @@ function createManager(worktreeRoot) {
     }
     const args = ['worktree', 'remove'];
     if (force) args.push('--force');
-    args.push(record.path);
+    args.push(target);
     try {
       await git(args, record.repoRoot);
     } catch (error) {
       if (!force) throw error;
-      await fs.rm(record.path, { recursive: true, force: true });
+      await fs.rm(target, { recursive: true, force: true });
       await git(['worktree', 'prune'], record.repoRoot).catch(() => {});
     }
     await pruneBranches(record.repoRoot, record.branch);

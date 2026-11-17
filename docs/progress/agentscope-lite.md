@@ -227,6 +227,10 @@ payloads and existing downstream imports stay compatible.
 - Verification refuses truncated output, unknown outcomes and mismatched
   exit/outcome evidence. Rewriting the criterion list preserves the status and ID
   of unchanged text instead of silently resetting a verified criterion.
+- Added a second Task Report verification method for JSON Schema. The user
+  selects a same-run command, supplies a schema and receives a persisted
+  verdict for a single complete JSON value from a successful command. Durable
+  resume records new criteria and command receipts under the same run ID.
 
 ## Lightweight Runtime
 
@@ -274,8 +278,10 @@ checkpoint/report correlation, and command approval across a durable resume.
 ## Follow-up Work
 
 - M2 now includes uncertain tool-result reconciliation and packaged recovery of
-  a pending approval task. The remaining increment is packaged fault injection
-  while an approved tool is executing and when its outcome is unknown.
+  a pending approval task. An opt-in packaged-backend test kills an approved
+  command after an observable effect, waits for the real lease, reconciles the
+  original tool call, and proves there is no duplicate effect after another restart.
+  Direct desktop reconciliation and the recorded-result crash case remain.
 - M3 now exposes recent model context, message-level session branching, source
   navigation, Markdown/JSON export, a v1 migration sample and a rebuildable
   SQLite FTS5 recall index with CJK bigram tokens. A branch records its source
@@ -293,9 +299,9 @@ checkpoint/report correlation, and command approval across a durable resume.
   remain.
 - M4 now has a reviewable project-work slice: task plans, command/test receipts,
   artifacts, file checkpoints, diffs, safe per-file restore and guarded
-  whole-run restore, isolated Git worktrees and deterministic shell-evidence
-  verification, plus user-reviewed worktree integration. Broader semantic
-  verifiers and automated commit authoring remain.
+  whole-run restore, isolated Git worktrees and deterministic exit-code and
+  JSON Schema verification, plus user-reviewed worktree integration.
+  Automated commit authoring remains.
 - M6 now configures the JDK 17 `jlink` compression flag and runs Node integration
   tests after building the bundled runtime. Packaging generates version notes and
   a SHA-256 inventory with source commit and workspace state; the smoke test

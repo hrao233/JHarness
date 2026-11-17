@@ -108,7 +108,7 @@ public final class ConversationRuntime implements AutoCloseable {
                     executeWrite(runId, request.context().getSessionId(), permission, review, requireApproval,
                             checkpoints, operation, path, before, after, deniedMessage, action)));
             toolkit.registerTool(command);
-            toolkit.registerTool(new AcceptanceCriteriaTool(reports));
+            toolkit.registerTool(new AcceptanceCriteriaTool(reports, () -> runId));
             toolkit.registerTool(new ApprovedWeb(requireApproval));
             registerArtifactTool(toolkit, request, reports, () -> runId);
             var events = new ConversationEvents(

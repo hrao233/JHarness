@@ -201,6 +201,48 @@ class TaskReportStoreTest {
                 0));
     }
 
+    @Test
+    void verifiesJsonOnlyFromCompleteSuccessfulOutputAndKeepsTheSchema() throws Exception {
+        var reports = new TaskReportStore(temporary);
+        String session = UUID.randomUUID().toString();
+        String run = UUID.randomUUID().toString();
+        String criterion = reports.saveAcceptanceCriteria(session, run, List.of("All checks passed"))
+                .criteria().get(0).id();
+        String schema = """
+                {"type":"object","required":["passed"],"properties":{"passed":{"const":true}}}
+                """.strip();
+        var good = reports.recordCommand(session, run, "check", 1, 2, 0, "SUCCEEDED", false,
+                "退出码 0\n{\"passed\":true}\r\n");
+        var failed = reports.recordCommand(session, run, "check", 1, 2, 0, "SUCCEEDED", false,
+                "退出码 0\n{\"passed\":false}");
+        var nonJson = reports.recordCommand(session, run, "check", 1, 2, 0, "SUCCEEDED", false,
+                "退出码 0\n{\"passed\":true}\nUnexpected log");
+        var truncated = reports.recordCommand(session, run, "check", 1, 2, 0, "SUCCEEDED", false,
+                good.output() + " ".repeat(12_000));
+        var unsuccessful = reports.recordCommand(session, run, "check", 1, 2, 1, "FAILED", false,
+                "退出码 1\n{\"passed\":true}");
+        var differentRun = reports.recordCommand(session, UUID.randomUUID().toString(), "other check",
+                1, 2, 0, "SUCCEEDED", false, good.output());
+        assertEquals(TaskReportStore.CriterionStatus.FAILED,
+                reports.verifyJsonCriterion(session, run, criterion, failed.id(), schema).status());
+        assertEquals(TaskReportStore.CriterionStatus.FAILED,
+                reports.verifyJsonCriterion(session, run, criterion, nonJson.id(), schema).status());
+        assertTrue(truncated.outputTruncated());
+        assertEquals(TaskReportStore.CriterionStatus.UNKNOWN,
+                reports.verifyJsonCriterion(session, run, criterion, truncated.id(), schema).status());
+        assertEquals(TaskReportStore.CriterionStatus.UNKNOWN,
+                reports.verifyJsonCriterion(session, run, criterion, unsuccessful.id(), schema).status());
+        assertThrows(IllegalArgumentException.class,
+                () -> reports.verifyJsonCriterion(session, run, criterion, differentRun.id(), schema));
+        var passed = reports.verifyJsonCriterion(session, run, criterion, good.id(), schema);
+        assertEquals(TaskReportStore.CriterionStatus.PASSED, passed.status());
+        assertEquals(schema, passed.jsonSchema());
+        assertTrue(passed.verifier().startsWith("json-schema-v2:"));
+        assertThrows(IllegalArgumentException.class,
+                () -> reports.verifyJsonCriterion(session, run, criterion, good.id(), "{\"type\":\"bad\"}"));
+        assertEquals(passed, new TaskReportStore(temporary).acceptance(session, run).criteria().get(0));
+    }
+
     private static void writeUnchecked(Path file, String text) {
         try {
             Files.writeString(file, text, StandardCharsets.UTF_8);

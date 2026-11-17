@@ -287,9 +287,13 @@ h1{margin:0;font-weight:650;letter-spacing:-.045em;font-size:30px}
 .acceptance-copy strong{font-size:12px}
 .acceptance-copy small{color:var(--muted);font-size:10px;overflow-wrap:anywhere}
 .acceptance-copy code{background:#f1f2ee;padding:2px 4px;border-radius:4px}
-.acceptance-actions{display:flex;align-items:center;gap:5px;flex:none;max-width:46%}
-.acceptance-actions select{min-width:0;max-width:220px;border:1px solid var(--line);border-radius:6px;background:#fcfcfb;padding:4px 5px;font-size:11px}
-.acceptance-actions .secondary{padding:4px 7px;font-size:11px}
+.acceptance-actions{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:5px;flex:0 0 46%;max-width:46%}
+.acceptance-actions select,.acceptance-schema textarea{min-width:0;border:1px solid var(--line);border-radius:6px;background:#fcfcfb;padding:4px 5px;font-size:11px}
+.acceptance-actions .secondary{grid-column:2;padding:4px 7px;font-size:11px}
+.acceptance-schema{display:grid;grid-column:1/-1;gap:4px;color:var(--muted);font-size:10px}
+.acceptance-schema textarea{min-height:60px;resize:vertical;font-family:monospace;line-height:1.45;padding:6px}
+.acceptance-error{grid-column:1/-1;margin:0;overflow-wrap:anywhere}
+@media(max-width:620px){.acceptance-actions{flex-basis:calc(100% - 23px)}}
 .command-evidence{padding:7px 0;border-top:1px dashed #ecece7}
 .command-evidence:first-of-type{border-top:0}
 .command-evidence-head{display:flex;align-items:center;gap:7px;min-width:0}

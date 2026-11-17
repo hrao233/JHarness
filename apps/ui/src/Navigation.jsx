@@ -74,7 +74,7 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
   const [worktreeName, setWorktreeName] = useState('');
   const [worktreeReview, setWorktreeReview] = useState(null);
   const [worktreeIntegration, setWorktreeIntegration] = useState(null);
-  const [criterionCommands, setCriterionCommands] = useState({});
+  const [criterionDrafts, setCriterionDrafts] = useState({});
   const [criterionBusy, setCriterionBusy] = useState('');
   const [maintenanceStatus, setMaintenanceStatus] = useState(null);
   const [backupPreview, setBackupPreview] = useState(null);
@@ -157,9 +157,7 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
   useEffect(() => {
     if (panel !== 'reports' || !project || !session) return;
     let live = true;
-    setReports(null);
     setChangeSet(null);
-    setCriterionCommands({});
     setError('');
     api.report(project.id, session.id).then(value => {
       if (live) setReports(value);
@@ -170,8 +168,10 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
   }, [api, errorText, panel, project?.id, session?.id, revision]);
 
   useEffect(() => {
+    setReports(null);
     setChangeSet(null);
     setChangeSetNotice('');
+    setCriterionDrafts({});
   }, [panel, project?.id, session?.id]);
 
   useEffect(() => {
@@ -523,16 +523,20 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
     }
   }
 
-  async function verifyCriterion(report, criterion) {
-    const commandId = criterionCommands[criterion.id] || criterion.commandId;
+  function updateCriterionDraft(id, patch) {
+    setCriterionDrafts(previous => ({ ...previous, [id]: { ...previous[id], ...patch } }));
+  }
+
+  async function verifyCriterion(report, criterion, commandId, jsonSchema) {
     if (!project || !session || !commandId) return;
     setCriterionBusy(criterion.id);
-    setError('');
+    updateCriterionDraft(criterion.id, { error: '' });
     try {
-      await api.verifyCriterion(project.id, session.id, report.runId, criterion.id, commandId);
+      await api.verifyCriterion(
+        project.id, session.id, report.runId, criterion.id, commandId, jsonSchema);
       setRevision(value => value + 1);
     } catch (failure) {
-      setError(errorText(failure));
+      updateCriterionDraft(criterion.id, { error: errorText(failure) });
     } finally {
       setCriterionBusy('');
     }
@@ -748,7 +752,8 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
     </>}
     {panel === 'reports' && <>
       <div className="review-head"><span>{session?.title || '当前会话'}的任务报告</span>
-        <button type="button" className="secondary" onClick={() => setRevision(value => value + 1)}>
+        <button type="button" className="secondary" disabled={!!criterionBusy}
+          onClick={() => setRevision(value => value + 1)}>
           <RefreshCw size={15}/>刷新
         </button>
       </div>
@@ -788,6 +793,12 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
                 : criterion.status === 'FAILED' || criterion.status === 'UNKNOWN'
                   ? CircleX : CircleDashed;
               const command = report.commands.find(item => item.id === criterion.commandId);
+              const draft = criterionDrafts[criterion.id];
+              const commandId = draft?.commandId ?? criterion.commandId ?? '';
+              const method = draft?.method ?? (criterion.jsonSchema ? 'json' : 'exit');
+              const jsonSchema = draft?.jsonSchema ?? criterion.jsonSchema ?? '';
+              const locked = !!criterionBusy || busy;
+              const selected = report.commands.some(item => item.id === commandId);
               return <div className={'acceptance-row acceptance-' + criterion.status.toLowerCase()}
                 key={criterion.id}>
                 <Icon size={16}/>
@@ -798,26 +809,45 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
                       : criterion.status === 'UNKNOWN' ? '证据不足，尚未通过'
                         : '等待确定性证据'}</small>
                   {criterion.reason && <small>{criterion.reason}</small>}
-                  {command && <small><code>{command.command}</code></small>}
+                  {command && <small>
+                    {criterion.jsonSchema ? 'JSON Schema' : '退出码'} · <code>{command.command}</code>
+                  </small>}
                 </span>
                 <div className="acceptance-actions">
                   <select aria-label={'为“' + criterion.content + '”选择命令证据'}
-                    value={criterionCommands[criterion.id] || criterion.commandId || ''}
-                    disabled={!report.commands.length || !!criterionBusy || busy}
-                    onChange={event => setCriterionCommands(previous => ({
-                      ...previous, [criterion.id]: event.target.value
-                    }))}>
+                    value={selected ? commandId : ''}
+                    disabled={!report.commands.length || locked}
+                    onChange={event => updateCriterionDraft(criterion.id, {
+                      commandId: event.target.value, error: ''
+                    })}>
                     <option value="">选择命令</option>
                     {report.commands.map(item => <option key={item.id} value={item.id}>
                       {item.exitCode === null ? '未知' : '退出码 ' + item.exitCode}
                       {' · '}{item.command.slice(0, 60)}
                     </option>)}
                   </select>
+                  <select aria-label={'为“' + criterion.content + '”选择核验方式'}
+                    value={method} disabled={!report.commands.length || locked}
+                    onChange={event => updateCriterionDraft(criterion.id, { method: event.target.value, error: '' })}>
+                    <option value="exit">退出码为 0</option>
+                    <option value="json">JSON Schema</option>
+                  </select>
+                  {method === 'json' && <label className="acceptance-schema">
+                    <span>命令须成功退出，完整输出须为单个 JSON 值</span>
+                    <textarea aria-label={'“' + criterion.content + '”的 JSON Schema'}
+                      spellCheck={false} rows={4} maxLength={65536}
+                      placeholder={'{"required":["passed"],"properties":{"passed":{"const":true}},"type":"object"}'}
+                      value={jsonSchema} disabled={locked}
+                      onChange={event => updateCriterionDraft(criterion.id, {
+                        jsonSchema: event.target.value, error: ''
+                      })}/>
+                  </label>}
+                  {draft?.error && <p className="error-text acceptance-error" role="alert">{draft.error}</p>}
                   <button type="button" className="secondary"
-                    disabled={(!criterionCommands[criterion.id] && !criterion.commandId)
-                      || !!criterionBusy || busy}
-                    onClick={() => verifyCriterion(report, criterion)}>
-                    {criterionBusy === criterion.id ? '核验中…' : '按退出码核验'}
+                    disabled={!selected || locked || (method === 'json' && !jsonSchema.trim())}
+                    onClick={() => verifyCriterion(
+                      report, criterion, commandId, method === 'json' ? jsonSchema : undefined)}>
+                    {criterionBusy === criterion.id ? '核验中…' : '核验'}
                   </button>
                 </div>
               </div>;

@@ -416,7 +416,7 @@ public final class DurableConversation implements AutoCloseable {
                     (operation, path, before, after, denied, action) -> action.get(),
                     reports,
                     currentRun::get));
-            toolkit.registerTool(new AcceptanceCriteriaTool(reports));
+            toolkit.registerTool(new AcceptanceCriteriaTool(reports, currentRun::get));
             ConversationRuntime.registerArtifactTool(
                     toolkit, request, reports, currentRun::get);
             for (String name : CONFIRMED_TOOLS)

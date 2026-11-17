@@ -153,6 +153,12 @@ public final class Backend {
                         identifier(params, "criterionId"),
                         identifier(params, "commandId"),
                         params.path("expectedExitCode").asInt(0));
+                case "verifyJsonCriterion" -> new TaskReportStore(workspace(params)).verifyJsonCriterion(
+                        identifier(params, "sessionId"),
+                        identifier(params, "runId"),
+                        identifier(params, "criterionId"),
+                        identifier(params, "commandId"),
+                        required(params, "jsonSchema"));
                 case "steer" -> durableConversations.steer(
                         identifier(params, "runId"), required(params, "message"));
                 case "approvals" -> listApprovals(params);

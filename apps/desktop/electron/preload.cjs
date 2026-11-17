@@ -33,8 +33,8 @@ contextBridge.exposeInMainWorld('jharness', {
   retryAutomation: runId => ipcRenderer.invoke('jh:automation-retry', runId),
   cancelAutomationRun: runId => ipcRenderer.invoke('jh:automation-cancel', runId),
   report: (project, session) => ipcRenderer.invoke('jh:report', project, session),
-  verifyCriterion: (project, session, runId, criterionId, commandId) =>
-    ipcRenderer.invoke('jh:verify-criterion', project, session, runId, criterionId, commandId),
+  verifyCriterion: (project, session, runId, criterionId, commandId, jsonSchema) =>
+    ipcRenderer.invoke('jh:verify-criterion', project, session, runId, criterionId, commandId, jsonSchema),
   openArtifact: (project, session, id) => ipcRenderer.invoke('jh:open-artifact', project, session, id),
   exportSession: (project, session, format, title) =>
     ipcRenderer.invoke('jh:export-session', project, session, format, title),

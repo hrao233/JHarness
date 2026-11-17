@@ -17,9 +17,10 @@ package io.agentscope.harness.agent.verification;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.networknt.schema.InputFormat;
 import com.networknt.schema.Schema;
+import com.networknt.schema.SchemaLocation;
 import com.networknt.schema.SchemaRegistry;
 import com.networknt.schema.SpecificationVersion;
 import io.agentscope.core.message.TextBlock;
@@ -33,30 +34,55 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /** Explicit output-contract check; never infers a schema from a natural-language criterion. */
 public final class JsonResultSchemaVerifier implements DeterministicVerifier {
-    private final String schemaJson;
     private final String id;
     private final Schema schema;
     private static final ObjectMapper JSON =
-            new ObjectMapper().enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+            new ObjectMapper()
+                    .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                    .enable(DeserializationFeature.FAIL_ON_READING_DUP_TREE_KEY)
+                    .enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
+    private static final SchemaRegistry SCHEMAS =
+            SchemaRegistry.withDefaultDialect(SpecificationVersion.DRAFT_2020_12);
+    private static final Set<String> DISALLOWED_KEYS =
+            Set.of("$ref", "$dynamicRef", "$recursiveRef", "$schema", "$id");
 
     public JsonResultSchemaVerifier(Map<String, Object> schema) {
-        if (schema == null || schema.isEmpty())
+        this(JsonUtils.getJsonCodec().toJson(schema));
+    }
+
+    /** Compile a user-supplied schema from its original JSON text. */
+    public static JsonResultSchemaVerifier fromJson(String schemaJson) {
+        return new JsonResultSchemaVerifier(schemaJson);
+    }
+
+    private JsonResultSchemaVerifier(String schemaJson) {
+        if (schemaJson == null || schemaJson.isBlank())
             throw new IllegalArgumentException("Explicit schema required");
-        schemaJson = JsonUtils.getJsonCodec().toJson(schema);
         if (schemaJson.length() > 65536) throw new IllegalArgumentException("Schema too large");
-        rejectReferences(schema);
-        this.schema =
-                SchemaRegistry.withDefaultDialect(SpecificationVersion.DRAFT_2020_12)
-                        .getSchema(schemaJson);
+        JsonNode definition;
+        try {
+            definition = JSON.readTree(schemaJson);
+        } catch (JsonProcessingException error) {
+            throw new IllegalArgumentException("Expected a single JSON schema object", error);
+        }
+        if (definition == null || !definition.isObject() || definition.isEmpty())
+            throw new IllegalArgumentException("Explicit schema object required");
+        rejectReferences(definition);
+        var metaSchema = SCHEMAS.getSchema(
+                SchemaLocation.of(SpecificationVersion.DRAFT_2020_12.getDialectId()));
+        if (!metaSchema.validate(definition).isEmpty())
+            throw new IllegalArgumentException("Invalid Draft 2020-12 JSON Schema");
+        schema = SCHEMAS.getSchema(definition);
+        schema.initializeValidators();
         try {
             id =
-                    "json-schema-v1:"
+                    "json-schema-v2:"
                             + HexFormat.of()
                                     .formatHex(
                                             MessageDigest.getInstance("SHA-256")
@@ -94,17 +120,24 @@ public final class JsonResultSchemaVerifier implements DeterministicVerifier {
                                 != ToolExecutionDetails.Outcome.SUCCEEDED)) {
             return new Verdict(Outcome.UNKNOWN, "Producer outcome is incomplete or unsuccessful");
         }
-        if (text.getText() == null || text.getText().length() > 262144) {
+        return verifySuccessfulOutput(text.getText());
+    }
+
+    /** Verify raw output after the caller establishes the producer succeeded and output is complete. */
+    public Verdict verifySuccessfulOutput(String output) {
+        if (output == null || output.length() > 262144) {
             return new Verdict(
                     Outcome.UNKNOWN, "Output is absent or exceeds the bounded schema-check size");
         }
+        JsonNode value;
         try {
-            if (JSON.readTree(text.getText()) == null)
+            value = JSON.readTree(output);
+            if (value == null || value.isMissingNode())
                 return new Verdict(Outcome.FAILED, "JSON output is empty");
         } catch (JsonProcessingException error) {
             return new Verdict(Outcome.FAILED, "Output is not a single valid JSON value");
         }
-        return schema.validate(text.getText(), InputFormat.JSON).isEmpty()
+        return schema.validate(value).isEmpty()
                 ? new Verdict(
                         Outcome.PASSED, "Selected JSON output conforms to the configured schema")
                 : new Verdict(
@@ -112,19 +145,18 @@ public final class JsonResultSchemaVerifier implements DeterministicVerifier {
                         "Selected output does not conform to the configured JSON schema");
     }
 
-    private static void rejectReferences(Object value) {
-        if (value instanceof Map<?, ?> map) {
-            for (var entry : map.entrySet()) {
-                if (List.of("$ref", "$dynamicRef", "$recursiveRef", "$schema", "$id")
-                        .contains(entry.getKey())) {
+    private static void rejectReferences(JsonNode value) {
+        if (value.isObject()) {
+            for (var entry : value.properties()) {
+                if (DISALLOWED_KEYS.contains(entry.getKey())) {
                     throw new IllegalArgumentException(
                             "Referenced schemas and dialect overrides are not supported by this"
                                     + " bounded offline verifier");
                 }
                 rejectReferences(entry.getValue());
             }
-        } else if (value instanceof List<?> list) {
-            list.forEach(JsonResultSchemaVerifier::rejectReferences);
+        } else if (value.isArray()) {
+            value.forEach(JsonResultSchemaVerifier::rejectReferences);
         }
     }
 }

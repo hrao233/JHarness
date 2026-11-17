@@ -557,7 +557,10 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
 
     const durableCommandContext = { ...context, sessionId: randomUUID() };
     const durableCommandSteps = steps;
-    steps = [['run_command', { command: "Write-Output 'DURABLE-COMMAND-9'" }]];
+    steps = [
+      ['run_command', { command: 'Write-Output \'{"check":"DURABLE-COMMAND-9","passed":true}\'' }],
+      ['acceptance_write', { criteria: ['检查结果的 passed 字段为 true'] }],
+    ];
     const durableCommandRun = randomUUID();
     await call('chat', { ...durableCommandContext, ...model, runId: durableCommandRun,
       permission: 'durable', message: '在可续跑任务中运行命令' });
@@ -576,6 +579,14 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     assert.equal(durableCommandReport.commands.length, 1);
     assert.equal(durableCommandReport.commands[0].exitCode, 0);
     assert.match(durableCommandReport.commands[0].output, /DURABLE-COMMAND-9/);
+    const jsonSchema = '{"type":"object","required":["passed"],"properties":{"passed":{"const":true}}}';
+    const jsonVerified = await call('verifyJsonCriterion', {
+      ...durableCommandContext, runId: durableCommandResume, jsonSchema,
+      criterionId: durableCommandReport.acceptance.criteria[0].id, commandId: durableCommandReport.commands[0].id,
+    });
+    assert.equal(jsonVerified.status, 'PASSED');
+    const refreshed = (await call('taskReport', durableCommandContext)).find(item => item.runId === durableCommandResume);
+    assert.deepEqual(refreshed.acceptance.criteria[0], jsonVerified);
     steps = durableCommandSteps;
 
     const cancelContext = { ...context, sessionId: randomUUID() };

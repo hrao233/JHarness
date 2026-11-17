@@ -521,10 +521,12 @@ function register() {
     call('changeSets', { ...context(projectId, sessionId), runId }));
   ipcMain.handle('jh:report', (_, projectId, sessionId) =>
     call('taskReport', context(projectId, sessionId)));
-  ipcMain.handle('jh:verify-criterion', (_, projectId, sessionId, runId, criterionId, commandId) =>
-    call('verifyCriterion', {
-      ...context(projectId, sessionId), runId, criterionId, commandId, expectedExitCode: 0
-    }));
+  ipcMain.handle('jh:verify-criterion', (_, projectId, sessionId, runId, criterionId, commandId, jsonSchema) => {
+    const evidence = { ...context(projectId, sessionId), runId, criterionId, commandId };
+    return jsonSchema == null
+      ? call('verifyCriterion', { ...evidence, expectedExitCode: 0 })
+      : call('verifyJsonCriterion', { ...evidence, jsonSchema });
+  });
   ipcMain.handle('jh:open-artifact', async (_, projectId, sessionId, artifactId) => {
     const selected = context(projectId, sessionId);
     const artifact = await call('taskArtifact', { ...selected, artifactId });

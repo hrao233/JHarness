@@ -3,6 +3,7 @@ package local.jharness.agent;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.harness.agent.artifact.ArtifactDeliveryRequest;
 import io.agentscope.harness.agent.artifact.ArtifactDeliveryResult;
+import io.agentscope.harness.agent.verification.JsonResultSchemaVerifier;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
@@ -60,7 +61,8 @@ public final class TaskReportStore {
             int expectedExitCode,
             String verifier,
             long verifiedAt,
-            String reason) {}
+            String reason,
+            String jsonSchema) {}
 
     public record Acceptance(
             String sessionId,
@@ -159,7 +161,8 @@ public final class TaskReportStore {
                         0,
                         "",
                         0,
-                        ""));
+                        "",
+                        null));
             }
             var acceptance = new Acceptance(
                     session,
@@ -182,12 +185,35 @@ public final class TaskReportStore {
             String criterionId,
             String commandId,
             int expectedExitCode) {
+        if (expectedExitCode < 0 || expectedExitCode > 255)
+            throw new IllegalArgumentException("期望退出码必须在 0 到 255 之间。");
+        return verifyCriterion(sessionId, runId, criterionId, commandId, expectedExitCode, null);
+    }
+
+    public AcceptanceCriterion verifyJsonCriterion(
+            String sessionId, String runId, String criterionId, String commandId, String jsonSchema) {
+        if (jsonSchema == null || jsonSchema.isBlank())
+            throw new IllegalArgumentException("请填写 JSON Schema。");
+        return verifyCriterion(sessionId, runId, criterionId, commandId, 0, jsonSchema.strip());
+    }
+
+    private AcceptanceCriterion verifyCriterion(
+            String sessionId, String runId, String criterionId, String commandId,
+            int expectedExitCode, String jsonSchema) {
         String session = segment(sessionId, "会话");
         String run = segment(runId, "任务");
         segment(criterionId, "验收标准");
         segment(commandId, "命令证据");
-        if (expectedExitCode < 0 || expectedExitCode > 255)
-            throw new IllegalArgumentException("期望退出码必须在 0 到 255 之间。");
+        JsonResultSchemaVerifier jsonVerifier = null;
+        if (jsonSchema != null) {
+            try {
+                jsonVerifier = JsonResultSchemaVerifier.fromJson(jsonSchema);
+            } catch (RuntimeException error) {
+                throw new IllegalArgumentException(
+                        "JSON Schema 无效。请填写 65,536 字符以内的 Draft 2020-12 对象，省略引用和版本声明。",
+                        error);
+            }
+        }
         synchronized (lock) {
             Acceptance current = readAcceptance(session, run);
             if (current == null) throw new IllegalArgumentException("此运行还没有验收标准。");
@@ -196,10 +222,13 @@ public final class TaskReportStore {
                     .findFirst()
                     .orElseThrow(() -> new IllegalArgumentException("找不到验收标准。"));
             CommandEvidence command = commands(session, run).stream()
-                    .filter(item -> item.id().equals(commandId))
+                    .filter(item -> commandId.equals(item.id())
+                            && session.equals(item.sessionId()) && run.equals(item.runId()))
                     .findFirst()
                     .orElseThrow(() -> new IllegalArgumentException("找不到同一运行中的命令证据。"));
-            AcceptanceCriterion verified = verify(criterion, command, expectedExitCode);
+            AcceptanceCriterion verified = jsonVerifier == null
+                    ? verifyExitCode(criterion, command, expectedExitCode)
+                    : verifyJson(criterion, command, jsonVerifier, jsonSchema);
             var updated = new ArrayList<>(current.criteria());
             for (int i = 0; i < updated.size(); i++) {
                 if (updated.get(i).id().equals(criterionId)) {
@@ -242,7 +271,7 @@ public final class TaskReportStore {
                 Math.max(0, finishedAt - startedAt),
                 exitCode,
                 parsed,
-                outputTruncated,
+                outputTruncated || (output != null && output.length() > MAX_COMMAND_OUTPUT),
                 bounded(output, MAX_COMMAND_OUTPUT));
         synchronized (lock) {
             write(commandDirectory(session, run).resolve(evidence.id() + ".json"), evidence);
@@ -467,7 +496,7 @@ public final class TaskReportStore {
         return List.copyOf(result);
     }
 
-    private static AcceptanceCriterion verify(
+    private static AcceptanceCriterion verifyExitCode(
             AcceptanceCriterion criterion,
             CommandEvidence command,
             int expectedExitCode) {
@@ -493,6 +522,34 @@ public final class TaskReportStore {
                 verifier, now, "命令返回期望退出码；此结论不覆盖其他语义验收。");
     }
 
+    private static AcceptanceCriterion verifyJson(
+            AcceptanceCriterion criterion, CommandEvidence command,
+            JsonResultSchemaVerifier verifier, String jsonSchema) {
+        CriterionStatus status = CriterionStatus.UNKNOWN;
+        String reason = "需要一次退出码为 0 且输出完整的成功命令。";
+        String output = command.output();
+        String prefix = "退出码 0\n";
+        // Older receipts lost the truncation flag when the report itself shortened the output.
+        if (!command.outputTruncated() && Integer.valueOf(0).equals(command.exitCode())
+                && command.outcome() == CommandOutcome.SUCCEEDED && output != null
+                && output.length() < MAX_COMMAND_OUTPUT && output.startsWith(prefix)) {
+            var verdict = verifier.verifySuccessfulOutput(output.substring(prefix.length()));
+            switch (verdict.outcome()) {
+                case PASSED -> {
+                    status = CriterionStatus.PASSED;
+                    reason = "命令输出符合 JSON Schema。";
+                }
+                case FAILED -> {
+                    status = CriterionStatus.FAILED;
+                    reason = "命令输出无效或不符合 JSON Schema。";
+                }
+                default -> reason = "命令未提供可核验的 JSON 输出。";
+            }
+        }
+        return new AcceptanceCriterion(criterion.id(), criterion.content(), status, command.id(),
+                0, verifier.id(), System.currentTimeMillis(), reason, jsonSchema);
+    }
+
     private static AcceptanceCriterion result(
             AcceptanceCriterion criterion,
             CriterionStatus status,
@@ -509,7 +566,8 @@ public final class TaskReportStore {
                 expectedExitCode,
                 verifier,
                 verifiedAt,
-                reason);
+                reason,
+                null);
     }
 
     private static CommandOutcome parseOutcome(String value) {

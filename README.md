@@ -36,7 +36,7 @@ $env:JHARNESS_BASE_URL = "https://api.openai.com/v1"
 npm run cli -- run "读取 README 并总结项目结构" --project D:\path\to\project --permission ask
 ```
 
-CLI 会读取桌面 `settings.json`，复用已有项目 ID 和最新/指定会话；新会话会写回桌面设置。Windows 包内提供 `release/win-unpacked/jharness-cli.cmd`。支持 `--json` NDJSON 事件、`ask/assist/full/durable` 审批模式和 `doctor` 诊断。
+CLI 和桌面共用 `settings.json`，并发登记会话时保留每次写入。首次打开旧 CLI 项目时会沿用已登记的项目和会话 ID。`doctor` 在临时目录启动 Java 后端并检查 ping 回复，诊断不会创建项目或会话。Windows 包内提供 `release/win-unpacked/jharness-cli.cmd`。支持 `--json` NDJSON 事件、`ask/assist/full/durable` 审批模式和 `doctor` 诊断。
 
 左侧「数据与运维」显示本地项目、会话、文件和数据量，可打开数据目录、创建完整备份、预检备份并恢复。备份包含桌面设置和全部项目 workspace，排除隔离工作树与可重建搜索索引；每个文件带 SHA-256，恢复前会校验并自动创建当前数据的安全快照。
 
@@ -64,7 +64,7 @@ Agent 可以浏览目录、按名称查找、读取、编辑和新建项目内�
 
 ## 开发
 
-需要 Windows x64、JDK 17+、Maven 和 Node.js。根目录的 `pom.xml` 是唯一的 Java 构建入口，所有运行时模块都在本仓库内构建，不需要预先安装 AgentScope Maven 构件。
+需要 Windows x64、JDK 17+、Maven 和 Node.js 22.13 或更高版本。根目录的 `pom.xml` 是唯一的 Java 构建入口，所有运行时模块都在本仓库内构建，不需要预先安装 AgentScope Maven 构件。
 
 ```text
 libs/agent-core/        ReAct、消息、事件、工具、中间件、权限与状态

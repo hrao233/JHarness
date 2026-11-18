@@ -106,10 +106,40 @@ test('CLI reuses the desktop project and session runtime', { timeout: 45000 }, a
     assert.equal(status.projectId, projectId);
     assert.equal(status.sessionId, sessionId);
     assert.equal(status.identitySource, 'desktop');
+    assert.equal(status.backendVersion, '0.1.0');
     assert.equal(status.modelConfigured, true);
+
+    const batch = await Promise.all(Array.from({ length: 8 }, (_, index) => executeCli(
+      ['run', 'Read the marker ' + index, '--project', project, '--new-session', '--permission', 'full'], env)));
+    for (const result of batch) assert.equal(result.code, 0, result.stdout + result.stderr);
+    const after = JSON.parse(await readFile(path.join(data, 'settings.json'), 'utf8'));
+    const ids = new Set(after.projects[0].sessions.map(session => session.id));
+    assert.equal(ids.size, 9);
+    assert.ok(ids.has(sessionId));
   } finally {
     server.closeAllConnections();
     server.close();
+    await rm(temporary, { recursive: true, force: true, maxRetries: 5 });
+  }
+});
+
+test('doctor probes Java and the JAR without registering sessions', async () => {
+  const temporary = await mkdtemp(path.join(tmpdir(), 'jharness-doctor-test-'));
+  const data = path.join(temporary, 'absent');
+  const args = ['doctor', '--project', temporary, '--new-session'];
+  const env = { JHARNESS_DATA_DIR: data, JHARNESS_BACKEND_JAR: jar, JHARNESS_JAVA: bundledJava };
+  try {
+    const ok = await executeCli(args, env);
+    assert.equal(ok.code, 0, ok.stderr);
+    assert.equal(JSON.parse(ok.stdout).sessionId, null);
+    const missing = await executeCli(args, { ...env, JHARNESS_JAVA: path.join(temporary, 'missing.exe') });
+    assert.equal(missing.code, 1);
+    const damaged = path.join(temporary, 'broken.jar');
+    await writeFile(damaged, 'invalid');
+    const broken = await executeCli(args, { ...env, JHARNESS_BACKEND_JAR: damaged });
+    assert.equal(broken.code, 1);
+    assert.equal(existsSync(data), false);
+  } finally {
     await rm(temporary, { recursive: true, force: true, maxRetries: 5 });
   }
 });

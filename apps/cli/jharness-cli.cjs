@@ -8,6 +8,8 @@ const path = require('node:path');
 const readline = require('node:readline');
 const readlinePromises = require('node:readline/promises');
 
+const { readSettings, updateSettings, findProject, legacyProject, addProject } = require('../shared/settings-store.cjs');
+
 const ROOT = path.resolve(__dirname, '..', '..');
 const VERSION = '0.1.0';
 const ID = /^[a-f0-9-]{36}$/;
@@ -87,98 +89,36 @@ function parse(argv) {
   return options;
 }
 
-async function readJson(file, fallback) {
-  try {
-    return JSON.parse(await fs.readFile(file, 'utf8'));
-  } catch (error) {
-    if (error.code === 'ENOENT') return fallback;
-    throw new Error('无法读取 ' + file + '：' + error.message);
-  }
-}
-
-async function writeJson(file, value) {
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  const temporary = file + '.' + process.pid + '.tmp';
-  await fs.writeFile(temporary, JSON.stringify(value, null, 2) + '\n', 'utf8');
-  await fs.rename(temporary, file);
-}
-
-async function findDesktopProject(projects, project) {
-  const key = value => process.platform === 'win32' ? value.toLowerCase() : value;
-  const expected = key(project);
-  for (const item of Array.isArray(projects) ? projects : []) {
-    if (typeof item?.directory !== 'string') continue;
-    const directory = path.resolve(item.directory);
-    if (key(directory) === expected) return item;
-    // A saved project can use a directory junction or a Windows short path.
-    const resolved = await fs.realpath(directory).catch(() => null);
-    if (resolved && key(resolved) === expected) return item;
-  }
-  return null;
-}
-
-async function identity(options, dataDirectory) {
+async function identity(options, dataDirectory, readOnly = false) {
   const project = await fs.realpath(path.resolve(options.project));
-  const stat = await fs.stat(project);
-  if (!stat.isDirectory()) throw new Error('项目路径不是目录。');
-  const settingsFile = path.join(dataDirectory, 'settings.json');
-  const settings = await readJson(settingsFile, { projects: [] });
-  const desktop = await findDesktopProject(settings.projects, project);
-  if (desktop) {
-    const sessions = Array.isArray(desktop.sessions) ? desktop.sessions : [];
-    const selected = options.session
-      ? sessions.find(item => item.id === options.session)
-      : options.newSession
-        ? null
-        : sessions.slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0];
-    if (options.session && !selected) throw new Error('桌面项目中没有这个会话。');
-    const sessionId = selected?.id || randomUUID();
-    if (!selected) {
-      desktop.sessions = sessions;
-      desktop.sessions.unshift({
-        id: sessionId,
-        title: 'CLI 会话',
-        permission: options.permission,
-        updatedAt: Date.now()
-      });
-      await writeJson(settingsFile, settings);
+  if (!(await fs.stat(project)).isDirectory()) throw new Error('项目路径不是目录。');
+  function select(settings) {
+    let entry = findProject(settings, project);
+    const source = entry ? 'desktop' : 'cli';
+    const legacy = !entry || options.session ? legacyProject(dataDirectory, project) : null;
+    if (!entry && readOnly) {
+      return { project, projectId: legacy?.projectId || null,
+        sessionId: legacy && options.session ? options.session : (options.newSession ? null : legacy?.sessionId) || null, source };
     }
-    return {
-      project,
-      projectId: desktop.id,
-      sessionId,
-      source: 'desktop',
-      existing: Boolean(selected)
-    };
+    if (!entry) {
+      entry = addProject(settings, project, legacy);
+      entry.cliCreated = true;
+    }
+    const sessions = entry.sessions || [];
+    const selected = options.session ? sessions.find(item => item.id === options.session)
+      : options.newSession ? null : sessions.slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0];
+    if (options.session && !selected && !entry.cliCreated && legacy?.projectId !== entry.id) {
+      throw new Error('桌面项目中没有这个会话。');
+    }
+    let sessionId = selected?.id || null;
+    if (!sessionId && !readOnly) {
+      sessionId = options.session || randomUUID();
+      entry.sessions = sessions;
+      sessions.unshift({ id: sessionId, title: 'CLI 会话', permission: options.permission, updatedAt: Date.now() });
+    }
+    return { project, projectId: entry.id, sessionId, source };
   }
-
-  const stateFile = path.join(dataDirectory, 'cli-projects.json');
-  const state = await readJson(stateFile, { version: 1, projects: {} });
-  if (!state.projects || typeof state.projects !== 'object') state.projects = {};
-  const key = project.toLowerCase();
-  let saved = state.projects[key];
-  if (!saved) {
-    saved = { projectId: randomUUID(), sessionId: randomUUID() };
-    state.projects[key] = saved;
-    await writeJson(stateFile, state);
-  }
-  const sessionId = options.session
-    ? options.session
-    : options.newSession
-      ? randomUUID()
-      : saved.sessionId;
-  if (options.newSession) {
-    saved.sessionId = sessionId;
-    state.projects[key] = saved;
-    await writeJson(stateFile, state);
-  }
-  return {
-    project,
-    projectId: saved.projectId,
-    sessionId,
-    source: 'cli',
-    existing: !options.newSession
-  };
+  return readOnly ? select(readSettings(dataDirectory)) : updateSettings(dataDirectory, select);
 }
 
 function runtime(options, dataDirectory) {
@@ -220,6 +160,8 @@ class Backend {
     this.child = spawn(runtimeConfig.java,
       ['-Dfile.encoding=UTF-8', '-jar', runtimeConfig.jar, runtimeConfig.workspace],
       { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    this.child.stdin.on('error', error => this.fail(error.message));
+    this.stopped = new Promise(resolve => this.child.once('close', resolve));
     this.pending = new Map();
     this.events = [];
     this.listeners = new Set();
@@ -280,19 +222,16 @@ class Backend {
     if (this.closed) return;
     this.closed = true;
     this.child.stdin.end();
-    await Promise.race([
-      new Promise(resolve => this.child.once('exit', resolve)),
-      new Promise(resolve => setTimeout(resolve, 1800))
-    ]);
-    if (this.child.exitCode === null) this.child.kill();
+    const timer = setTimeout(() => this.child.kill(), 1800);
+    try { await this.stopped; } finally { clearTimeout(timer); }
   }
 }
 
 async function run(options, dataDirectory) {
   const message = options.message.join(' ').trim();
   if (!message) throw new Error('请提供任务内容。');
-  const selected = await identity(options, dataDirectory);
   const model = modelOptions(options);
+  const selected = await identity(options, dataDirectory);
   const backend = new Backend(runtime(options, dataDirectory));
   const runId = randomUUID();
   let text = '';
@@ -385,9 +324,21 @@ function errorLine(message) {
 }
 
 async function doctor(options, dataDirectory) {
-  const selected = await identity(options, dataDirectory);
+  const selected = await identity(options, dataDirectory, true);
   const runtimeOptions = runtime(options, dataDirectory);
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'jharness-doctor-'));
+  let backend;
+  let ping;
+  try {
+    backend = new Backend({ ...runtimeOptions, workspace });
+    ping = await backend.call('ping');
+    if (!ping?.version) throw new Error('后端 ping 回复缺少版本。');
+  } finally {
+    await backend?.close();
+    await fs.rm(workspace, { recursive: true, force: true, maxRetries: 5 });
+  }
   console.log(JSON.stringify({
+    backendVersion: ping.version,
     version: VERSION,
     project: selected.project,
     projectId: selected.projectId,

@@ -9,6 +9,7 @@ const MAX_BYTES = 2 * 1024 * 1024 * 1024;
 
 function excluded(name) {
   return name === 'worktrees'
+    || name === 'settings-lock.sqlite'
     || name === 'session-search.sqlite'
     || name.startsWith('session-search.sqlite-')
     || name.endsWith('.tmp');

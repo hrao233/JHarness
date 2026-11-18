@@ -3,19 +3,20 @@ const { execFile, spawn } = require('node:child_process');
 const { promisify } = require('node:util');
 const { randomUUID } = require('node:crypto');
 const { createInterface } = require('node:readline');
-const { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } = require('node:fs');
+const { existsSync, mkdirSync, writeFileSync } = require('node:fs');
 const path = require('node:path');
 const { importAttachment, projectParts, label } = require('./context-parts.cjs');
 const { createManager } = require('./worktree-manager.cjs');
 const maintenance = require('./data-maintenance.cjs');
 const { createStore: createAutomationStore } = require('./automation-store.cjs');
+const { readSettings, updateSettings, findProject, legacyProject, addProject } = require(
+  app.isPackaged ? '../shared/settings-store.cjs' : '../../shared/settings-store.cjs');
 const git = promisify(execFile);
 
 let win;
 let backend;
 const activeRuns = new Set();
-let settings;
-let settingsFile;
+let dataDirectory;
 let quitting = false;
 let bookmarkMigration;
 let worktreeManager;
@@ -53,10 +54,28 @@ function resolveEffort(profile, selected) {
   return levels.includes('high') ? 'high' : levels[0];
 }
 
-function persist() {
-  const temporary = settingsFile + '.tmp';
-  writeFileSync(temporary, JSON.stringify(settings, null, 2), 'utf8');
-  renameSync(temporary, settingsFile);
+function settings() {
+  return readSettings(dataDirectory);
+}
+
+function changeSettings(change) {
+  return updateSettings(dataDirectory, change);
+}
+
+function changeProject(id, change) {
+  return changeSettings(state => {
+    const project = state.projects.find(item => item.id === id);
+    if (!project) throw new Error('找不到项目。');
+    return change(project);
+  });
+}
+
+function changeSession(projectId, sessionId, change) {
+  return changeProject(projectId, project => {
+    const session = project.sessions.find(item => item.id === sessionId);
+    if (!session) throw new Error('找不到此会话。');
+    return change(session);
+  });
 }
 
 function startBackend(directory) {
@@ -117,25 +136,19 @@ function call(method, params = {}) {
 }
 
 function publicSettings() {
-  const models = settings.models.map(({ encryptedKey, ...model }) => ({
+  const state = settings();
+  const models = state.models.map(({ encryptedKey, ...model }) => ({
     ...model, fastTier: fastTier(model), effortLevels: effortLevels(model), initialEffort: resolveEffort(model),
     hasKey: Boolean(encryptedKey)
   }));
-  return { projects: settings.projects, models, defaultModelId: settings.defaultModelId };
+  return { projects: state.projects, models, defaultModelId: state.defaultModelId };
 }
 
 function migrateBookmarks() {
-  if (!settings.bookmarks?.length) return Promise.resolve();
+  if (!settings().bookmarks?.length) return Promise.resolve();
   if (!bookmarkMigration) {
-    bookmarkMigration = call('importBookmarks', { bookmarks: settings.bookmarks }).then(() => {
-      const previous = settings.bookmarks;
-      delete settings.bookmarks;
-      try {
-        persist();
-      } catch (error) {
-        settings.bookmarks = previous;
-        throw error;
-      }
+    bookmarkMigration = call('importBookmarks', { bookmarks: settings().bookmarks }).then(() => {
+      changeSettings(state => { delete state.bookmarks; });
     }).finally(() => { bookmarkMigration = undefined; });
   }
   return bookmarkMigration;
@@ -145,7 +158,7 @@ function modelInput(input) {
   const provider = input.provider === 'deepseek' ? 'deepseek' : 'compatible';
   const model = String(input.model || (provider === 'deepseek' ? 'deepseek-flash' : '')).trim();
   const baseUrl = provider === 'deepseek' ? 'https://api.deepseek.com' : String(input.baseUrl || '').trim();
-  const saved = settings.models.find(item => item.id === input.id && item.provider === provider
+  const saved = settings().models.find(item => item.id === input.id && item.provider === provider
     && item.baseUrl === baseUrl);
   const key = String(input.key || '').trim() || (saved?.encryptedKey
     ? safeStorage.decryptString(Buffer.from(saved.encryptedKey, 'base64')) : '');
@@ -166,13 +179,13 @@ function modelInput(input) {
 }
 
 function context(projectId, sessionId) {
-  const project = settings.projects.find(item => item.id === projectId);
+  const project = settings().projects.find(item => item.id === projectId);
   if (!project || !project.sessions.some(item => item.id === sessionId)) throw new Error('找不到此会话。');
   return { projectId, sessionId, projectPath: project.directory };
 }
 
 function taskSessions() {
-  return settings.projects.flatMap(project => project.sessions.map(session => ({
+  return settings().projects.flatMap(project => project.sessions.map(session => ({
     projectId: project.id,
     sessionId: session.id,
     projectName: project.name,
@@ -181,7 +194,8 @@ function taskSessions() {
 }
 
 function conversationModel(options) {
-  const profile = settings.models.find(item => item.id === (options.modelId || settings.defaultModelId));
+  const state = settings();
+  const profile = state.models.find(item => item.id === (options.modelId || state.defaultModelId));
   if (!profile) throw new Error('请先在设置中添加模型。');
   const model = modelInput(profile);
   const effort = resolveEffort(model, options.effort);
@@ -209,7 +223,7 @@ async function observeAutomationEvent(message) {
 }
 
 async function launchAutomationRun(run) {
-  const project = settings.projects.find(item => item.id === run.projectId);
+  const project = settings().projects.find(item => item.id === run.projectId);
   const session = project?.sessions.find(item => item.id === run.sessionId);
   if (!project || !session) throw new Error('自动任务对应的项目或会话已被删除。');
   await automationStore.markRunning(run.runId);
@@ -229,8 +243,7 @@ async function launchAutomationRun(run) {
       autoMemory: project.autoMemory === true,
       serviceTier: fast ? model.fastTier : ''
     });
-    session.updatedAt = Date.now();
-    persist();
+    changeSession(project.id, session.id, current => { current.updatedAt = Date.now(); });
     return true;
   } catch (error) {
     activeRuns.delete(run.runId);
@@ -267,7 +280,7 @@ async function initializeAutomations() {
 function register() {
   ipcMain.handle('jh:state', () => publicSettings());
   ipcMain.handle('jh:memory', (_, projectId, operation, input = {}) => {
-    const project = settings.projects.find(item => item.id === projectId);
+    const project = settings().projects.find(item => item.id === projectId);
     if (!project) throw new Error('找不到项目。');
     if (operation === 'list') return call('memoryList', { projectId });
     if (operation === 'read') return call('memoryRead', { projectId, name: input.name, archive: input.archive === true });
@@ -275,9 +288,10 @@ function register() {
     if (activeRuns.size) throw new Error('请在当前任务结束后修改记忆设置。');
     if (operation === 'update') return call('memoryUpdate', { projectId, text: input.text, expected: input.expected });
     if (operation === 'auto') {
-      project.autoMemory = input.enabled === true;
-      persist();
-      return project.autoMemory;
+      return changeProject(projectId, current => {
+        current.autoMemory = input.enabled === true;
+        return current.autoMemory;
+      });
     }
     throw new Error('未知的记忆操作。');
   });
@@ -300,14 +314,14 @@ function register() {
   });
   ipcMain.handle('jh:search-sessions', (_, query) => {
     if (typeof query !== 'string' || !query.trim() || query.length > 160) return [];
-    const sessions = settings.projects.flatMap(project => project.sessions.map(session => ({
+    const sessions = settings().projects.flatMap(project => project.sessions.map(session => ({
       projectId: project.id, sessionId: session.id, projectName: project.name, title: session.title,
       updatedAt: session.updatedAt || 0
     }))).sort((a, b) => b.updatedAt - a.updatedAt);
     return call('searchSessions', { query, sessions });
   });
   ipcMain.handle('jh:git-review', async (_, projectId) => {
-    const project = settings.projects.find(item => item.id === projectId);
+    const project = settings().projects.find(item => item.id === projectId);
     if (!project) throw new Error('请先打开 Git 项目。');
     const options = { cwd: project.directory, windowsHide: true, encoding: 'utf8',
       maxBuffer: 1024 * 1024, timeout: 12000, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } };
@@ -328,7 +342,7 @@ function register() {
     }
   });
   ipcMain.handle('jh:worktree-create', async (_, projectId, requestedName = '') => {
-    const parent = settings.projects.find(item => item.id === projectId);
+    const parent = settings().projects.find(item => item.id === projectId);
     if (!parent) throw new Error('找不到项目。');
     if (parent.worktree) throw new Error('不能从隔离工作树继续创建嵌套工作树。');
     const created = await managedWorktrees().create({
@@ -346,48 +360,39 @@ function register() {
         parentProjectName: parent.name
       }
     };
-    settings.projects.unshift(project);
     try {
-      persist();
+      changeSettings(state => state.projects.unshift(project));
     } catch (error) {
-      settings.projects.shift();
       await managedWorktrees().remove(created, { force: true }).catch(() => {});
       throw error;
     }
     return project;
   });
   ipcMain.handle('jh:worktree-status', async (_, projectId) => {
-    const project = settings.projects.find(item => item.id === projectId);
+    const project = settings().projects.find(item => item.id === projectId);
     if (!project) throw new Error('找不到项目。');
     return project.worktree
       ? managedWorktrees().status(project.worktree)
       : managedWorktrees().source(project.directory);
   });
   ipcMain.handle('jh:worktree-review', async (_, projectId) => {
-    const project = settings.projects.find(item => item.id === projectId);
+    const project = settings().projects.find(item => item.id === projectId);
     if (!project?.worktree) throw new Error('当前项目不是隔离工作树。');
     return managedWorktrees().review(project.worktree);
   });
   ipcMain.handle('jh:worktree-integrate', async (_, projectId) => {
-    const project = settings.projects.find(item => item.id === projectId);
+    const project = settings().projects.find(item => item.id === projectId);
     if (!project?.worktree) throw new Error('当前项目不是隔离工作树。');
-    const parent = settings.projects.find(item => item.id === project.worktree.parentProjectId);
+    const parent = settings().projects.find(item => item.id === project.worktree.parentProjectId);
     if (!parent || parent.worktree) throw new Error('找不到工作树的来源项目。');
     return managedWorktrees().integrate(project.worktree, parent.directory);
   });
   ipcMain.handle('jh:worktree-remove', async (_, projectId, force = false) => {
-    const index = settings.projects.findIndex(item => item.id === projectId);
-    const project = settings.projects[index];
+    const project = settings().projects.find(item => item.id === projectId);
     if (!project) throw new Error('找不到项目。');
     if (!project.worktree) throw new Error('当前项目不是隔离工作树。');
     await managedWorktrees().remove(project.worktree, { force: force === true });
-    settings.projects.splice(index, 1);
-    try {
-      persist();
-    } catch (error) {
-      settings.projects.splice(index, 0, project);
-      throw error;
-    }
+    changeSettings(state => { state.projects = state.projects.filter(item => item.id !== projectId); });
     return true;
   });
   ipcMain.handle('jh:maintenance-status', () => maintenance.status(app.getPath('userData')));
@@ -423,7 +428,7 @@ function register() {
   });
   ipcMain.handle('jh:automation-create', async (_, input = {}) => {
     if (!automationStore) throw new Error('自动任务调度尚未启动。');
-    const project = settings.projects.find(item => item.id === input.projectId);
+    const project = settings().projects.find(item => item.id === input.projectId);
     if (!project) throw new Error('找不到自动任务项目。');
     const session = {
       id: randomUUID(),
@@ -432,8 +437,7 @@ function register() {
       automation: true,
       updatedAt: Date.now()
     };
-    project.sessions.unshift(session);
-    persist();
+    changeProject(project.id, current => current.sessions.unshift(session));
     try {
       return await automationStore.create({
         name: input.name,
@@ -445,8 +449,9 @@ function register() {
         runAt: Number(input.runAt)
       });
     } catch (error) {
-      project.sessions = project.sessions.filter(item => item.id !== session.id);
-      persist();
+      changeProject(project.id, current => {
+        current.sessions = current.sessions.filter(item => item.id !== session.id);
+      });
       throw error;
     }
   });
@@ -480,36 +485,30 @@ function register() {
     const result = await dialog.showOpenDialog(win, { title: '打开项目', properties: ['openDirectory'] });
     if (result.canceled) return null;
     const directory = result.filePaths[0];
-    let project = settings.projects.find(item => item.directory.toLowerCase() === directory.toLowerCase());
-    if (!project) {
-      project = { id: randomUUID(), directory, name: path.basename(directory) || directory, sessions: [] };
-      settings.projects.unshift(project);
-      persist();
-    }
-    return project;
+    return changeSettings(state => findProject(state, directory)
+      || addProject(state, directory, legacyProject(dataDirectory, directory)));
   });
   ipcMain.handle('jh:session', (_, projectId) => {
-    const project = settings.projects.find(item => item.id === projectId);
+    const project = settings().projects.find(item => item.id === projectId);
     if (!project) throw new Error('请先打开一个项目。');
     const session = { id: randomUUID(), title: '新会话' };
-    project.sessions.unshift(session);
-    persist();
+    changeProject(project.id, current => current.sessions.unshift(session));
     return session;
   });
   ipcMain.handle('jh:history', (_, project, session) => call('history', context(project, session)));
   ipcMain.handle('jh:context', (_, project, session) => call('context', context(project, session)));
   ipcMain.handle('jh:checkpoints', (_, projectId, sessionId = '') => {
-    const project = settings.projects.find(item => item.id === projectId);
+    const project = settings().projects.find(item => item.id === projectId);
     if (!project) throw new Error('找不到项目。');
     return call('checkpoints', { projectId, projectPath: project.directory, sessionId });
   });
   ipcMain.handle('jh:checkpoint', (_, projectId, checkpointId) => {
-    const project = settings.projects.find(item => item.id === projectId);
+    const project = settings().projects.find(item => item.id === projectId);
     if (!project) throw new Error('找不到项目。');
     return call('checkpoint', { projectId, projectPath: project.directory, checkpointId });
   });
   ipcMain.handle('jh:restore-checkpoint', (_, projectId, checkpointId) => {
-    const project = settings.projects.find(item => item.id === projectId);
+    const project = settings().projects.find(item => item.id === projectId);
     if (!project) throw new Error('找不到项目。');
     return call('restoreCheckpoint', { projectId, projectPath: project.directory, checkpointId });
   });
@@ -561,7 +560,7 @@ function register() {
   });
   ipcMain.handle('jh:fork-session', async (_, projectId, sessionId, messageId) => {
     const selected = context(projectId, sessionId);
-    const project = settings.projects.find(item => item.id === projectId);
+    const project = settings().projects.find(item => item.id === projectId);
     const source = project.sessions.find(item => item.id === sessionId);
     const branchSessionId = randomUUID();
     await call('forkSession', { ...selected, branchSessionId, messageId });
@@ -575,12 +574,11 @@ function register() {
       branchOf: sessionId,
       updatedAt: Date.now()
     };
-    project.sessions.unshift(branch);
-    persist();
+    changeProject(projectId, current => current.sessions.unshift(branch));
     return branch;
   });
   ipcMain.handle('jh:attachment', async (_, projectId, kind) => {
-    const project = settings.projects.find(item => item.id === projectId);
+    const project = settings().projects.find(item => item.id === projectId);
     if (!project || !['file', 'folder', 'image'].includes(kind)) throw new Error('请选择项目和附件类型。');
     const result = await dialog.showOpenDialog(win, {
       title: { file: '添加文件', folder: '添加文件夹', image: '添加图片' }[kind],
@@ -601,7 +599,7 @@ function register() {
     });
   });
   ipcMain.handle('jh:project-parts', async (_, projectId) => {
-    const project = settings.projects.find(item => item.id === projectId);
+    const project = settings().projects.find(item => item.id === projectId);
     if (!project) return [];
     return (await projectParts(project.directory)).map(({ text, ...part }) => ({ ...part, label: label(part) }));
   });
@@ -626,14 +624,16 @@ function register() {
   ipcMain.handle('jh:save-model', (_, input) => {
     const { key, ...model } = modelInput(input);
     if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows 凭证保护不可用。');
-    const index = settings.models.findIndex(item => item.id === input.id);
-    const id = index < 0 ? randomUUID() : input.id;
-    const profile = { id, ...model, encryptedKey: safeStorage.encryptString(key).toString('base64') };
-    if (index < 0) settings.models.push(profile);
-    else settings.models[index] = profile;
-    if (!settings.defaultModelId || input.makeDefault) settings.defaultModelId = id;
-    persist();
-    return { ...publicSettings(), savedModelId: id };
+    const savedModelId = changeSettings(state => {
+      const index = state.models.findIndex(item => item.id === input.id);
+      const id = index < 0 ? randomUUID() : input.id;
+      const profile = { id, ...model, encryptedKey: safeStorage.encryptString(key).toString('base64') };
+      if (index < 0) state.models.push(profile);
+      else state.models[index] = profile;
+      if (!state.defaultModelId || input.makeDefault) state.defaultModelId = id;
+      return id;
+    });
+    return { ...publicSettings(), savedModelId };
   });
   ipcMain.handle('jh:chat', async (_, projectId, sessionId, message, runId, options = {}) => {
     const selected = context(projectId, sessionId);
@@ -657,15 +657,16 @@ function register() {
         }
         return { label: label(item), text: item.text, image: item.image, mime: item.mime, kind: item.kind };
       });
-      const session = settings.projects.find(item => item.id === projectId).sessions.find(item => item.id === sessionId);
-      const autoMemory = settings.projects.find(item => item.id === projectId).autoMemory === true;
+      const autoMemory = settings().projects.find(item => item.id === projectId).autoMemory === true;
       await call('chat', { ...selected, ...model, message, runId, parts, permission, effort, autoMemory,
         serviceTier: fast ? model.fastTier : '' });
-      if (session.title === '新会话') session.title = message.trim().replace(/\s+/g, ' ').slice(0, 40);
-      Object.assign(session, { modelId: options.modelId || '', effort, fast, permission, updatedAt: Date.now() });
-      persist();
+      const title = changeSession(projectId, sessionId, session => {
+        if (session.title === '新会话') session.title = message.trim().replace(/\s+/g, ' ').slice(0, 40);
+        Object.assign(session, { modelId: options.modelId || '', effort, fast, permission, updatedAt: Date.now() });
+        return session.title;
+      });
       for (const part of requested) attachments.delete(part.id);
-      return session.title;
+      return title;
     } catch (error) {
       activeRuns.delete(runId);
       throw error;
@@ -685,16 +686,15 @@ function register() {
     if (typeof message !== 'string' || !message.trim() || message.length > 16000) {
       throw new Error('请输入 16,000 字符以内的消息。');
     }
-    const autoMemory = settings.projects.find(item => item.id === projectId).autoMemory === true;
+    const autoMemory = settings().projects.find(item => item.id === projectId).autoMemory === true;
     activeRuns.add(runId);
     try {
       await call('chat', { ...selected, ...model, message, runId, parts: [], permission: 'durable', effort,
         autoMemory, serviceTier: fast ? model.fastTier : '' });
-      const session = settings.projects.find(item => item.id === projectId).sessions
-        .find(item => item.id === sessionId);
-      if (session.title === '新会话') session.title = message.trim().replace(/\s+/g, ' ').slice(0, 40);
-      Object.assign(session, { modelId: options.modelId || '', effort, fast, permission: 'durable', updatedAt: Date.now() });
-      persist();
+      changeSession(projectId, sessionId, session => {
+        if (session.title === '新会话') session.title = message.trim().replace(/\s+/g, ' ').slice(0, 40);
+        Object.assign(session, { modelId: options.modelId || '', effort, fast, permission: 'durable', updatedAt: Date.now() });
+      });
       return true;
     } catch (error) {
       activeRuns.delete(runId);
@@ -708,7 +708,7 @@ function register() {
       throw new Error('审批选择无效。');
     }
     const { model, effort, fast } = conversationModel(options);
-    const autoMemory = settings.projects.find(item => item.id === projectId).autoMemory === true;
+    const autoMemory = settings().projects.find(item => item.id === projectId).autoMemory === true;
     activeRuns.add(runId);
     try {
       return await call('resumeTask', { ...selected, ...model, turnId, runId, answers, effort, autoMemory,
@@ -730,7 +730,7 @@ function register() {
       throw new Error('请逐项确认工具操作的核对结果。');
     }
     const { model, effort, fast } = conversationModel(options);
-    const autoMemory = settings.projects.find(item => item.id === projectId).autoMemory === true;
+    const autoMemory = settings().projects.find(item => item.id === projectId).autoMemory === true;
     activeRuns.add(runId);
     try {
       return await call('reconcileTask', { ...selected, ...model, turnId, runId, answers, outcomes,
@@ -746,12 +746,12 @@ function register() {
   ipcMain.handle('jh:approve', (_, runId, approvalId, allow) =>
     call('approve', { runId, approvalId, allow: allow === true }));
   ipcMain.handle('jh:list-interrupted-approvals', async (_, projectId) => {
-    if (!settings.projects.some(item => item.id === projectId)) throw new Error('找不到项目。');
+    if (!settings().projects.some(item => item.id === projectId)) throw new Error('找不到项目。');
     const approvals = await call('approvals', { projectId });
     return approvals.filter(item => item.status === 'INTERRUPTED');
   });
   ipcMain.handle('jh:dismiss-interrupted-approval', (_, projectId, approvalId) => {
-    if (!settings.projects.some(item => item.id === projectId)) throw new Error('找不到项目。');
+    if (!settings().projects.some(item => item.id === projectId)) throw new Error('找不到项目。');
     return call('dismissApproval', { projectId, approvalId });
   });
 }
@@ -1023,16 +1023,15 @@ else {
   app.whenReady().then(() => {
     const directory = app.getPath('userData');
     mkdirSync(directory, { recursive: true });
-    settingsFile = path.join(directory, 'settings.json');
-    settings = existsSync(settingsFile) ? JSON.parse(readFileSync(settingsFile, 'utf8'))
-      : { projects: [] };
-    if (!Array.isArray(settings.models)) {
-      const legacy = settings.model?.encryptedKey ? { id: randomUUID(), ...settings.model } : null;
-      settings.models = legacy ? [legacy] : [];
-      settings.defaultModelId = legacy?.id;
-      delete settings.model;
-      persist();
-    }
+    dataDirectory = directory;
+    changeSettings(state => {
+      if (!Array.isArray(state.models)) {
+        const legacy = state.model?.encryptedKey ? { id: randomUUID(), ...state.model } : null;
+        state.models = legacy ? [legacy] : [];
+        state.defaultModelId = legacy?.id;
+        delete state.model;
+      }
+    });
     register();
     startBackend(path.join(directory, 'workspaces'));
     void initializeAutomations().catch(error => {

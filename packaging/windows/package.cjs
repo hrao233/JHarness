@@ -50,6 +50,9 @@ for (const file of ['main.cjs', 'preload.cjs', 'context-parts.cjs',
   'worktree-manager.cjs', 'data-maintenance.cjs', 'automation-store.cjs']) {
   copyFileSync(path.join(desktop, file), path.join(app, 'desktop', file));
 }
+mkdirSync(path.join(app, 'shared'), { recursive: true });
+copyFileSync(path.join(root, 'apps', 'shared', 'settings-store.cjs'),
+  path.join(app, 'shared', 'settings-store.cjs'));
 copyFileSync(path.join(root, 'apps', 'cli', 'jharness-cli.cjs'),
   path.join(app, 'cli', 'jharness-cli.cjs'));
 writeFileSync(path.join(app, 'package.json'), JSON.stringify({

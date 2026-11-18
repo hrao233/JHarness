@@ -478,7 +478,7 @@ public final class Backend {
 
     private ConversationRuntime.Request request(
             JsonNode params, String permission, boolean requireInput) throws Exception {
-        if (!List.of("ask", "assist", "full", "durable").contains(permission))
+        if (!List.of("ask", "assist", "full", "durable", "create").contains(permission))
             throw new IllegalArgumentException("无效的审批模式。");
         String runId = identifier(params, "runId");
         var runtimeContext = RuntimeContext.builder(context(params)).runId(runId).build();
@@ -493,7 +493,7 @@ public final class Backend {
         Model auxiliary =
                 autoMemory || permission.equals("assist") ? model(params, true) : model;
         return new ConversationRuntime.Request(workspace(params), project, runtimeContext, message,
-                task, model, auxiliary, autoMemory, permission, externalPlugins.tools());
+                task, model, auxiliary, autoMemory, permission, externalPlugins.tools(), externalPlugins);
     }
 
     private List<DurableApprovalStore.ApprovalRecord> listApprovals(JsonNode params) throws Exception {

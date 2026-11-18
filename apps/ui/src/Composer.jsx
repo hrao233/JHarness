@@ -5,6 +5,7 @@ import { ArrowUp, Check, ChevronDown, ChevronRight, FileText, FolderOpen, Hand, 
 const permissionOptions = [
   { id: 'ask', label: '请求批准', description: '每次修改或创建项目文件前询问', Icon: Hand },
   { id: 'assist', label: '帮我批准', description: '用当前模型单独审查拟议改动。审查不确定时由你决定', Icon: ShieldCheck },
+  { id: 'create', label: '创造模式', description: '让助手编写工具插件，经你批准后安装并启用', Icon: Puzzle },
   { id: 'durable', label: '可续跑任务', description: '支持读取、编辑和创建项目文件。写入前由你批准，任务中断后可继续', Icon: History },
   { id: 'full', label: '完全访问权限', description: '允许项目内的可用文件操作，无需逐次批准', Icon: ShieldAlert }
 ];
@@ -331,19 +332,22 @@ export function TaskRecovery({ task, blocked, canceling, resume, cancel }) {
 
 export function ApprovalCard({ item, decide, dismiss, disabled, dismissing, children }) {
   const command = item.operation === 'run_command';
+  const plugin = item.operation === 'install_plugin';
   const web = item.operation === 'web_fetch' || item.operation === 'web_search';
   const interruption = item.interruptedFrom === 'PENDING' ? '等待批准时中断。'
     : item.interruptedFrom === 'APPROVED' ? '已记录批准，执行结果待核对。' : '此记录已中断，执行结果待核对。';
   return <div className="approval-card" role={!dismiss && children === undefined ? 'alert' : undefined}>
     <div className="approval-title"><ShieldAlert size={18}/><strong>{command ? '运行 PowerShell 命令'
+      : plugin ? '安装并启用工具插件'
       : web ? (item.operation === 'web_search' ? '搜索网页' : '读取网页')
       : item.operation === 'create_file' ? '创建文件' : '编辑文件'}</strong>
       {item.path && <code>{item.path}</code>}</div>
     {dismiss && <p className="muted">{interruption}清除记录只会将其从此处移除。</p>}
-    {command || web ? <>
+    {command || web || plugin ? <>
       {!dismiss && <div>{command ? '命令以当前 Windows 用户权限运行，可以访问项目目录之外的资源。'
+        : plugin ? '所有项目均可调用此目录中的代码。插件以当前用户权限运行，后续对该目录的修改也会影响插件。'
         : '批准后，下面的地址或搜索内容将用于发起网络请求。'}</div>}
-      <pre className="approval-command" tabIndex={0} aria-label={command ? 'PowerShell 命令' : '网络请求'}>{item.after}</pre>
+      <pre className="approval-command" tabIndex={0} aria-label={command ? 'PowerShell 命令' : plugin ? '插件启动配置' : '网络请求'}>{item.after}</pre>
     </> : <details><summary>查看变更内容</summary>
       {!!item.before && <pre className="before">{item.before}</pre>}
       <pre className="after">{item.after || '（移除选中的原文）'}</pre>

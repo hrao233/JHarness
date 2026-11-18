@@ -33,6 +33,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import local.jharness.memory.ProjectMemory;
+import local.jharness.plugin.ExternalPluginManager;
 import reactor.core.Disposable;
 import reactor.core.Disposables;
 import reactor.core.publisher.Flux;
@@ -66,7 +67,7 @@ public final class ConversationRuntime implements AutoCloseable {
     public record Request(
             Path workspace, Path project, RuntimeContext context, Msg message, String task,
             Model model, Model auxiliary, boolean autoMemory, String permission,
-            List<AgentTool> pluginTools) {}
+            List<AgentTool> pluginTools, ExternalPluginManager pluginManager) {}
 
     private record Approval(
             String runId, DurableApprovalStore store, CompletableFuture<Boolean> decision) {}
@@ -85,7 +86,7 @@ public final class ConversationRuntime implements AutoCloseable {
     public void start(Request request) throws Exception {
         String runId = request.context().getRunId();
         String permission = request.permission();
-        if (!List.of("ask", "assist", "full").contains(permission)) {
+        if (!List.of("ask", "assist", "full", "create").contains(permission)) {
             throw new IllegalArgumentException("无效的审批模式。");
         }
         var approvalStore = approvalStore(request.workspace());
@@ -108,6 +109,9 @@ public final class ConversationRuntime implements AutoCloseable {
                     executeWrite(runId, request.context().getSessionId(), permission, review, requireApproval,
                             checkpoints, operation, path, before, after, deniedMessage, action)));
             toolkit.registerTool(command);
+            if (permission.equals("create")) {
+                toolkit.registerTool(new PluginInstaller(request.project(), request.pluginManager(), requireApproval));
+            }
             toolkit.registerTool(new AcceptanceCriteriaTool(reports, () -> runId));
             toolkit.registerTool(new ApprovedWeb(requireApproval));
             registerArtifactTool(toolkit, request, reports, () -> runId);
@@ -138,7 +142,7 @@ public final class ConversationRuntime implements AutoCloseable {
 
     static HarnessAgent.Builder builder(Request request, Toolkit toolkit) throws Exception {
         var builder = HarnessAgent.builder().name("JHarness").agentId(AGENT_ID)
-                .sysPrompt(PROMPT).model(request.model()).workspace(request.workspace())
+                .sysPrompt(request.permission().equals("create") ? PROMPT + PluginInstaller.INSTRUCTIONS : PROMPT).model(request.model()).workspace(request.workspace())
                 .filesystem(new LocalFilesystemSpec().project(request.project()))
                 .sessionLogStore(store(request.workspace())).toolkit(toolkit)
                 .toolsConfig(allowedTools(request))
@@ -184,6 +188,7 @@ public final class ConversationRuntime implements AutoCloseable {
                 "create_file", "run_command", "deliver_artifact", "acceptance_write",
                 "memory_save", "memory_get", "memory_search",
                 "session_search", "session_list", "session_history", "load_skill_through_path", "web_fetch"));
+        if (request.permission().equals("create")) names.add("install_plugin");
         request.pluginTools().forEach(tool -> names.add(tool.getName()));
         String tavilyKey = System.getenv("TAVILY_API_KEY");
         if (tavilyKey != null && !tavilyKey.isBlank()) names.add("web_search");

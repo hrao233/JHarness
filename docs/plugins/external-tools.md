@@ -57,7 +57,7 @@ Stdout is reserved for protocol responses; diagnostics belong on stderr.
 
 ## Trust Boundary
 
-- Installation requires choosing an existing directory through the desktop dialog.
+- Manual installation uses the desktop directory picker and starts disabled. In desktop creation mode, the assistant can propose a directory inside the current project via `install_plugin`. Explicit approval registers and enables that directory for all projects. Its tools become available on the next turn. This mode uses the normal file-write and command approval flows.
 - Disabled plugins do not start.
 - Enabled plugins run as the current Windows user and can access resources outside the project.
 - The current protocol is a capability boundary and crash boundary, not an OS sandbox.

@@ -3,6 +3,7 @@ package local.jharness.plugin;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.tool.ToolCallParam;
@@ -15,6 +16,28 @@ import org.junit.jupiter.api.io.TempDir;
 
 class ExternalPluginManagerTest {
     @TempDir Path temporary;
+
+    @Test
+    void rejectsChangedOrPreviouslyInstalledPluginsAtApprovalTime() throws Exception {
+        Path plugin = Files.createDirectory(temporary.resolve("proposal"));
+        Path manifest = plugin.resolve("jharness-plugin.json");
+        var proposal = """
+                {"id":"example.test","executable":"java","arguments":["-version"],
+                 "tools":[{"name":"sample_tool","inputSchema":{"type":"object"}}]}
+                """;
+        Files.writeString(manifest, proposal);
+        try (var manager = new ExternalPluginManager(temporary)) {
+            var preview = manager.preview(plugin);
+            Files.writeString(manifest, proposal.replace("-version", "-help"));
+            assertThrows(IllegalArgumentException.class, () -> manager.installEnabled(preview));
+            assertTrue(manager.list().isEmpty());
+            var updated = manager.preview(plugin);
+            manager.installEnabled(updated);
+            assertTrue(manager.list().get(0).enabled());
+            assertFalse(manager.list().get(0).running());
+            assertThrows(IllegalArgumentException.class, () -> manager.installEnabled(updated));
+        }
+    }
 
     @Test
     void installsEnablesCallsAndPersistsAnExplicitToolPlugin() throws Exception {

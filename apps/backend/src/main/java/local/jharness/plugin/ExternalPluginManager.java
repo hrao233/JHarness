@@ -102,6 +102,25 @@ public final class ExternalPluginManager implements AutoCloseable {
         }
     }
 
+    public Definition preview(Path directory) throws IOException {
+        return definition(new Stored(directory.toString(), false));
+    }
+
+    public void installEnabled(Definition approved) throws IOException {
+        synchronized (lock) {
+            if (!approved.equals(preview(approved.directory()))) {
+                throw new IllegalArgumentException("插件启动配置已变化，请重新发起安装。");
+            }
+            if (list().stream().anyMatch(item -> item.id().equals(approved.id())
+                    || item.directory().equals(approved.directory().toString()))) {
+                throw new IllegalArgumentException("此插件已登记，请在插件面板中管理。");
+            }
+            var plugins = new ArrayList<>(load());
+            plugins.add(new Stored(approved.directory().toString(), true));
+            save(plugins);
+        }
+    }
+
     public Status install(Path directory) {
         synchronized (lock) {
             try {

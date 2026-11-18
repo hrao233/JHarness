@@ -638,7 +638,7 @@ function register() {
   ipcMain.handle('jh:chat', async (_, projectId, sessionId, message, runId, options = {}) => {
     const selected = context(projectId, sessionId);
     const { model, effort, fast } = conversationModel(options);
-    const permission = ['ask', 'assist', 'full', 'durable'].includes(options.permission) ? options.permission : 'assist';
+    const permission = ['ask', 'assist', 'full', 'durable', 'create'].includes(options.permission) ? options.permission : 'assist';
     if (typeof message !== 'string' || !message.trim() || message.length > 16000) {
       throw new Error('请输入 16,000 字符以内的消息。');
     }

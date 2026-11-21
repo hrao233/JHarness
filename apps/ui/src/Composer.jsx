@@ -34,7 +34,7 @@ export function Composer({ draft, setDraft, project, loading, sendBlocked, run, 
         box.current?.querySelector('[aria-expanded="true"]')?.focus();
       }
       if (event.ctrlKey && event.shiftKey && event.code === 'KeyM' && !event.repeat
-          && !document.querySelector('dialog[open]') && !run) {
+          && !document.querySelector('dialog:modal') && !run) {
         event.preventDefault();
         setMenu(current => current === 'reasoning' || current === 'models' ? null : 'reasoning');
       }
@@ -102,6 +102,7 @@ export function Composer({ draft, setDraft, project, loading, sendBlocked, run, 
             <div className="menu-label">添加</div>
             <button type="button" className="menu-row" onClick={() => chooseFile('file')}><Paperclip size={17}/>文件</button>
             <button type="button" className="menu-row" onClick={() => chooseFile('folder')}><FolderOpen size={17}/>文件夹</button>
+            <button type="button" className="menu-row" onClick={() => chooseFile('image')}><Image size={17}/>图片</button>
             {['skill', 'plugin'].map(kind => {
               const entries = availableParts?.filter(part => part.kind === kind);
               const Icon = partIcons[kind];
@@ -345,7 +346,7 @@ export function ApprovalCard({ item, decide, dismiss, disabled, dismissing, chil
     {dismiss && <p className="muted">{interruption}清除记录只会将其从此处移除。</p>}
     {command || web || plugin ? <>
       {!dismiss && <div>{command ? '命令以当前 Windows 用户权限运行，可以访问项目目录之外的资源。'
-        : plugin ? '所有项目均可调用此目录中的代码。插件以当前用户权限运行，后续对该目录的修改也会影响插件。'
+        : plugin ? '批准后仅在当前项目启用此版本。插件副本以当前 Windows 用户权限运行。'
         : '批准后，下面的地址或搜索内容将用于发起网络请求。'}</div>}
       <pre className="approval-command" tabIndex={0} aria-label={command ? 'PowerShell 命令' : plugin ? '插件启动配置' : '网络请求'}>{item.after}</pre>
     </> : <details><summary>查看变更内容</summary>

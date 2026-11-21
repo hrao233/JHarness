@@ -40,7 +40,7 @@ public final class ExternalPluginManager implements AutoCloseable {
             Path directory,
             Path executable,
             List<String> arguments,
-            List<ToolSpec> tools) {}
+            List<ToolSpec> tools, String digest) {}
 
     public record Status(
             String id,
@@ -52,161 +52,220 @@ public final class ExternalPluginManager implements AutoCloseable {
             boolean running,
             String error,
             String diagnostics,
-            List<ToolSpec> tools) {}
+            List<ToolSpec> tools, String digest) {}
 
-    private record Stored(String directory, boolean enabled) {}
+    private record Stored(String directory, boolean enabled, String id, String digest) {
+        Stored enabled(boolean value) { return new Stored(directory, value, id, digest); }
+    }
+    public record Upgrade(String id, String fromDigest, String toDigest, String version, List<String> changes, List<String> excerpts) {}
 
     private final Path configFile;
+    private final PluginSnapshots snapshots;
     private final Map<String, PluginProcessHost> hosts = new LinkedHashMap<>();
+    private final Map<String, String> runningVersions = new LinkedHashMap<>();
     private final Map<String, String> errors = new LinkedHashMap<>();
-    private final Object lock = new Object();
+    private static final Map<Path, Object> LOCKS = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Object lock;
 
     public ExternalPluginManager(Path dataDirectory) {
-        configFile = dataDirectory.resolve("external-plugins.json");
+        configFile = dataDirectory.toAbsolutePath().normalize().resolve("external-plugins.json");
+        snapshots = new PluginSnapshots(configFile.getParent());
+        lock = LOCKS.computeIfAbsent(configFile, ignored -> new Object());
+    }
+
+    private <T> T update(java.util.concurrent.Callable<T> action) {
+        synchronized (lock) {
+            try {
+                Files.createDirectories(configFile.getParent());
+                try (var channel = java.nio.channels.FileChannel.open(configFile.resolveSibling(".external-plugins.lock"),
+                        java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.WRITE);
+                        var writer = channel.lock()) {
+                    return action.call();
+                }
+            } catch (RuntimeException e) { throw e; }
+            catch (Exception e) { throw new IllegalArgumentException(message(e), e); }
+        }
+    }
+
+    // Pin legacy registrations once, retaining the user's previous enablement choice.
+    private List<Stored> registrations() {
+        var records = load();
+        if (records.stream().noneMatch(s -> s.digest() == null)) return records;
+        return update(() -> {
+            var updated = new ArrayList<>(load());
+            boolean changed = false;
+            for (int i = 0; i < updated.size(); i++) {
+                var old = updated.get(i);
+                if (old.digest() != null) continue;
+                try {
+                    var approved = preview(Path.of(old.directory()));
+                    updated.set(i, pinned(approved, old.enabled()));
+                    changed = true;
+                } catch (Exception e) { errors.put(pluginId(old), message(e)); }
+            }
+            if (changed) save(updated);
+            return updated;
+        });
     }
 
     public List<Status> list() {
-        synchronized (lock) {
-            var result = new ArrayList<Status>();
-            for (var stored : load()) {
-                try {
-                    var definition = definition(stored);
-                    var host = hosts.get(definition.id());
-                    result.add(new Status(
-                            definition.id(),
-                            definition.name(),
-                            definition.version(),
-                            definition.description(),
-                            definition.directory().toString(),
-                            stored.enabled(),
-                            host != null && host.isAlive(),
-                            errors.get(definition.id()),
-                            host == null ? "" : host.diagnostics(),
-                            definition.tools()));
-                } catch (Exception error) {
-                    String fallback = stripExtension(Path.of(stored.directory()).getFileName().toString());
-                    result.add(new Status(
-                            fallback,
-                            fallback,
-                            "",
-                            "",
-                            stored.directory(),
-                            stored.enabled(),
-                            false,
-                            message(error),
-                            "",
-                            List.of()));
-                }
-            }
-            return List.copyOf(result);
+        synchronized (lock) { return registrations().stream().map(this::status).toList(); }
+    }
+
+    private Status status(Stored stored) {
+        String id = pluginId(stored);
+        try {
+            var definition = installed(stored);
+            var host = hosts.get(id);
+            return new Status(id, definition.name(), definition.version(), definition.description(), stored.directory(),
+                    stored.enabled(), host != null && host.isAlive(), errors.get(id),
+                    host == null ? "" : host.diagnostics(), definition.tools(), stored.digest());
+        } catch (Exception e) {
+            return new Status(id, id, "", "", stored.directory(), stored.enabled(), false,
+                    message(e), "", List.of(), stored.digest());
         }
     }
 
     public Definition preview(Path directory) throws IOException {
-        return definition(new Stored(directory.toString(), false));
+        return definition(directory, snapshots.inspect(directory).digest());
+    }
+
+    private Stored pinned(Definition approved, boolean enabled) throws IOException {
+        Path copy = snapshots.pin(approved.directory(), approved.digest());
+        var frozen = definition(copy, approved.digest(), approved.directory(), approved.directory());
+        if (!approved.equals(frozen)) throw new IllegalArgumentException("插件标识已变化。");
+        return new Stored(approved.directory().toString(), enabled, approved.id(), approved.digest());
     }
 
     public void installEnabled(Definition approved) throws IOException {
-        synchronized (lock) {
-            if (!approved.equals(preview(approved.directory()))) {
-                throw new IllegalArgumentException("插件启动配置已变化，请重新发起安装。");
-            }
-            if (list().stream().anyMatch(item -> item.id().equals(approved.id())
-                    || item.directory().equals(approved.directory().toString()))) {
-                throw new IllegalArgumentException("此插件已登记，请在插件面板中管理。");
-            }
+        update(() -> {
             var plugins = new ArrayList<>(load());
-            plugins.add(new Stored(approved.directory().toString(), true));
+            if (plugins.stream().anyMatch(item -> pluginId(item).equals(approved.id())
+                    || item.directory().equals(approved.directory().toString())))
+                throw new IllegalArgumentException("此插件已登记，请在插件面板中管理。");
+            plugins.add(pinned(approved, true));
             save(plugins);
-        }
+            return null;
+        });
     }
 
     public Status install(Path directory) {
-        synchronized (lock) {
-            try {
-                var definition = definition(new Stored(directory.toString(), false));
-                var plugins = new ArrayList<>(load());
-                plugins.removeIf(item -> {
-                    try {
-                        return definition.id().equals(definition(item).id());
-                    } catch (Exception ignored) {
-                        return Path.of(item.directory()).equals(definition.directory());
-                    }
-                });
-                plugins.add(new Stored(definition.directory().toString(), false));
-                save(plugins);
-                errors.remove(definition.id());
-                return new Status(
-                        definition.id(),
-                        definition.name(),
-                        definition.version(),
-                        definition.description(),
-                        definition.directory().toString(),
-                        false,
-                        false,
-                        null,
-                        "",
-                        definition.tools());
-            } catch (Exception error) {
-                throw new IllegalArgumentException(message(error), error);
-            }
-        }
+        return update(() -> {
+            var approved = preview(directory);
+            var plugins = new ArrayList<>(load());
+            if (plugins.stream().anyMatch(item -> pluginId(item).equals(approved.id())))
+                throw new IllegalArgumentException("此插件已登记，请使用检查更新。");
+            var record = pinned(approved, false);
+            plugins.add(record);
+            save(plugins);
+            return status(record);
+        });
+    }
+
+    private Stored find(List<Stored> records, String id) {
+        return records.stream().filter(item -> pluginId(item).equals(id)).findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("找不到插件。"));
     }
 
     public Status setEnabled(String id, boolean enabled) {
-        synchronized (lock) {
-            var plugins = new ArrayList<>(load());
-            boolean changed = false;
-            for (int i = 0; i < plugins.size(); i++) {
-                var stored = plugins.get(i);
-                try {
-                    if (!definition(stored).id().equals(id)) continue;
-                    plugins.set(i, new Stored(stored.directory(), enabled));
-                    changed = true;
-                } catch (Exception error) {
-                    errors.put(id, message(error));
+        registrations();
+        return update(() -> {
+            var records = new ArrayList<>(load());
+            var old = find(records, id);
+            if (enabled) installed(old);
+            var next = old.enabled(enabled);
+            records.set(records.indexOf(old), next);
+            save(records);
+            if (!enabled) closeHost(id);
+            return status(next);
+        });
+    }
+
+    public Upgrade previewUpgrade(String id) throws IOException {
+        var old = find(registrations(), id);
+        var current = snapshots.inspect(snapshots.directory(old.digest())).files();
+        Path source = Path.of(old.directory());
+        var candidate = snapshots.inspect(source);
+        var proposed = definition(source, candidate.digest());
+        if (!proposed.id().equals(id)) throw new IllegalArgumentException("源目录的插件 id 已变化。");
+        var changes = new ArrayList<String>();
+        var excerpts = new ArrayList<String>();
+        var paths = new java.util.TreeSet<>(current.keySet());
+        paths.addAll(candidate.files().keySet());
+        for (String path : paths) {
+            if (!candidate.files().containsKey(path)) changes.add("删除 " + path);
+            else if (!current.containsKey(path)) changes.add("新增 " + path);
+            else if (!current.get(path).equals(candidate.files().get(path))) {
+                changes.add("修改 " + path);
+                if (excerpts.size() < 5) {
+                    String excerpt = firstDifference(snapshots.directory(old.digest()).resolve(path), source.resolve(path));
+                    if (excerpt != null) excerpts.add(path + " " + excerpt);
                 }
             }
-            if (!changed) throw new IllegalArgumentException("找不到插件。");
-            save(plugins);
-            if (!enabled) closeHost(id);
-            return list().stream()
-                    .filter(item -> item.id().equals(id))
-                    .findFirst()
-                    .orElseThrow(() -> new IllegalArgumentException("找不到插件。"));
         }
+        return new Upgrade(id, old.digest(), candidate.digest(), proposed.version(), changes, excerpts);
+    }
+
+    private static String firstDifference(Path old, Path proposed) {
+        try {
+            if (Files.size(old) > 65536 || Files.size(proposed) > 65536) return null;
+            String a = Files.readString(old), b = Files.readString(proposed);
+            if (a.indexOf(0) >= 0 || b.indexOf(0) >= 0) return null;
+            var left = a.lines().iterator();
+            var right = b.lines().iterator();
+            for (int line = 1; left.hasNext() || right.hasNext(); line++) {
+                String from = left.hasNext() ? left.next() : null;
+                String to = right.hasNext() ? right.next() : null;
+                if (!Objects.equals(from, to)) return "第 " + line + " 行"
+                        + (from == null ? "" : "\n− " + from.substring(0, Math.min(160, from.length())))
+                        + (to == null ? "" : "\n+ " + to.substring(0, Math.min(160, to.length())));
+            }
+        } catch (IOException ignored) { }
+        return null;
+    }
+
+    public Status upgrade(String id, String from, String to) {
+        return update(() -> {
+            var records = new ArrayList<>(load());
+            var old = find(records, id);
+            var proposed = preview(Path.of(old.directory()));
+            if (!id.equals(proposed.id()) || !Objects.equals(from, old.digest()) || !to.equals(proposed.digest()))
+                throw new IllegalArgumentException("插件已变化，请重新检查更新。");
+            var next = pinned(proposed, old.enabled());
+            records.set(records.indexOf(old), next);
+            save(records);
+            closeHost(id);
+            errors.remove(id);
+            return status(next);
+        });
     }
 
     public boolean uninstall(String id) {
-        synchronized (lock) {
-            var plugins = new ArrayList<>(load());
-            boolean removed = plugins.removeIf(item -> {
-                try {
-                    return definition(item).id().equals(id);
-                } catch (Exception ignored) {
-                    return false;
-                }
-            });
-            if (!removed) return false;
+        return update(() -> {
+            var records = new ArrayList<>(load());
+            if (!records.removeIf(record -> pluginId(record).equals(id))) return false;
+            save(records);
             closeHost(id);
             errors.remove(id);
-            save(plugins);
             return true;
-        }
+        });
     }
 
-    public List<AgentTool> tools() {
+    public List<AgentTool> tools() { return tools(java.util.Set.of(), java.util.Set.of()); }
+
+    public List<AgentTool> tools(java.util.Set<String> excluded, java.util.Set<String> reservedNames) {
         synchronized (lock) {
             var result = new ArrayList<AgentTool>();
-            var names = new LinkedHashSet<String>();
-            for (var stored : load()) {
-                if (!stored.enabled()) continue;
+            var names = new LinkedHashSet<String>(reservedNames);
+            for (var stored : registrations()) {
+                if (!stored.enabled() || excluded.contains(pluginId(stored))) continue;
                 try {
-                    var definition = definition(stored);
+                    var definition = installed(stored);
                     for (var tool : definition.tools())
-                        if (!names.add(tool.name()))
+                        if (names.contains(tool.name()))
                             throw new IllegalArgumentException("工具名称重复：" + tool.name());
                     var host = start(definition);
+                    definition.tools().forEach(tool -> names.add(tool.name()));
                     for (var tool : definition.tools())
                         result.add(new ProcessTool(definition.id(), tool, host));
                     errors.remove(definition.id());
@@ -219,9 +278,11 @@ public final class ExternalPluginManager implements AutoCloseable {
         }
     }
 
-    private PluginProcessHost start(Definition definition) {
+    private PluginProcessHost start(Definition definition) throws IOException {
         var existing = hosts.get(definition.id());
-        if (existing != null && existing.isAlive()) return existing;
+        if (existing != null && existing.isAlive() && definition.digest().equals(runningVersions.get(definition.id()))) return existing;
+        if (!snapshots.inspect(definition.directory()).digest().equals(definition.digest()))
+            throw new IOException("已保存的插件文件发生变化。");
         if (existing != null) existing.close();
         var spec = new PluginProcessSpec(
                 definition.executable(),
@@ -233,13 +294,24 @@ public final class ExternalPluginManager implements AutoCloseable {
                 Duration.ofSeconds(5));
         var host = PluginProcessHost.start(spec);
         hosts.put(definition.id(), host);
+        runningVersions.put(definition.id(), definition.digest());
         return host;
     }
 
-    private Definition definition(Stored stored) throws IOException {
-        Path directory = Path.of(stored.directory()).toRealPath();
-        Path manifest = directory.resolve(MANIFEST).toRealPath();
-        if (!manifest.startsWith(directory))
+    private Definition installed(Stored stored) throws IOException {
+        Path copy = snapshots.directory(stored.digest()).toRealPath();
+        return definition(copy, stored.digest(), Path.of(stored.directory()), copy);
+    }
+
+    private Definition definition(Path folder, String digest) throws IOException {
+        Path real = folder.toRealPath();
+        return definition(real, digest, real, real);
+    }
+
+    private Definition definition(Path folder, String digest, Path source, Path directory) throws IOException {
+        folder = folder.toRealPath();
+        Path manifest = folder.resolve(MANIFEST).toRealPath();
+        if (!manifest.startsWith(folder))
             throw new IllegalArgumentException("插件清单超出安装目录。");
         JsonNode root = JSON.readTree(manifest.toFile());
         String id = required(root, "id");
@@ -247,10 +319,10 @@ public final class ExternalPluginManager implements AutoCloseable {
             throw new IllegalArgumentException("插件 id 无效。");
         int apiVersion = root.path("apiVersion").asInt(1);
         if (apiVersion != 1) throw new IllegalArgumentException("不支持的插件 API 版本。");
-        Path executable = resolveExecutable(directory, required(root, "executable"));
+        Path executable = resolveExecutable(directory, rebase(source, directory, required(root, "executable")));
         var arguments = new ArrayList<String>();
         for (var argument : root.path("arguments"))
-            arguments.add(argument.asText());
+            arguments.add(rebase(source, directory, argument.asText()));
         var tools = new ArrayList<ToolSpec>();
         for (var tool : root.path("tools")) {
             String name = required(tool, "name");
@@ -278,7 +350,25 @@ public final class ExternalPluginManager implements AutoCloseable {
                 directory,
                 executable,
                 List.copyOf(arguments),
-                List.copyOf(tools));
+                List.copyOf(tools), digest);
+    }
+
+    private static String rebase(Path source, Path copy, String value) {
+        try {
+            var path = Path.of(value);
+            if (!path.isAbsolute()) return value;
+            path = path.normalize();
+            if (!path.startsWith(source)) {
+                // Expand Windows short names even when the original plugin has since been removed.
+                Path ancestor = path;
+                while (ancestor != null && !Files.exists(ancestor)) ancestor = ancestor.getParent();
+                if (ancestor != null) path = ancestor.toRealPath().resolve(ancestor.relativize(path));
+            }
+            if (path.startsWith(source)) return copy.resolve(source.relativize(path)).toString();
+        } catch (java.nio.file.InvalidPathException | IOException ignored) {
+            // Arguments such as classpaths can contain multiple paths and separators.
+        }
+        return value;
     }
 
     private static Path resolveExecutable(Path directory, String value) throws IOException {
@@ -349,6 +439,7 @@ public final class ExternalPluginManager implements AutoCloseable {
     }
 
     private static String pluginId(Stored stored) {
+        if (stored.id() != null) return stored.id();
         try {
             return definitionJson(Path.of(stored.directory())).path("id").asText(
                     stripExtension(Path.of(stored.directory()).getFileName().toString()));

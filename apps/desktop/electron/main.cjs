@@ -184,6 +184,27 @@ function context(projectId, sessionId) {
   return { projectId, sessionId, projectPath: project.directory };
 }
 
+async function openBlankSession(projectId, preferredId) {
+  // Old desktop blanks have only the default title and id. A CLI writer or an
+  // interrupted desktop write may have populated their log since registration.
+  const examined = new Set();
+  while (true) {
+    const { session, created } = changeProject(projectId, project => {
+      const eligible = item => item.title === '新会话' && !item.updatedAt && !examined.has(item.id);
+      const preferred = project.sessions.find(item => item.id === preferredId && eligible(item));
+      const blank = preferred || project.sessions.find(eligible);
+      if (blank) return { session: blank, created: false };
+      const session = { id: randomUUID(), title: '新会话' };
+      project.sessions.unshift(session);
+      return { session, created: true };
+    });
+    if (created) return session;
+    const snapshot = await call('context', context(projectId, session.id));
+    if (snapshot.asOfSeq === 0) return session;
+    examined.add(session.id);
+  }
+}
+
 function taskSessions() {
   return settings().projects.flatMap(project => project.sessions.map(session => ({
     projectId: project.id,
@@ -488,13 +509,7 @@ function register() {
     return changeSettings(state => findProject(state, directory)
       || addProject(state, directory, legacyProject(dataDirectory, directory)));
   });
-  ipcMain.handle('jh:session', (_, projectId) => {
-    const project = settings().projects.find(item => item.id === projectId);
-    if (!project) throw new Error('请先打开一个项目。');
-    const session = { id: randomUUID(), title: '新会话' };
-    changeProject(project.id, current => current.sessions.unshift(session));
-    return session;
-  });
+  ipcMain.handle('jh:session', (_, projectId, preferredId) => openBlankSession(projectId, preferredId));
   ipcMain.handle('jh:history', (_, project, session) => call('history', context(project, session)));
   ipcMain.handle('jh:context', (_, project, session) => call('context', context(project, session)));
   ipcMain.handle('jh:checkpoints', (_, projectId, sessionId = '') => {
@@ -525,6 +540,11 @@ function register() {
     return jsonSchema == null
       ? call('verifyCriterion', { ...evidence, expectedExitCode: 0 })
       : call('verifyJsonCriterion', { ...evidence, jsonSchema });
+  });
+  ipcMain.handle('jh:open-command-log', async (_, projectId, sessionId, runId, commandId) => {
+    const file = await call('commandLog', { ...context(projectId, sessionId), runId, commandId });
+    const error = await shell.openPath(file);
+    if (error) throw new Error('无法打开命令日志：' + error);
   });
   ipcMain.handle('jh:open-artifact', async (_, projectId, sessionId, artifactId) => {
     const selected = context(projectId, sessionId);
@@ -603,19 +623,36 @@ function register() {
     if (!project) return [];
     return (await projectParts(project.directory)).map(({ text, ...part }) => ({ ...part, label: label(part) }));
   });
-  ipcMain.handle('jh:external-plugins', () => call('listExternalPlugins'));
-  ipcMain.handle('jh:install-external-plugin', async () => {
+  ipcMain.handle('jh:external-plugins', (_, projectId) => call('listExternalPlugins', { projectId }));
+  ipcMain.handle('jh:install-external-plugin', async (_, projectId) => {
     const result = await dialog.showOpenDialog(win, {
-      title: '安装工具插件',
+      title: projectId ? '为当前项目安装工具插件' : '为所有项目安装工具插件',
       properties: ['openDirectory']
     });
     if (result.canceled || !result.filePaths[0]) return null;
-    return call('installExternalPlugin', { directory: result.filePaths[0] });
+    return call('installExternalPlugin', { directory: result.filePaths[0], projectId });
   });
-  ipcMain.handle('jh:set-external-plugin', (_, pluginId, enabled) =>
-    call('setExternalPluginEnabled', { pluginId, enabled: enabled === true }));
-  ipcMain.handle('jh:uninstall-external-plugin', (_, pluginId) =>
-    call('uninstallExternalPlugin', { pluginId }));
+  ipcMain.handle('jh:set-external-plugin', (_, pluginId, enabled, projectId) =>
+    call('setExternalPluginEnabled', { pluginId, projectId, enabled: enabled === true }));
+  ipcMain.handle('jh:upgrade-external-plugin', async (_, pluginId, projectId) => {
+    const change = await call('previewPluginUpgrade', { pluginId, projectId });
+    const scope = projectId ? '当前项目' : '所有项目';
+    if (change.fromDigest === change.toDigest) {
+      await dialog.showMessageBox(win, { message: '已是当前版本', detail: pluginId + ' · ' + change.version });
+      return;
+    }
+    const answer = await dialog.showMessageBox(win, {
+      type: 'question', message: '更新' + scope + '的插件 ' + pluginId + '？',
+      detail: [change.version, change.fromDigest + ' → ' + change.toDigest,
+        ...change.changes.slice(0, 30), ...(change.changes.length > 30 ? ['共 ' + change.changes.length + ' 项变化'] : []),
+        ...change.excerpts].join('\n'),
+      buttons: ['取消', '更新此版本'], defaultId: 0, cancelId: 0
+    });
+    if (answer.response === 1) await call('upgradeExternalPlugin', { pluginId, projectId,
+      fromDigest: change.fromDigest, toDigest: change.toDigest });
+  });
+  ipcMain.handle('jh:uninstall-external-plugin', (_, pluginId, projectId) =>
+    call('uninstallExternalPlugin', { pluginId, projectId }));
   ipcMain.handle('jh:test-model', (_, input) => {
     const model = modelInput(input);
     const effort = resolveEffort(model, input.testEffort);
@@ -776,10 +813,18 @@ async function smokeInterruptedApproval() {
   const result = { heading: summary.innerText, text: details.innerText, url: location.href };
   dismiss.click();
   await waitFor(() => !document.querySelector(selector), 'Dismissed approval still renders');
-  const contextButton = [...document.querySelectorAll('button')]
-    .find(button => button.title === '上下文');
-  if (!contextButton) throw new Error('Context entry missing');
-  contextButton.click();
+  const toolsButton = document.querySelector('button[aria-label="工作区工具"]');
+  if (!toolsButton || toolsButton.disabled) throw new Error('Workspace tools missing');
+  async function chooseTool(id) {
+    await waitFor(() => !document.querySelector('.inspector-select'), 'Previous inspector did not close');
+    toolsButton.click();
+    return waitFor(() => document.querySelector('.inspector-select'), 'Inspector did not open')
+      .then(select => {
+        select.value = id;
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+  }
+  toolsButton.click();
   const contextDialog = await waitFor(
     () => document.querySelector('dialog.nav-context'), 'Context dialog did not open');
   await waitFor(
@@ -787,10 +832,7 @@ async function smokeInterruptedApproval() {
     'Context empty state did not load');
   result.context = contextDialog.innerText;
   contextDialog.querySelector('.dialog-head button').click();
-  const reportButton = [...document.querySelectorAll('button')]
-    .find(button => button.title === '任务报告');
-  if (!reportButton) throw new Error('Task report entry missing');
-  reportButton.click();
+  await chooseTool('reports');
   const reportDialog = await waitFor(
     () => document.querySelector('dialog.nav-reports'), 'Task report dialog did not open');
   await waitFor(
@@ -798,6 +840,7 @@ async function smokeInterruptedApproval() {
     'Task report empty state did not load');
   result.reports = reportDialog.innerText;
   reportDialog.querySelector('.dialog-head button').click();
+  document.querySelector('.tool-list summary').click();
   const worktreeButton = [...document.querySelectorAll('button')]
     .find(button => button.title === '隔离工作树');
   if (!worktreeButton) throw new Error('Worktree entry missing');
@@ -809,6 +852,7 @@ async function smokeInterruptedApproval() {
     'Worktree panel did not render');
   result.worktrees = worktreeDialog.innerText;
   worktreeDialog.querySelector('.dialog-head button').click();
+  document.querySelector('.tool-list summary').click();
   const automationButton = [...document.querySelectorAll('button')]
     .find(button => button.title === '自动任务');
   if (!automationButton) throw new Error('Automation entry missing');
@@ -820,6 +864,7 @@ async function smokeInterruptedApproval() {
     'Automation empty state did not load');
   result.automations = automationDialog.innerText;
   automationDialog.querySelector('.dialog-head button').click();
+  document.querySelector('.tool-list summary').click();
   const maintenanceButton = [...document.querySelectorAll('button')]
     .find(button => button.title === '数据与运维');
   if (!maintenanceButton) throw new Error('Maintenance entry missing');
@@ -831,10 +876,7 @@ async function smokeInterruptedApproval() {
     'Maintenance panel did not render');
   result.maintenance = maintenanceDialog.innerText;
   maintenanceDialog.querySelector('.dialog-head button').click();
-  const checkpointButton = [...document.querySelectorAll('button')]
-    .find(button => button.title === '检查点');
-  if (!checkpointButton) throw new Error('Checkpoint entry missing');
-  checkpointButton.click();
+  await chooseTool('checkpoints');
   const checkpointDialog = await waitFor(
     () => document.querySelector('dialog.nav-checkpoints'), 'Checkpoint dialog did not open');
   await waitFor(
@@ -859,6 +901,7 @@ async function smokeTaskCenter() {
   const dialog = await waitFor(() => document.querySelector('dialog.nav-tasks'), 'Task center did not open');
   await waitFor(() => dialog.innerText.includes('没有运行中或等待处理的任务'), 'Task center did not load');
   dialog.querySelector('.dialog-head button').click();
+  document.querySelector('.tool-list summary').click();
   const pluginButton = await waitFor(
     () => document.querySelector('button[title="Skills 与插件"]'), 'Plugin entry missing');
   pluginButton.click();
@@ -979,11 +1022,38 @@ async function smokeConversationStage(stage, fixture) {
 
   await waitFor(() => document.querySelector('.user-msg')?.innerText === fixture.prompt && reply(fixture.reply),
     'Chat history did not contain the saved prompt and reply');
+  button(document.querySelector('.view-switch'), '最近会话').click();
   const saved = await waitFor(() => Array.from(document.querySelectorAll('.recent-session'))
     .find(session => session.innerText.trim() === fixture.prompt),
     'The completed conversation did not appear under recent sessions');
-  return { prompt: document.querySelector('.user-msg').innerText, reply: reply(fixture.reply).innerText.trim(),
+  const result = { prompt: document.querySelector('.user-msg').innerText, reply: reply(fixture.reply).innerText.trim(),
     session: saved.innerText.trim(), url: location.href };
+  if (stage === 'reopen') {
+    button(document.querySelector('.view-switch'), '项目').click();
+    const add = await waitFor(() => document.querySelector('.project-add'), 'Missing project new chat button');
+    const newChat = document.querySelector('.new-chat');
+    function burst() {
+      newChat.focus();
+      for (let i = 0; i < 5; i++) {
+        newChat.click();
+        add.click();
+        window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyN', ctrlKey: true }));
+      }
+    }
+    const project = (await window.jharness.state()).projects[0];
+    const input = document.querySelector('.composer textarea');
+    burst();
+    await waitFor(() => document.activeElement === input && !document.querySelector('.user-msg'),
+      'Did not switch from a populated conversation to a blank');
+    setValue(input, HTMLTextAreaElement.prototype, '尚未发送的草稿');
+    burst();
+    await waitFor(() => document.activeElement === input, 'Repeated new chat did not return to composer');
+    const sessions = (await window.jharness.state()).projects[0].sessions;
+    if (sessions.length !== 2 || input.value !== '尚未发送的草稿') throw new Error('Duplicate blank or lost draft');
+    const ids = await Promise.all(Array.from({ length: 8 }, () => window.jharness.newSession(project.id)));
+    if (ids.some(session => session.id !== sessions[0].id)) throw new Error('Concurrent blank reuse failed');
+  }
+  return result;
 }
 
 async function smokeDesktopConversation(reopen) {

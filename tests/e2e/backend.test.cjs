@@ -10,7 +10,7 @@ const { copyFile, mkdtemp, mkdir, readFile, realpath, writeFile, rm } = require(
 const { tmpdir } = require('node:os');
 const path = require('node:path');
 
-test('read and edit project files, stream a reply, and reopen the session', { timeout: 45000 }, async () => {
+test('read and edit project files, stream a reply, and reopen the session', { timeout: 120000 }, async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'jharness-test-'));
   const projectPath = path.join(root, 'project');
   const data = path.join(root, 'data');
@@ -242,6 +242,50 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
       /PLUGIN-ECHO-42/);
     assert.equal(await call('uninstallExternalPlugin', { pluginId: 'fixture.echo' }), true);
     assert.deepEqual(await call('listExternalPlugins'), []);
+    // The creation-mode approval registers an isolated copy for A. B has its own pin.
+    const otherProject = { projectId: randomUUID(), projectPath: path.join(root, 'other-project'), sessionId: randomUUID() };
+    await mkdir(otherProject.projectPath);
+    const createdDir = path.join(projectPath, 'echo');
+    await mkdir(createdDir);
+    const script = await readFile(path.join(pluginSource, 'plugin.cjs'), 'utf8');
+    await writeFile(path.join(createdDir, 'plugin.cjs'), script);
+    pluginManifest.arguments = [path.join(createdDir, 'plugin.cjs')];
+    await writeFile(path.join(createdDir, 'jharness-plugin.json'), JSON.stringify(pluginManifest));
+    steps = [['install_plugin', { directory: 'echo' }]];
+    const createRun = randomUUID();
+    await call('chat', { ...context, sessionId: randomUUID(), ...model, runId: createRun,
+      permission: 'create', message: '安装本项目中的示例插件' });
+    const proposal = await waitEvent(createRun, 'approval');
+    assert.match(proposal.data.after, /SHA-256/);
+    await call('approve', { runId: createRun, approvalId: proposal.data.id, allow: true });
+    await waitEvent(createRun, 'done');
+    const scoped = { projectId: context.projectId, pluginId: 'fixture.echo' };
+    const b = { projectId: otherProject.projectId, pluginId: scoped.pluginId };
+    assert.equal((await call('listExternalPlugins', scoped))[0].enabled, true);
+    assert.deepEqual(await call('listExternalPlugins', b), []);
+    assert.deepEqual(await call('listExternalPlugins'), []);
+    await call('installExternalPlugin', { ...b, directory: createdDir });
+    await call('setExternalPluginEnabled', { ...b, enabled: true });
+    const altered = script.replace('result: { text }', 'result: { text: "V2-" + text }');
+    await writeFile(path.join(createdDir, 'plugin.cjs'), altered);
+    const change = await call('previewPluginUpgrade', scoped);
+    assert.deepEqual(change.changes, ['修改 plugin.cjs']);
+    await writeFile(path.join(createdDir, 'plugin.cjs'), altered + '\\n');
+    await assert.rejects(call('upgradeExternalPlugin', { ...scoped, ...change }));
+    await writeFile(path.join(createdDir, 'plugin.cjs'), altered);
+    await call('upgradeExternalPlugin', { ...scoped, ...change });
+    await writeFile(path.join(createdDir, 'plugin.cjs'), '// source no longer executable');
+    for (const [owner, expected] of [[context, 'V2-pin-test'], [otherProject, 'pin-test']]) {
+      const run = randomUUID();
+      steps = [['plugin_echo', { text: 'pin-test' }]];
+      await call('chat', { ...owner, sessionId: randomUUID(), ...model, runId: run,
+        permission: 'full', message: '运行当前项目固定的插件' });
+      await waitEvent(run, 'done');
+      const returned = requests.at(-1).body.messages.filter(message => message.role === 'tool').at(-1);
+      assert.equal(JSON.parse(returned.content).text, expected, JSON.stringify(await call('listExternalPlugins', { projectId: owner.projectId })));
+    }
+    await call('uninstallExternalPlugin', scoped);
+    await call('uninstallExternalPlugin', b);
     steps = pluginSteps;
     const search = await call('searchSessions', { query: 'orchid-28', sessions: [{ ...context, title: 'Fixture' }] });
     assert.equal(search[0].messageId, history[1].id);
@@ -382,6 +426,11 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     assert.equal(commandReport.commands[0].exitCode, 7);
     assert.equal(commandReport.commands[0].outcome, 'FAILED');
     assert.match(commandReport.commands[0].output, /完成/);
+    assert.equal(commandReport.commands[0].logComplete, true);
+    const savedLog = await call('commandLog', {
+      ...commandContext, runId: terminal, commandId: commandReport.commands[0].id
+    });
+    assert.match(await readFile(savedLog, 'utf8'), /完成/);
     assert.equal(commandReport.acceptance.criteria.length, 1);
     assert.equal(commandReport.acceptance.criteria[0].status, 'PENDING');
     const verifiedCriterion = await call('verifyCriterion', {

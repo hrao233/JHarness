@@ -1,40 +1,41 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { BookOpen, Brain, CircleCheck, CircleDashed, CircleX, ClipboardList, Download, ExternalLink,
-  CalendarClock, Database, FileBox, GitBranch, GitPullRequest, House, Images, ListChecks, Pause,
-  Play, Plus, Power, Puzzle, RefreshCw, RotateCcw, ScanText, Search, Settings, SquareTerminal,
+  CalendarClock, Database, FileBox, GitBranch, GitPullRequest, Ellipsis, ListChecks, Pause,
+  Play, Plus, Power, Puzzle, RefreshCw, RotateCcw, Search, SquareTerminal,
   Trash2, X }
   from 'lucide-react';
 
-export function Navigation({ showSidebar, home, attachImage, openPanel, openSettings, busy, project, session }) {
-  const links = [
-    { label: '首页', Icon: House, action: home, expanded: showSidebar },
-    { label: '添加图片', Icon: Images, action: attachImage, disabled: !project || busy },
-    { label: '资料库', Icon: BookOpen, action: () => openPanel('library') },
-    { label: '项目记忆', Icon: Brain, action: () => openPanel('memory'), disabled: !project },
-    { label: 'Skills 与插件', Icon: Puzzle, action: () => openPanel('plugins') },
-    { label: '搜索会话', Icon: Search, action: () => openPanel('search') },
-    { label: '任务中心', Icon: ListChecks, action: () => openPanel('tasks') },
-    { label: '自动任务', Icon: CalendarClock, action: () => openPanel('automations'), disabled: !project },
-    { label: '任务报告', Icon: ClipboardList, action: () => openPanel('reports'), disabled: !session },
-    { label: '隔离工作树', Icon: GitBranch, action: () => openPanel('worktrees'), disabled: !project },
-    { label: '数据与运维', Icon: Database, action: () => openPanel('maintenance') },
-    { label: '上下文', Icon: ScanText, action: () => openPanel('context'), disabled: !session },
-    { label: '检查点', Icon: RotateCcw, action: () => openPanel('checkpoints'), disabled: !project },
-    { label: '代码审查', Icon: GitPullRequest, action: () => openPanel('review'), disabled: !project }
-  ];
-  return <nav className="navigation-rail" aria-label="工作台导航">
-    {links.map(({ label, Icon, action, disabled, expanded }) =>
-      <button key={label} type="button" title={label} aria-label={label} aria-expanded={expanded}
-        disabled={disabled} onClick={action}><Icon size={19}/></button>)}
-    <button type="button" className="rail-settings" aria-label="设置" title="设置" onClick={openSettings}><Settings size={19}/></button>
+const titles = {
+  library: '资料库', plugins: 'Skills 与插件', search: '搜索会话', tasks: '任务中心',
+  memory: '项目记忆', reports: '任务报告', automations: '自动任务', worktrees: '隔离工作树',
+  context: '上下文', checkpoints: '检查点', maintenance: '数据与运维', review: '代码审查'
+};
+
+export const inspectorTools = ['context', 'reports', 'review', 'checkpoints'];
+
+export function Navigation({ openPanel, project }) {
+  const more = useRef(null);
+  function entry(id, Icon, disabled = false) {
+    return <button type="button" className="side-action" title={titles[id]} disabled={disabled}
+      onClick={() => { more.current.open = false; openPanel(id); }}>
+      <Icon size={17}/>{titles[id]}
+    </button>;
+  }
+  return <nav className="workspace-nav" aria-label="工作台导航">
+    {entry('search', Search)}
+    {entry('library', BookOpen)}
+    {entry('tasks', ListChecks)}
+    <details ref={more} className="tool-list">
+      <summary className="side-action"><Ellipsis size={17}/>更多工具</summary>
+      {entry('memory', Brain, !project)}
+      {entry('plugins', Puzzle)}
+      {entry('automations', CalendarClock, !project)}
+      {entry('worktrees', GitBranch, !project)}
+      {entry('maintenance', Database)}
+    </details>
   </nav>;
 }
 
-const titles = {
-  library: '资料库', plugins: 'Skills 与插件', search: '搜索会话', tasks: '任务中心',
-  reports: '任务报告', automations: '自动任务', worktrees: '隔离工作树', context: '上下文',
-  checkpoints: '检查点', maintenance: '数据与运维', review: '代码审查'
-};
 const taskStatus = {
   queued: '排队中', running: '运行中', suspended: '等待审批',
   interrupted: '已中断', failed: '失败', completed: '已完成', cancelled: '已取消', rejected: '已拒绝'
@@ -48,7 +49,7 @@ const formatBytes = value => {
 };
 
 export function NavigationPanel({ panel, close, projects, project, bookmarks, openChat, removeBookmark,
-    copy, addPart, busy, api, errorText, session, onWorktreesChanged, openWorktree }) {
+    copy, addPart, busy, api, errorText, session, onWorktreesChanged, openWorktree, docked, switchTool }) {
   const dialog = useRef(null);
   const [query, setQuery] = useState('');
   const [result, setResult] = useState(null);
@@ -59,7 +60,10 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
   const [tasks, setTasks] = useState(null);
   const [context, setContext] = useState(null);
   const [exportState, setExportState] = useState(null);
-  const [externalPlugins, setExternalPlugins] = useState([]);
+  const [globalPlugins, setGlobalPlugins] = useState(false);
+  const pluginProject = globalPlugins || !project ? null : project.id;
+  const [pluginListing, setPluginListing] = useState(null);
+  const externalPlugins = pluginListing?.scope === pluginProject ? pluginListing.plugins : [];
   const [pluginBusy, setPluginBusy] = useState('');
   const [checkpoints, setCheckpoints] = useState(null);
   const [checkpointDetail, setCheckpointDetail] = useState(null);
@@ -87,7 +91,12 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
   const [automationSchedule, setAutomationSchedule] = useState('interval');
   const [automationInterval, setAutomationInterval] = useState('60');
   const [automationRunAt, setAutomationRunAt] = useState('');
-  useEffect(() => { dialog.current.showModal(); }, []);
+  useEffect(() => {
+    const element = dialog.current;
+    if (docked) element.show();
+    else element.showModal();
+    return () => element.close();
+  }, [docked]);
   useEffect(() => {
     if (panel !== 'plugins' && (panel !== 'review' || !project)) return;
     let live = true;
@@ -96,16 +105,16 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
     const read = panel === 'plugins'
       ? Promise.all([
         project ? api.projectParts(project.id) : Promise.resolve([]),
-        api.externalPlugins()
+        api.externalPlugins(pluginProject)
       ]).then(([parts, plugins]) => {
-        if (live) setExternalPlugins(plugins);
+        if (live) setPluginListing({ scope: pluginProject, plugins });
         return parts;
       })
       : api.review(project.id);
     read.then(value => { if (live) setResult(value); })
       .catch(error => { if (live) setError(errorText(error)); });
     return () => { live = false; };
-  }, [panel, project?.id, revision]);
+  }, [panel, project?.id, pluginProject, revision]);
 
   useEffect(() => {
     if (panel !== 'tasks') return;
@@ -138,7 +147,7 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
       if (live) setError(errorText(failure));
     });
     return () => { live = false; };
-  }, [api, errorText, panel, project?.id, session?.id, revision]);
+  }, [api, errorText, panel, project?.id, session?.id, revision, busy]);
 
   useEffect(() => {
     if (panel !== 'checkpoints' || !project) return;
@@ -152,7 +161,7 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
       if (live) setError(errorText(failure));
     });
     return () => { live = false; };
-  }, [api, errorText, panel, project?.id, session?.id, revision]);
+  }, [api, errorText, panel, project?.id, session?.id, revision, busy]);
 
   useEffect(() => {
     if (panel !== 'reports' || !project || !session) return;
@@ -165,7 +174,7 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
       if (live) setError(errorText(failure));
     });
     return () => { live = false; };
-  }, [api, errorText, panel, project?.id, session?.id, revision]);
+  }, [api, errorText, panel, project?.id, session?.id, revision, busy]);
 
   useEffect(() => {
     setReports(null);
@@ -265,8 +274,21 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
     setPluginBusy('install');
     setError('');
     try {
-      const installed = await api.installExternalPlugin();
+      const installed = await api.installExternalPlugin(pluginProject);
       if (installed) setRevision(value => value + 1);
+    } catch (failure) {
+      setError(errorText(failure));
+    } finally {
+      setPluginBusy('');
+    }
+  }
+
+  async function upgradeExternalPlugin(plugin) {
+    setPluginBusy(plugin.id);
+    setError('');
+    try {
+      await api.upgradeExternalPlugin(plugin.id, pluginProject);
+      setRevision(value => value + 1);
     } catch (failure) {
       setError(errorText(failure));
     } finally {
@@ -278,8 +300,8 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
     setPluginBusy(plugin.id);
     setError('');
     try {
-      const next = await api.setExternalPlugin(plugin.id, !plugin.enabled);
-      setExternalPlugins(previous => previous.map(item => item.id === next.id ? next : item));
+      await api.setExternalPlugin(plugin.id, !plugin.enabled, pluginProject);
+      setRevision(value => value + 1);
     } catch (failure) {
       setError(errorText(failure));
     } finally {
@@ -291,8 +313,8 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
     setPluginBusy(plugin.id);
     setError('');
     try {
-      await api.uninstallExternalPlugin(plugin.id);
-      setExternalPlugins(previous => previous.filter(item => item.id !== plugin.id));
+      await api.uninstallExternalPlugin(plugin.id, pluginProject);
+      setRevision(value => value + 1);
     } catch (failure) {
       setError(errorText(failure));
     } finally {
@@ -542,9 +564,15 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
     }
   }
 
-  return <dialog ref={dialog} className={'dialog nav-dialog nav-' + panel} aria-label={titles[panel]}
+  return <dialog ref={dialog} className={'dialog nav-dialog nav-' + panel + (docked ? ' docked' : '')} aria-label={titles[panel]}
     onCancel={event => { event.preventDefault(); close(); }}>
-    <div className="dialog-head"><h2>{titles[panel]}</h2>
+    <div className="dialog-head">{inspectorTools.includes(panel)
+        ? <select className="inspector-select" aria-label="工作区工具" value={panel}
+            onChange={event => switchTool(event.target.value)}>
+            {inspectorTools.map(id => <option key={id} value={id}
+              disabled={!session && (id === 'reports' || id === 'context')}>{titles[id]}</option>)}
+          </select>
+        : <h2>{titles[panel]}</h2>}
       <button onClick={close} aria-label="关闭"><X size={18}/></button></div>
     {error && <p className="error-text" role="alert">{error}</p>}
     {panel === 'search' && <>
@@ -870,6 +898,13 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
                 {' · '}{command.durationMs} ms
                 {command.outputTruncated ? ' · 输出已截断' : ''}
               </small>
+              {!!command.testFailures?.length && <div>
+                <strong>失败用例</strong><ul>{command.testFailures.map((failure, index) =>
+                  <li key={index}>{failure}</li>)}</ul>
+              </div>}
+              {command.logComplete && <button type="button" className="secondary"
+                onClick={() => api.openCommandLog(project.id, session.id, report.runId, command.id)
+                  .catch(failure => setError(errorText(failure)))}>打开完整日志</button>}
               {command.output && <details className="command-output">
                 <summary>查看输出</summary><pre>{command.output}</pre>
               </details>}
@@ -923,7 +958,7 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
               <div className="change-set-actions">
                 <button type="button" className="secondary"
                   onClick={() => setChangeSet(null)}>收起</button>
-                <button type="button" className="primary" disabled={!changeSet.canRestore || !!changeSetBusy}
+                <button type="button" className="primary" disabled={busy || !changeSet.canRestore || !!changeSetBusy}
                   onClick={() => restoreChangeSet(changeSet)}>恢复整组改动</button>
               </div>
             </div>}
@@ -1087,7 +1122,7 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
           <div><strong>{checkpointDetail.path}</strong>
             <small>{checkpointDetail.operation} · {checkpointDetail.status}</small></div>
           <button type="button" className="secondary"
-            disabled={checkpointDetail.status !== 'SUCCESS' || !!checkpointBusy}
+            disabled={busy || checkpointDetail.status !== 'SUCCESS' || !!checkpointBusy}
             onClick={() => restoreCheckpoint(checkpointDetail)}>
             <RotateCcw size={15}/>恢复此文件
           </button>
@@ -1103,7 +1138,7 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
     {panel === 'plugins' && <>
       <div className="review-head"><span>项目资源与已安装工具</span>
         <button type="button" className="secondary" disabled={!!pluginBusy}
-          onClick={installExternalPlugin}><Plus size={15}/>安装工具插件</button>
+          onClick={installExternalPlugin}><Plus size={15}/>{pluginProject ? "为当前项目安装" : "为所有项目安装"}</button>
       </div>
       <div className="nav-list plugin-list">
         <div className="side-label">项目 Skill 与插件</div>
@@ -1114,12 +1149,18 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
           <Puzzle size={17}/><span className="menu-copy">{part.name}<small>{part.source}</small></span>
         </button>)}
         {project && result?.length === 0 && <p className="muted">当前项目还没有可用的 Skill 或插件。</p>}
-        <div className="side-label">外部工具插件</div>
+        <label className="side-label">外部插件范围 <select disabled={!!pluginBusy}
+          value={pluginProject ? 'project' : 'global'} onChange={event => {
+            setGlobalPlugins(event.target.value === 'global');
+          }}>
+          {project && <option value="project">当前项目</option>}
+          <option value="global">所有项目</option>
+        </select></label>
         {externalPlugins.map(plugin => <div className="external-plugin" key={plugin.id}>
           <div className="external-plugin-head">
             <span className="menu-copy">
               <strong>{plugin.name || plugin.id}</strong>
-              <small>{plugin.id}{plugin.version ? ' · ' + plugin.version : ''}</small>
+              <small>{plugin.id}{plugin.version ? ' · ' + plugin.version : ''}{plugin.digest && ' · ' + plugin.digest.slice(0, 12)}</small>
             </span>
             <button type="button" className="secondary" disabled={!!pluginBusy}
               aria-pressed={plugin.enabled} onClick={() => toggleExternalPlugin(plugin)}>
@@ -1128,6 +1169,8 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
             <button type="button" className="secondary" aria-label={'卸载 ' + plugin.name}
               disabled={!!pluginBusy} onClick={() => uninstallExternalPlugin(plugin)}><Trash2 size={15}/></button>
           </div>
+          {plugin.digest && <button type="button" className="secondary" disabled={!!pluginBusy}
+            onClick={() => upgradeExternalPlugin(plugin)}>检查更新</button>}
           {plugin.description && <p>{plugin.description}</p>}
           <div className="plugin-tools">{plugin.tools?.map(tool => <code key={tool.name}>{tool.name}</code>)}</div>
           {plugin.error && <p className="error-text" role="alert">{plugin.error}</p>}

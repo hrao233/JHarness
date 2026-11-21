@@ -2,6 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ArrowDown, Bookmark, Check, Copy, Ellipsis, FileText, GitBranch, Quote } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { FileActivity, groupFileActivity } from './FileActivity.jsx';
 
 export function Conversation({ items, sessionId, children, status, copy, quote, saved, onSave, onFork,
     run, jump, scroll }) {
@@ -123,7 +124,10 @@ export function Conversation({ items, sessionId, children, status, copy, quote, 
     <div className="scroll" ref={scroll} onScroll={update}>
       <div className="thread" ref={thread}>
         {children}
-        {rows.map(({ item, turn, index }) => item.role === 'tool'
+        {groupFileActivity(rows).map(({ item, turn, index, calls }) => calls
+          ? <FileActivity key={'activity:' + (item.id || index)} calls={calls} run={run}
+              onInspect={() => { follow.current = false; }}/>
+          : item.role === 'tool'
           ? <details className="tool" key={item.id || index}><summary><FileText size={15}/>{item.name}<small>{item.status}</small></summary>
             {item.args && <pre>{item.args}</pre>}{item.output && <pre>{item.output}</pre>}</details>
           : <Message key={sessionId + ':' + index} item={item} turn={turn}

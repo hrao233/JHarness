@@ -18,6 +18,38 @@ class ExternalPluginManagerTest {
     @TempDir Path temporary;
 
     @Test
+    void pinsLegacyGlobalRegistrationAndDetectsScriptOnlyChangesBeforeApproval() throws Exception {
+        Path source = Files.createDirectory(temporary.resolve("legacy"));
+        Path data = Files.createDirectory(temporary.resolve("data"));
+        Files.writeString(source.resolve("jharness-plugin.json"), """
+                {"id":"legacy.echo","executable":"java","arguments":["-version"],
+                 "tools":[{"name":"legacy_tool","inputSchema":{"type":"object"}}]}
+                """);
+        Path code = source.resolve("entry.txt");
+        Files.writeString(code, "first");
+        new ObjectMapper().writeValue(data.resolve("external-plugins.json").toFile(),
+                List.of(Map.of("directory", source.toString(), "enabled", true)));
+        try (var manager = new ExternalPluginManager(data)) {
+            var first = manager.list().get(0);
+            assertTrue(first.enabled());
+            assertEquals(64, first.digest().length());
+            Files.writeString(code, "second");
+            var change = manager.previewUpgrade(first.id());
+            assertEquals(List.of("修改 entry.txt"), change.changes());
+            assertEquals("first", Files.readString(data.resolve(".plugin-versions").resolve(first.digest()).resolve("entry.txt")));
+            Files.writeString(code, "third");
+            assertThrows(IllegalArgumentException.class, () -> manager.upgrade(first.id(), change.fromDigest(), change.toDigest()));
+            assertEquals(first.digest(), manager.list().get(0).digest());
+        }
+        try (var manager = new ExternalPluginManager(temporary.resolve("other"))) {
+            var proposal = manager.preview(source);
+            Files.writeString(code, "modified after proposal");
+            assertThrows(IllegalArgumentException.class, () -> manager.installEnabled(proposal));
+            assertTrue(manager.list().isEmpty());
+        }
+    }
+
+    @Test
     void rejectsChangedOrPreviouslyInstalledPluginsAtApprovalTime() throws Exception {
         Path plugin = Files.createDirectory(temporary.resolve("proposal"));
         Path manifest = plugin.resolve("jharness-plugin.json");

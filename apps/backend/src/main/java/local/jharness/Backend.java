@@ -55,6 +55,7 @@ public final class Backend {
     private final Path dataDirectory;
     private final SessionSearchIndex sessionSearch;
     private final ExternalPluginManager externalPlugins;
+    private final Map<String, ExternalPluginManager> projectPlugins = new java.util.concurrent.ConcurrentHashMap<>();
     private final ConversationRuntime conversations = new ConversationRuntime(this::event, Backend::describe);
     private final DurableConversation durableConversations =
             new DurableConversation(this::event, Backend::describe);
@@ -97,6 +98,7 @@ public final class Backend {
         } finally {
             conversations.close();
             durableConversations.close();
+            projectPlugins.values().forEach(ExternalPluginManager::close);
             externalPlugins.close();
             workers.shutdownNow();
         }
@@ -129,11 +131,14 @@ public final class Backend {
                 case "context" -> sessionContext(params);
                 case "forkSession" -> forkSession(params);
                 case "exportSession" -> exportSession(params);
-                case "listExternalPlugins" -> externalPlugins.list();
+                case "listExternalPlugins" -> pluginRegistry(params).list();
                 case "installExternalPlugin" -> installExternalPlugin(params);
-                case "setExternalPluginEnabled" -> externalPlugins.setEnabled(
+                case "setExternalPluginEnabled" -> pluginRegistry(params).setEnabled(
                         required(params, "pluginId"), params.path("enabled").asBoolean(false));
-                case "uninstallExternalPlugin" -> externalPlugins.uninstall(required(params, "pluginId"));
+                case "previewPluginUpgrade" -> pluginRegistry(params).previewUpgrade(required(params, "pluginId"));
+                case "upgradeExternalPlugin" -> pluginRegistry(params).upgrade(required(params, "pluginId"),
+                        required(params, "fromDigest"), required(params, "toDigest"));
+                case "uninstallExternalPlugin" -> pluginRegistry(params).uninstall(required(params, "pluginId"));
                 case "checkpoints" -> checkpointStore(params).list(params.path("sessionId").asText(""));
                 case "checkpoint" -> checkpointStore(params).get(identifier(params, "checkpointId"));
                 case "restoreCheckpoint" -> checkpointStore(params).restore(
@@ -145,6 +150,8 @@ public final class Backend {
                 case "changeSets" -> checkpointStore(params).changeSets(
                         identifier(params, "sessionId"), identifier(params, "runId"));
                 case "taskReport" -> taskReport(params);
+                case "commandLog" -> new TaskReportStore(workspace(params)).commandLog(
+                        identifier(params, "sessionId"), identifier(params, "runId"), identifier(params, "commandId"));
                 case "taskArtifact" -> new TaskReportStore(workspace(params)).artifact(
                         identifier(params, "sessionId"), identifier(params, "artifactId"));
                 case "verifyCriterion" -> new TaskReportStore(workspace(params)).verifyCriterion(
@@ -448,8 +455,14 @@ public final class Backend {
                 params.path("format").asText("markdown"));
     }
 
+    private ExternalPluginManager pluginRegistry(JsonNode params) {
+        if (!params.hasNonNull("projectId")) return externalPlugins;
+        return projectPlugins.computeIfAbsent(identifier(params, "projectId"),
+                id -> new ExternalPluginManager(dataDirectory.resolve(id).resolve("plugins")));
+    }
+
     private ExternalPluginManager.Status installExternalPlugin(JsonNode params) {
-        return externalPlugins.install(Path.of(required(params, "directory")).toAbsolutePath().normalize());
+        return pluginRegistry(params).install(Path.of(required(params, "directory")).toAbsolutePath().normalize());
     }
 
     private ProjectCheckpointStore checkpointStore(JsonNode params) throws Exception {
@@ -492,8 +505,13 @@ public final class Backend {
         boolean autoMemory = params.path("autoMemory").asBoolean();
         Model auxiliary =
                 autoMemory || permission.equals("assist") ? model(params, true) : model;
+        var local = pluginRegistry(params);
+        var tools = new ArrayList<>(local.tools());
+        var localIds = local.list().stream().map(ExternalPluginManager.Status::id).collect(java.util.stream.Collectors.toSet());
+        var names = tools.stream().map(tool -> tool.getName()).collect(java.util.stream.Collectors.toSet());
+        tools.addAll(externalPlugins.tools(localIds, names));
         return new ConversationRuntime.Request(workspace(params), project, runtimeContext, message,
-                task, model, auxiliary, autoMemory, permission, externalPlugins.tools(), externalPlugins);
+                task, model, auxiliary, autoMemory, permission, List.copyOf(tools), local);
     }
 
     private List<DurableApprovalStore.ApprovalRecord> listApprovals(JsonNode params) throws Exception {

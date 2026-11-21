@@ -5,11 +5,12 @@ import io.agentscope.core.message.ToolExecutionDetails;
 import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.Base64;
+import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
@@ -17,7 +18,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 
 public final class ProjectCommand {
-    private static final int MAX_OUTPUT_BYTES = 12000;
+    private record Receipt(String session, String run, String id) {}
     private final Path project;
     private final ApprovedOperation approval;
     private final TaskReportStore reports;
@@ -54,17 +55,23 @@ public final class ProjectCommand {
 
     private ToolResultBlock runApproved(RuntimeContext context, String command) {
         long startedAt = System.currentTimeMillis();
+        String run = activeRunId.get();
+        if ((run == null || run.isBlank()) && context != null) run = context.getRunId();
+        Receipt receipt = context == null || context.getSessionId() == null || run == null ? null
+                : new Receipt(context.getSessionId(), run, UUID.randomUUID().toString());
+        Path log = receipt == null ? null : reports.logPath(receipt.session(), receipt.run(), receipt.id());
         Process process = null;
         try {
+            var tests = SurefireFailures.beforeCommand(project, command);
             synchronized (this) {
                 if (closed) {
                     return evidence(
-                            context,
+                            receipt,
                             command,
                             startedAt,
                             null,
                             ToolExecutionDetails.Outcome.UNKNOWN,
-                            false,
+                            false, false, List.of(),
                             ToolResultBlock.error("任务已停止，命令未执行。"));
                 }
                 String shell = Path.of(System.getenv("SystemRoot"), "System32", "WindowsPowerShell",
@@ -81,28 +88,29 @@ public final class ProjectCommand {
             }
             process.getOutputStream().close();
             Process started = process;
-            var output = new FutureTask<>(() -> readOutput(started));
+            var output = new FutureTask<>(() -> CommandOutput.capture(started.getInputStream(), log));
             var reader = new Thread(output, "jharness-command-output");
             reader.setDaemon(true);
             reader.start();
-            if (!process.waitFor(2, TimeUnit.MINUTES)) {
-                return evidence(
-                        context,
-                        command,
-                        startedAt,
-                        null,
-                        ToolExecutionDetails.Outcome.UNKNOWN,
-                        true,
-                        ToolResultBlock.error("命令超过两分钟，已停止等待。"));
-            }
-            int code = process.exitValue();
-            CapturedOutput captured;
+            boolean timedOut = !process.waitFor(2, TimeUnit.MINUTES);
+            if (timedOut) stopProcess(process);
+            CommandOutput captured;
             try {
                 captured = output.get(2, TimeUnit.SECONDS);
             } catch (TimeoutException error) {
-                captured = new CapturedOutput("子进程仍占用输出，无法取得完整结果。", true);
+                captured = new CommandOutput("子进程仍占用输出，无法取得完整结果。", true, false);
             }
+            if (timedOut) {
+                return evidence(receipt, command, startedAt, null, ToolExecutionDetails.Outcome.UNKNOWN,
+                        true, captured.logComplete(), List.of(), ToolResultBlock.error("命令超过两分钟，已停止。\n" + captured.text()));
+            }
+            int code = process.exitValue();
             String result = "退出码 " + code + "\n" + captured.text();
+            if (captured.truncated()) {
+                result += captured.logComplete() ? "\n完整日志已保存到任务报告。" : "\n完整日志未能保存。";
+            }
+            List<String> failures = code != 0 && tests != null ? tests.failures() : List.of();
+            if (!failures.isEmpty()) result += "\n本次构建期间更新的 Surefire 报告（最多 10 项）\n" + String.join("\n", failures);
             ToolExecutionDetails.Outcome outcome = code == 0
                     ? ToolExecutionDetails.Outcome.SUCCEEDED
                     : ToolExecutionDetails.Outcome.FAILED;
@@ -110,31 +118,31 @@ public final class ProjectCommand {
                     ? ToolResultBlock.success(result)
                     : ToolResultBlock.error(result);
             return evidence(
-                    context,
+                    receipt,
                     command,
                     startedAt,
                     code,
                     outcome,
-                    captured.truncated(),
+                    captured.truncated(), captured.logComplete(), failures,
                     block);
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
             return evidence(
-                    context,
+                    receipt,
                     command,
                     startedAt,
                     null,
                     ToolExecutionDetails.Outcome.UNKNOWN,
-                    false,
+                    false, false, List.of(),
                     ToolResultBlock.error("命令已取消。"));
         } catch (IOException | ExecutionException error) {
             return evidence(
-                    context,
+                    receipt,
                     command,
                     startedAt,
                     null,
                     ToolExecutionDetails.Outcome.UNKNOWN,
-                    false,
+                    false, false, List.of(),
                     ToolResultBlock.error("无法执行 PowerShell 命令或读取输出。"));
         } finally {
             synchronized (this) {
@@ -158,24 +166,19 @@ public final class ProjectCommand {
     }
 
     private ToolResultBlock evidence(
-            RuntimeContext context,
+            Receipt receipt,
             String command,
             long startedAt,
             Integer exitCode,
             ToolExecutionDetails.Outcome outcome,
-            boolean truncated,
+            boolean truncated, boolean logComplete, List<String> failures,
             ToolResultBlock block) {
         var result = block.withExecutionDetails(
                 new ToolExecutionDetails("shell", outcome, exitCode, truncated));
-        String runId = activeRunId.get();
-        if (runId == null || runId.isBlank()) {
-            runId = context == null ? null : context.getRunId();
-        }
-        if (context != null && context.getSessionId() != null && runId != null) {
+        if (receipt != null) {
             try {
                 reports.recordCommand(
-                        context.getSessionId(),
-                        runId,
+                        receipt.id(), logComplete, failures, receipt.session(), receipt.run(),
                         command,
                         startedAt,
                         System.currentTimeMillis(),
@@ -194,22 +197,4 @@ public final class ProjectCommand {
         return result;
     }
 
-    private static CapturedOutput readOutput(Process process) throws IOException {
-        try (var input = process.getInputStream(); var captured = new ByteArrayOutputStream()) {
-            var buffer = new byte[4096];
-            boolean truncated = false;
-            int read;
-            while ((read = input.read(buffer)) != -1) {
-                int keep = Math.min(read, MAX_OUTPUT_BYTES - captured.size());
-                captured.write(buffer, 0, keep);
-                if (keep < read) truncated = true;
-            }
-            return new CapturedOutput(
-                    captured.toString(StandardCharsets.UTF_8)
-                            + (truncated ? "\n[输出已截断]" : ""),
-                    truncated);
-        }
-    }
-
-    private record CapturedOutput(String text, boolean truncated) {}
 }

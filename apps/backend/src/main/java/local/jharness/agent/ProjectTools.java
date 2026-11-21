@@ -4,16 +4,30 @@ import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.ArrayList;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 public final class ProjectTools {
     private static final int MAX_FILE_BYTES = 64 * 1024;
+    private static final int MAX_READ_BYTES = 8 * 1024 * 1024;
+    private static final int PAGE_CHARS = 16_000;
+    private static final int SEARCH_DEPTH = 32;
+    private static final int SEARCH_FILES = 3000;
+    private static final int SEARCH_MATCHES = 40;
+    private static final long SEARCH_BYTES = 64L * 1024 * 1024;
     private static final String EDIT_FAILURE = "无法编辑此文件。请检查项目路径、UTF-8 编码和 64 KiB 大小限制。";
     private static final String CREATE_FAILURE = "无法创建文件。请确认父目录存在、文件名未被占用，且内容不超过 64 KiB。";
     private final Path root;
@@ -38,13 +52,70 @@ public final class ProjectTools {
         }
     }
 
-    @Tool(name = "read_file", readOnly = true, description = "Read a UTF-8 source or documentation file inside the project.")
-    public ToolResultBlock read(@ToolParam(name = "path", description = "Project-relative file path") String path) {
-        try {
-            return ToolResultBlock.success(readText(resolve(path)));
-        } catch (IOException | IllegalArgumentException e) {
-            return ToolResultBlock.error("无法读取此文件。请检查项目路径、UTF-8 编码和 64 KiB 大小限制。");
+    @Tool(name = "read_file", readOnly = true, description = "Read UTF-8 project text. Large files return numbered pages; continue at the indicated start_line.")
+    public ToolResultBlock read(
+            @ToolParam(name = "path", description = "Project-relative file path") String path,
+            @ToolParam(name = "start_line", description = "First line, numbered from 1", required = false) Integer start,
+            @ToolParam(name = "line_count", description = "Number of lines (1–400, default 120 in paged mode)", required = false) Integer count) {
+        if ((start != null && start < 1) || (count != null && (count < 1 || count > 400))) {
+            return ToolResultBlock.error("start_line 须大于零，line_count 须在 1 至 400 之间。");
         }
+        try {
+            Path file = resolve(path);
+            long size = Files.size(file);
+            if (size > MAX_READ_BYTES) return ToolResultBlock.error("文件超过单文件读取上限 8 MiB。");
+            String text = readUtf8(file, size);
+            if (start == null && count == null && size <= MAX_FILE_BYTES) return ToolResultBlock.success(text);
+            return page(text, start == null ? 1 : start, count == null ? 120 : count);
+        } catch (IOException | IllegalArgumentException e) {
+            return ToolResultBlock.error("无法读取此文件。请检查项目路径、访问权限和 UTF-8 文本格式。");
+        }
+    }
+
+    private static String readUtf8(Path file, long size) throws IOException {
+        if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS) || size > MAX_READ_BYTES) {
+            throw new IOException("Expected a regular text file within the read limit");
+        }
+        byte[] bytes;
+        try (var input = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
+            bytes = input.readNBytes((int) size + 1);
+        }
+        if (bytes.length != size) throw new IOException("File changed during read");
+        for (byte value : bytes) {
+            if (value == 0) throw new IOException("Binary file");
+        }
+        return StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString();
+    }
+
+    private static Stream<String> lines(String text) {
+        // Keep the Unicode line separators recognized by the original text search.
+        return text.replace('\u000b', '\n').replace('\f', '\n').replace('\u0085', '\n')
+                .replace('\u2028', '\n').replace('\u2029', '\n').lines();
+    }
+
+    private static ToolResultBlock page(String text, int start, int count) {
+        var iterator = lines(text).skip(start - 1L).iterator();
+        if (!iterator.hasNext()) return ToolResultBlock.success("[文件结束，第 " + start + " 行无内容]");
+        StringBuilder output = new StringBuilder();
+        int number = start;
+        while (number - start < count && iterator.hasNext()) {
+            String line = iterator.next();
+            String prefix = number + " | ";
+            int remaining = PAGE_CHARS - output.length() - prefix.length() - 1;
+            if (!output.isEmpty() && line.length() > remaining) {
+                return ToolResultBlock.success(output + "[下一段 start_line=" + number + "]");
+            }
+            output.append(prefix);
+            if (line.length() > remaining) {
+                int end = Character.isHighSurrogate(line.charAt(remaining - 1)) ? remaining - 1 : remaining;
+                output.append(line, 0, end).append("… [本行过长，已截断]");
+            } else {
+                output.append(line);
+            }
+            output.append('\n');
+            number++;
+        }
+        return ToolResultBlock.success(output + (iterator.hasNext() ? "[下一段 start_line=" + number + "]" : "[文件结束]"));
     }
 
     @Tool(name = "edit_file", description = "Replace one exact text match in an existing UTF-8 project file. Read it first.", concurrencySafe = false)
@@ -189,47 +260,107 @@ public final class ProjectTools {
     }
 
     @Tool(name = "search_text", readOnly = true,
-            description = "Find literal text in UTF-8 project files and return relative paths and line numbers.")
+            description = "Find literal text in UTF-8 project files. Returns paths, line numbers and coverage. Narrow path when a search limit is reached.")
     public ToolResultBlock searchText(
             @ToolParam(name = "query", description = "Case-insensitive literal text") String query,
             @ToolParam(name = "path", description = "Project-relative directory or file; omit for root", required = false)
             String path) {
         if (query == null || query.isBlank()) return ToolResultBlock.error("请输入要查找的文字。");
-        String needle = query.toLowerCase(java.util.Locale.ROOT);
-        var matches = new java.util.ArrayList<String>();
-        try (Stream<Path> files = Files.find(resolve(path == null ? "." : path), 9,
-                (file, attributes) -> attributes.isRegularFile() && allowedFile(file))) {
-            var candidates = files.limit(3000).iterator();
-            while (candidates.hasNext() && matches.size() < 40) {
-                Path file = candidates.next();
-                String text;
-                try {
-                    text = readText(resolve(root.relativize(file).toString()));
-                } catch (IOException | IllegalArgumentException error) {
-                    continue;
-                }
-                String[] lines = text.split("\\R", -1);
-                for (int i = 0; i < lines.length && matches.size() < 40; i++) {
-                    int index = lines[i].toLowerCase(java.util.Locale.ROOT).indexOf(needle);
-                    if (index < 0) continue;
-                    int start = Math.min(lines[i].length(), Math.max(0, index - 40));
-                    String excerpt = lines[i].substring(start, Math.min(lines[i].length(), start + 180)).strip();
-                    matches.add(root.relativize(file) + ":" + (i + 1) + " " + excerpt);
-                }
-            }
-            return ToolResultBlock.success(matches.isEmpty() ? "未找到匹配。"
-                    : String.join("\n", matches) + (matches.size() == 40 ? "\n[最多显示 40 条]" : ""));
-        } catch (IOException | IllegalArgumentException | java.io.UncheckedIOException error) {
+        try {
+            Path directory = resolve(path == null ? "." : path);
+            var search = new TextSearch(query);
+            Files.walkFileTree(directory, EnumSet.noneOf(java.nio.file.FileVisitOption.class), SEARCH_DEPTH, search);
+            return ToolResultBlock.success(search.result());
+        } catch (IOException | IllegalArgumentException error) {
             return ToolResultBlock.error("无法搜索此项目路径。");
         }
     }
 
-    private boolean allowedFile(Path file) {
-        try {
-            checkProjectPath(file);
-            return true;
-        } catch (IOException error) {
-            return false;
+    private final class TextSearch extends SimpleFileVisitor<Path> {
+        private final Pattern needle;
+        private final List<String> matches = new ArrayList<>();
+        private int candidates;
+        private int scanned;
+        private int skipped;
+        private int oversized;
+        private int depthLimited;
+        private long bytes;
+        private String stopped = "";
+
+        TextSearch(String query) {
+            needle = Pattern.compile(query, Pattern.LITERAL | Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+        }
+
+        @Override
+        public FileVisitResult preVisitDirectory(Path directory, BasicFileAttributes attributes) {
+            if (directory.equals(root)) return FileVisitResult.CONTINUE;
+            if (!visible(directory)) return FileVisitResult.SKIP_SUBTREE;
+            try {
+                checkProjectPath(directory.toRealPath());
+                return FileVisitResult.CONTINUE;
+            } catch (IOException e) {
+                skipped++;
+                return FileVisitResult.SKIP_SUBTREE;
+            }
+        }
+
+        @Override
+        public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) {
+            if (!visible(file)) return FileVisitResult.CONTINUE;
+            if (attributes.isDirectory()) depthLimited++;
+            if (!attributes.isRegularFile()) return FileVisitResult.CONTINUE;
+            if (candidates >= SEARCH_FILES) return stop("候选文件上限 " + SEARCH_FILES);
+            candidates++;
+            long size = attributes.size();
+            if (size > MAX_READ_BYTES) {
+                oversized++;
+                return FileVisitResult.CONTINUE;
+            }
+            if (bytes + size > SEARCH_BYTES) return stop("总读取上限 64 MiB");
+            bytes += size;
+            try {
+                Path relative = root.relativize(file);
+                String text = readUtf8(resolve(relative.toString()), size);
+                scanned++;
+                var iterator = lines(text).iterator();
+                for (int number = 1; iterator.hasNext(); number++) {
+                    String line = iterator.next();
+                    var match = needle.matcher(line);
+                    if (!match.find()) continue;
+                    int start = Math.max(0, match.start() - 40);
+                    String excerpt = line.substring(start, Math.min(line.length(), start + 180)).strip();
+                    matches.add(relative + ":" + number + " " + excerpt);
+                    if (matches.size() == SEARCH_MATCHES) return stop("最多显示 " + SEARCH_MATCHES + " 条");
+                }
+            } catch (IOException e) {
+                skipped++;
+            }
+            return FileVisitResult.CONTINUE;
+        }
+
+        @Override
+        public FileVisitResult visitFileFailed(Path file, IOException error) {
+            skipped++;
+            return FileVisitResult.CONTINUE;
+        }
+
+        @Override
+        public FileVisitResult postVisitDirectory(Path directory, IOException error) {
+            if (error != null) skipped++;
+            return FileVisitResult.CONTINUE;
+        }
+
+        private FileVisitResult stop(String reason) {
+            stopped = "；触及" + reason;
+            return FileVisitResult.TERMINATE;
+        }
+
+        String result() {
+            String hits = matches.isEmpty() ? "已扫描范围内未找到匹配。" : String.join("\n", matches);
+            return hits + "\n[已扫描 " + scanned + " 个文本文件；跳过 " + (skipped + oversized)
+                    + " 项（超出 8 MiB " + oversized + " 个，非文本或无法访问 " + skipped + " 项）；按项目排除规则过滤"
+                    + (depthLimited == 0 ? "" : "；" + depthLimited + " 个目录触及深度上限 " + SEARCH_DEPTH)
+                    + stopped + "]";
         }
     }
 

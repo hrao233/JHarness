@@ -57,7 +57,8 @@ Stdout is reserved for protocol responses; diagnostics belong on stderr.
 
 ## Trust Boundary
 
-- Manual installation uses the desktop directory picker and starts disabled. In desktop creation mode, the assistant can propose a directory inside the current project via `install_plugin`. Explicit approval registers and enables that directory for all projects. Its tools become available on the next turn. This mode uses the normal file-write and command approval flows.
+- Manual installation uses the desktop directory picker and starts disabled. In desktop creation mode, the assistant can propose a directory inside the current project via `install_plugin`. Approval pins a SHA-256 snapshot and enables it for the current project. The desktop plugin manager also offers an explicit all-projects scope. A project registration overrides the same global ID, including when disabled. Check for updates to review changed files and approve the new digest in the selected scope. Legacy directory registrations are pinned on first access and retain their existing global enablement. Its tools become available on the next turn. This mode uses the normal file-write and command approval flows.
+- Snapshots contain regular files from the selected directory. Symlinks and junctions are rejected. Relative plugin paths and standalone absolute paths within that directory use the copy. External interpreters, external dependencies, and paths computed by plugin code remain part of the host environment.
 - Disabled plugins do not start.
 - Enabled plugins run as the current Windows user and can access resources outside the project.
 - The current protocol is a capability boundary and crash boundary, not an OS sandbox.

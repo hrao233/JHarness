@@ -3,7 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('jharness', {
   state: () => ipcRenderer.invoke('jh:state'),
   openProject: () => ipcRenderer.invoke('jh:project'),
-  newSession: project => ipcRenderer.invoke('jh:session', project),
+  newSession: (project, preferredId) => ipcRenderer.invoke('jh:session', project, preferredId),
   history: (project, session) => ipcRenderer.invoke('jh:history', project, session),
   context: (project, session) => ipcRenderer.invoke('jh:context', project, session),
   checkpoints: (project, session = '') => ipcRenderer.invoke('jh:checkpoints', project, session),
@@ -35,6 +35,7 @@ contextBridge.exposeInMainWorld('jharness', {
   report: (project, session) => ipcRenderer.invoke('jh:report', project, session),
   verifyCriterion: (project, session, runId, criterionId, commandId, jsonSchema) =>
     ipcRenderer.invoke('jh:verify-criterion', project, session, runId, criterionId, commandId, jsonSchema),
+  openCommandLog: (project, session, run, id) => ipcRenderer.invoke('jh:open-command-log', project, session, run, id),
   openArtifact: (project, session, id) => ipcRenderer.invoke('jh:open-artifact', project, session, id),
   exportSession: (project, session, format, title) =>
     ipcRenderer.invoke('jh:export-session', project, session, format, title),
@@ -51,10 +52,11 @@ contextBridge.exposeInMainWorld('jharness', {
   saveModel: input => ipcRenderer.invoke('jh:save-model', input),
   attach: (project, kind) => ipcRenderer.invoke('jh:attachment', project, kind),
   projectParts: project => ipcRenderer.invoke('jh:project-parts', project),
-  externalPlugins: () => ipcRenderer.invoke('jh:external-plugins'),
-  installExternalPlugin: () => ipcRenderer.invoke('jh:install-external-plugin'),
-  setExternalPlugin: (id, enabled) => ipcRenderer.invoke('jh:set-external-plugin', id, enabled),
-  uninstallExternalPlugin: id => ipcRenderer.invoke('jh:uninstall-external-plugin', id),
+  externalPlugins: project => ipcRenderer.invoke('jh:external-plugins', project),
+  installExternalPlugin: project => ipcRenderer.invoke('jh:install-external-plugin', project),
+  setExternalPlugin: (id, enabled, project) => ipcRenderer.invoke('jh:set-external-plugin', id, enabled, project),
+  upgradeExternalPlugin: (id, project) => ipcRenderer.invoke('jh:upgrade-external-plugin', id, project),
+  uninstallExternalPlugin: (id, project) => ipcRenderer.invoke('jh:uninstall-external-plugin', id, project),
   chat: (project, session, text, run, options) => ipcRenderer.invoke('jh:chat', project, session, text, run, options),
   task: (project, session) => ipcRenderer.invoke('jh:task', project, session),
   tasks: () => ipcRenderer.invoke('jh:tasks'),

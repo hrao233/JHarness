@@ -1,16 +1,20 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { ChevronDown, ChevronRight, CircleHelp, FolderOpen, FolderPlus, MessageSquare, Plus, X, FileText } from 'lucide-react';
+import { ChevronDown, ChevronRight, CircleHelp, FolderOpen, FolderPlus, MessageSquare, Plus, X, PanelLeft, PanelRight, Settings, SquarePen, Terminal, FileText } from 'lucide-react';
 import { ApprovalCard, Composer, InterruptedApprovals, TaskRecovery, effortLabels } from './Composer.jsx';
 import { Conversation } from './Conversation.jsx';
-import { Navigation, NavigationPanel } from './Navigation.jsx';
+import { Navigation, NavigationPanel, inspectorTools } from './Navigation.jsx';
 import { MemoryPanel } from './MemoryPanel.jsx';
 import './style.css';
 
 const api = window.jharness;
 const empty = { projects: [], models: [] };
 const errText = error => String(error.message || error).replace(/^Error invoking remote method '[^']+': Error: /, '');
-const suggestions = ['读一下 README，解释这个项目的结构。', '这个项目有哪些主要模块？', '帮我找到项目的启动入口。'];
+const suggestions = [
+  ['梳理项目结构', '读一下 README，解释这个项目的结构。'],
+  ['了解主要模块', '这个项目有哪些主要模块？'],
+  ['查找启动入口', '帮我找到项目的启动入口。']
+];
 
 function App() {
   const [data, setData] = useState(empty);
@@ -28,18 +32,32 @@ function App() {
   const [taskPending, setTaskPending] = useState(false);
   const [taskError, setTaskError] = useState('');
   const [cancelingTask, setCancelingTask] = useState(false);
+  const [sessionView, setSessionView] = useState('project');
   const [collapsed, setCollapsed] = useState({});
   const [run, setRun] = useState(null);
   const [phase, setPhase] = useState(null);
   const [notice, setNotice] = useState('');
   const [showSettings, setShowSettings] = useState(false);
-  const [showSidebar, setShowSidebar] = useState(true);
+  const [showSidebar, setShowSidebar] = useState(() => localStorage.getItem('sidebarVisible') !== 'false');
+  const [sidebarWidth, setSidebarWidth] = useState(() =>
+    Math.min(420, Math.max(264, Number(localStorage.getItem('sidebarWidth')) || 272)));
+  const [wide, setWide] = useState(() => matchMedia('(min-width: 1140px)').matches);
+  useEffect(() => {
+    const media = matchMedia('(min-width: 1140px)');
+    const update = () => setWide(media.matches);
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
+  useEffect(() => { localStorage.setItem('sidebarVisible', String(showSidebar)); }, [showSidebar]);
+  useEffect(() => { localStorage.setItem('sidebarWidth', String(sidebarWidth)); }, [sidebarWidth]);
   const [panel, setPanel] = useState(null);
   const [jump, setJump] = useState(null);
   const [bookmarks, setBookmarks] = useState([]);
   const [loading, setLoading] = useState(false);
   const running = useRef(null);
   const selection = useRef(null);
+  const openingSession = useRef(null);
+  const [focusSession, setFocusSession] = useState(null);
   const scroll = useRef(null);
   const project = data.projects.find(value => value.id === selected?.project);
   const session = project?.sessions.find(value => value.id === selected?.session);
@@ -47,7 +65,7 @@ function App() {
   const effectiveEffort = model?.effortLevels?.includes(effort) ? effort : model?.initialEffort || '';
   const effectiveFast = !!model?.fastTier && fast;
   const recent = data.projects.flatMap(p => p.sessions.filter(s => s.updatedAt).map(s => ({ p, s })))
-    .sort((a, b) => b.s.updatedAt - a.s.updatedAt).slice(0, 5);
+    .sort((a, b) => b.s.updatedAt - a.s.updatedAt);
 
   async function refresh() {
     const state = await api.state();
@@ -70,6 +88,7 @@ function App() {
 
   async function select(p, s) {
     if (selection.current?.project === p.id && selection.current?.session === s?.id) return;
+    setPanel(null);
     setParts([]);
     setAvailableParts(null);
     setDraft('');
@@ -199,18 +218,39 @@ function App() {
       const p = await api.openProject();
       if (!p) return;
       await refresh();
+      setSessionView('project');
       await select(p, p.sessions[0]);
     } catch (error) { setNotice(errText(error)); }
   }
 
   async function newSession(p) {
-    if (!p) return openProject();
+    if (running.current || openingSession.current?.project === (p?.id ?? null)) return;
+    const origin = selection.current;
+    const request = { project: p?.id ?? null };
+    openingSession.current = request;
     try {
-      const created = await api.newSession(p.id);
+      if (!p) {
+        await openProject();
+        return;
+      }
+      const preferred = origin?.project === p.id ? origin.session : undefined;
+      const blank = await api.newSession(p.id, preferred);
       await refresh();
-      await select(p, created);
-    } catch (error) { setNotice(errText(error)); }
+      if (openingSession.current !== request || selection.current !== origin || running.current) return;
+      await select(p, blank);
+      setFocusSession(blank.id);
+    } catch (error) {
+      if (openingSession.current === request) setNotice(errText(error));
+    } finally {
+      if (openingSession.current === request) openingSession.current = null;
+    }
   }
+
+  useEffect(() => {
+    if (!focusSession || loading) return;
+    if (focusSession === selection.current?.session) document.querySelector('.composer textarea')?.focus();
+    setFocusSession(null);
+  }, [focusSession, loading]);
 
   async function loadParts() {
     const selectedProject = project?.id;
@@ -441,43 +481,93 @@ function App() {
     }
   }
 
-  return <div className={'app' + (showSidebar ? '' : ' sidebar-hidden')}>
-    <Navigation project={project} session={session} busy={!!run} showSidebar={showSidebar}
-      home={() => setShowSidebar(value => !value)} attachImage={() => attach('image')}
-      openPanel={setPanel} openSettings={() => setShowSettings(true)}/>
-    <aside className="sidebar" aria-label="项目和会话" hidden={!showSidebar}>
-      <div className="brand"><span className="mark">J</span><strong>JHarness</strong></div>
-      <button className="side-action" disabled={!!run} onClick={() => newSession(project)}><Plus size={17}/>新建会话</button>
-      <button className="side-action" disabled={!!run} onClick={openProject}><FolderPlus size={17}/>打开项目</button>
-      <div className="projects">
-        {!!recent.length && <section className="recent">
-          <div className="side-label">最近会话</div>
-          {recent.map(({ p, s }) => <button className="session recent-session" disabled={!!run} key={s.id}
-            onClick={() => select(p, s)} title={p.name + ' / ' + s.title}>
-            <MessageSquare size={14}/><span>{s.title}</span></button>)}
-        </section>}
-        {data.projects.length > 0 && <div className="side-label">项目</div>}
-        {data.projects.map(p => <div className="project" key={p.id}>
-          <div className="project-row">
-            <button className="project-toggle" aria-label={p.name + ' 会话'} aria-expanded={!collapsed[p.id]}
-              onClick={() => setCollapsed(previous => ({ ...previous, [p.id]: !previous[p.id] }))}>
-              {collapsed[p.id] ? <ChevronRight size={13}/> : <ChevronDown size={13}/>}
-            </button>
-            <button title={p.directory} className="project-name" disabled={!!run} onClick={() => select(p, p.sessions[0])}>
-              <FolderOpen size={15}/><span>{p.name}</span>
-            </button>
-            <button className="project-add" disabled={!!run} aria-label={'在 ' + p.name + ' 新建会话'}
-              title="在此项目中新建会话" onClick={() => newSession(p)}><Plus size={16}/></button>
-          </div>
-          {!collapsed[p.id] && p.sessions.map(s => <button key={s.id} disabled={!!run}
-            className={'session ' + (selected?.session === s.id ? 'selected' : '')}
-            onClick={() => select(p, s)}><MessageSquare size={14}/><span>{s.title}</span></button>)}
-        </div>)}
+  const docked = wide && inspectorTools.includes(panel);
+  function toggleSidebar() { setShowSidebar(value => !value); }
+
+  useEffect(() => {
+    function shortcut(event) {
+      if (!event.ctrlKey || event.shiftKey || event.altKey || event.metaKey || event.isComposing
+          || event.repeat || document.querySelector('dialog:modal')) return;
+      if (event.code === 'KeyB') toggleSidebar();
+      else if (event.code === 'KeyN' && !running.current) void newSession(project);
+      else if (event.code === 'KeyO' && !running.current) void openProject();
+      else return;
+      event.preventDefault();
+    }
+    window.addEventListener('keydown', shortcut);
+    return () => window.removeEventListener('keydown', shortcut);
+  }, [project]);
+
+  const sidebarToggle = <button className="shell-icon" onClick={toggleSidebar}
+    aria-expanded={showSidebar} aria-controls="project-sidebar" aria-keyshortcuts="Control+B"
+    title={(showSidebar ? '收起' : '展开') + '侧栏 (Ctrl+B)'}><PanelLeft size={18}/></button>;
+
+  return <div className={'app' + (showSidebar ? '' : ' sidebar-hidden') + (docked ? ' with-inspector' : '')}
+    style={{ '--sidebar-width': sidebarWidth + 'px' }}>
+    <aside id="project-sidebar" className="sidebar" aria-label="项目和会话" hidden={!showSidebar}>
+      <div className="brand"><span className="mark"><Terminal size={16}/></span><strong>JHarness</strong>{sidebarToggle}</div>
+      <div className="sidebar-scroll">
+        <button className="side-action new-chat" disabled={!!run} title="新建会话 (Ctrl+N)"
+          onClick={() => newSession(project)}><SquarePen size={17}/>新建会话<kbd>Ctrl N</kbd></button>
+        <Navigation project={project} openPanel={setPanel}/>
+        <div className="side-section"><div className="view-switch" role="group" aria-label="会话列表视图">
+          <button aria-pressed={sessionView === 'project'} onClick={() => setSessionView('project')}>项目</button>
+          <button aria-pressed={sessionView === 'recent'} onClick={() => setSessionView('recent')}>最近会话</button>
+        </div>
+          <button className="shell-icon" aria-label="打开项目" title="打开项目 (Ctrl+O)"
+            disabled={!!run} onClick={openProject}><FolderPlus size={16}/></button>
+        </div>
+        {!data.projects.length && <button className="side-action add-folder" disabled={!!run}
+          onClick={openProject}><Plus size={15}/>添加项目文件夹</button>}
+        <div className="projects">
+          {sessionView === 'recent' && <section className="recent">
+            {!recent.length && <p className="side-label">还没有最近会话</p>}
+            {recent.map(({ p, s }) => <button className={'session recent-session' + (selected?.session === s.id ? ' selected' : '')} disabled={!!run} key={s.id}
+              onClick={() => select(p, s)} title={p.name + ' / ' + s.title}>
+              <MessageSquare size={14}/><span>{s.title}</span></button>)}
+          </section>}
+          {sessionView === 'project' && data.projects.map(p => <div className="project" key={p.id}>
+            <div className="project-row">
+              <button className="project-toggle" aria-label={p.name + ' 会话'} aria-expanded={!collapsed[p.id]}
+                onClick={() => setCollapsed(previous => ({ ...previous, [p.id]: !previous[p.id] }))}>
+                {collapsed[p.id] ? <ChevronRight size={13}/> : <ChevronDown size={13}/>}
+              </button>
+              <button title={p.directory} className="project-name" disabled={!!run} onClick={() => select(p, p.sessions[0])}>
+                <FolderOpen size={15}/><span>{p.name}</span>
+              </button>
+              <button className="project-add" disabled={!!run} aria-label={'在 ' + p.name + ' 新建会话'}
+                title="在此项目中新建会话" onClick={() => newSession(p)}><Plus size={16}/></button>
+            </div>
+            {!collapsed[p.id] && p.sessions.map(s => <button key={s.id} disabled={!!run}
+              className={'session ' + (selected?.session === s.id ? 'selected' : '')}
+              onClick={() => select(p, s)}><MessageSquare size={14}/><span>{s.title}</span></button>)}
+          </div>)}
+        </div>
       </div>
+      <button className="side-action sidebar-settings" aria-label="设置" onClick={() => setShowSettings(true)}>
+        <Settings size={17}/>设置</button>
+      <div className="sidebar-grip" role="separator" aria-label="调整侧栏宽度" aria-orientation="vertical"
+        aria-valuemin={264} aria-valuemax={420} aria-valuenow={sidebarWidth} tabIndex={0}
+        onPointerDown={event => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); }}
+        onPointerMove={event => {
+          if (event.currentTarget.hasPointerCapture(event.pointerId))
+            setSidebarWidth(Math.min(420, Math.max(264, event.clientX)));
+        }}
+        onKeyDown={event => {
+          if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+          event.preventDefault();
+          setSidebarWidth(width => Math.min(420, Math.max(264, width + (event.key === 'ArrowRight' ? 16 : -16))));
+        }}/>
     </aside>
     <main>
-      <header><div className="crumb"><span title={project?.directory}>{project?.name || '工作台'}</span>
+      <header><div className="crumb">{!showSidebar && <>{sidebarToggle}
+        <button className="shell-icon" title="新建会话 (Ctrl+N)" disabled={!!run} onClick={() => newSession(project)}><SquarePen size={17}/></button></>}
+        <span title={project?.directory}>{project?.name || '工作台'}</span>
         <ChevronRight size={15}/><strong>{session?.title || '新会话'}</strong></div>
+        <button className="shell-icon" disabled={!project} aria-label="工作区工具" title="工作区工具"
+          aria-expanded={inspectorTools.includes(panel)}
+          onClick={() => setPanel(inspectorTools.includes(panel) ? null : session ? 'context' : 'review')}>
+          <PanelRight size={18}/></button>
       </header>
       <Conversation key={session?.id || project?.id || 'empty'} items={items} sessionId={session?.id}
         status={run && !approvals.length ? (phase
@@ -488,11 +578,11 @@ function App() {
         onFork={run || loading ? null : forkMessage}
         run={run} jump={jump} scroll={scroll}>
           {!items.length && !loading && <div className="welcome">
-            <div className="welcome-icon"><MessageSquare size={24} strokeWidth={1.6}/></div>
-            <h1>{project ? '想了解项目的什么？' : '打开一个项目'}</h1>
-            <p>{project ? '可以阅读代码、梳理项目结构，或修改项目文件。' : '选择本机文件夹，开始一段项目会话。'}</p>
-            {project ? <div className="suggestions">{suggestions.map(text =>
-              <button key={text} onClick={() => setDraft(text)}><FileText size={15}/>{text}</button>)}</div>
+            <div className="welcome-icon"><Terminal size={30} strokeWidth={1.8}/></div>
+            <h1>{project ? '从哪里开始？' : '打开项目，开始工作'}</h1>
+            <p>{project ? project.name : '选择本机文件夹，开始一段项目会话。'}</p>
+            {project ? <div className="suggestions">{suggestions.map(([label, text]) =>
+              <button key={text} onClick={() => { setDraft(text); document.querySelector('.composer textarea')?.focus(); }}><FileText size={15}/>{label}</button>)}</div>
               : <button className="primary" onClick={openProject}><FolderOpen size={16}/>选择文件夹</button>}
           </div>}
           {loading && <p className="muted">正在加载会话…</p>}
@@ -520,7 +610,7 @@ function App() {
     {panel === 'memory' && project && <MemoryPanel project={project} busy={!!run} errorText={errText}
       api={api} close={() => setPanel(null)} onAuto={enabled => setData(previous => ({ ...previous,
         projects: previous.projects.map(p => p.id === project.id ? { ...p, autoMemory: enabled } : p) }))}/>}
-    {panel && panel !== 'memory' && <NavigationPanel key={panel} panel={panel} close={() => setPanel(null)} projects={data.projects}
+    {panel && panel !== 'memory' && <NavigationPanel docked={docked} switchTool={setPanel} key={panel} panel={panel} close={() => setPanel(null)} projects={data.projects}
       project={project} session={session} bookmarks={bookmarks} openChat={openChat} removeBookmark={removeBookmark}
       copy={copy} addPart={part => appendParts([part])} busy={!!run} api={api} errorText={errText}
       onWorktreesChanged={worktreesChanged} openWorktree={target => select(target, target.sessions[0])}/>}

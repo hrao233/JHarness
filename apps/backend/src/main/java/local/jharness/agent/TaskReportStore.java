@@ -88,7 +88,7 @@ public final class TaskReportStore {
             Integer exitCode,
             CommandOutcome outcome,
             boolean outputTruncated,
-            String output) {}
+            String output, boolean logComplete, List<String> testFailures) {}
 
     public record Artifact(
             String id,
@@ -256,13 +256,30 @@ public final class TaskReportStore {
             String outcome,
             boolean outputTruncated,
             String output) {
+        return recordCommand(UUID.randomUUID().toString(), false, List.of(), sessionId, runId, command, startedAt,
+                finishedAt, exitCode, outcome, outputTruncated, output);
+    }
+
+    Path logPath(String session, String run, String id) {
+        return commandDirectory(segment(session, "会话"), segment(run, "任务")).resolve(segment(id, "命令") + ".txt");
+    }
+
+    public String commandLog(String session, String run, String id) {
+        Path path = logPath(session, run, id);
+        if (commands(session, run).stream().noneMatch(command -> command.id().equals(id) && command.logComplete())
+                || !Files.isRegularFile(path)) throw new IllegalArgumentException("找不到完整命令日志。");
+        return path.toString();
+    }
+
+    CommandEvidence recordCommand(String id, boolean logComplete, List<String> failures, String sessionId, String runId, String command,
+            long startedAt, long finishedAt, Integer exitCode, String outcome, boolean outputTruncated, String output) {
         String session = segment(sessionId, "会话");
         String run = segment(runId, "任务");
         if (command == null || command.isBlank() || command.length() > 8_000)
             throw new IllegalArgumentException("命令证据无效。");
         CommandOutcome parsed = parseOutcome(outcome);
         var evidence = new CommandEvidence(
-                UUID.randomUUID().toString(),
+                id,
                 session,
                 run,
                 command,
@@ -272,7 +289,9 @@ public final class TaskReportStore {
                 exitCode,
                 parsed,
                 outputTruncated || (output != null && output.length() > MAX_COMMAND_OUTPUT),
-                bounded(output, MAX_COMMAND_OUTPUT));
+                output != null && output.length() > MAX_COMMAND_OUTPUT
+                        ? output.substring(0, 5900) + "\n[输出已截断，保留首尾]\n" + output.substring(output.length() - 5900)
+                        : bounded(output, MAX_COMMAND_OUTPUT), logComplete, List.copyOf(failures));
         synchronized (lock) {
             write(commandDirectory(session, run).resolve(evidence.id() + ".json"), evidence);
         }

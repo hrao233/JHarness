@@ -27,14 +27,14 @@ public final class PluginInstaller {
         this.approval = approval;
     }
 
-    @Tool(name = "install_plugin", concurrencySafe = false, description = "Ask the user to install and enable a local JHarness tool plugin for all projects.")
+    @Tool(name = "install_plugin", concurrencySafe = false, description = "Ask the user to install and enable a local JHarness tool plugin for the current project using an approved copy.")
     public ToolResultBlock install(@ToolParam(name = "directory", description = "Plugin directory relative to the project") String directory) {
         try {
             var root = project.toRealPath();
             var folder = root.resolve(directory).toRealPath();
             if (!folder.startsWith(root)) return ToolResultBlock.error("插件目录必须位于当前项目内。");
             var plugin = manager.preview(folder);
-            String details = plugin.id() + " " + plugin.version() + "\n程序：" + plugin.executable()
+            String details = plugin.id() + " " + plugin.version() + "\nSHA-256：" + plugin.digest() + "\n程序：" + plugin.executable()
                     + "\n参数：" + plugin.arguments() + "\n工具："
                     + plugin.tools().stream().map(ExternalPluginManager.ToolSpec::name).toList();
             return approval.run("install_plugin", folder.toString(), "", details, "插件安装未获批准。", () -> {

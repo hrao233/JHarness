@@ -604,10 +604,34 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     assert.deepEqual((await call('history', durable)).map(message => [message.role, message.turn, message.text]),
       [['user', 1, durableMessage], ['assistant', 1, '**ORCHID-28**']]);
 
+    const conflictContext = { ...context, sessionId: randomUUID() };
+    const conflictRun = randomUUID();
+    const largeFile = '首行\r\n'.repeat(18_000) + 'DURABLE-STEP';
+    await writeFile(durablePath, largeFile);
+    await call('chat', { ...conflictContext, ...model, runId: conflictRun,
+      permission: 'durable', message: '修改大文件的最后一行' });
+    assert.equal((await waitEvent(conflictRun, 'done')).data.status, 'suspended');
+    const conflictTask = await call('task', conflictContext);
+    const [conflictApproval] = conflictTask.approvals;
+    assert.equal(conflictApproval.before, 'DURABLE-STEP');
+    assert.equal(conflictApproval.after, 'DURABLE-STEP approved');
+    const conflictExit = once(child, 'exit');
+    child.kill();
+    await conflictExit;
+    const manuallyChanged = '手工添加的一行\n' + largeFile;
+    await writeFile(durablePath, manuallyChanged);
+    call = launch();
+    const conflictResume = randomUUID();
+    await call('resumeTask', { ...conflictContext, ...model,
+      turnId: conflictTask.turnId, runId: conflictResume, answers: { [conflictApproval.id]: true } });
+    await waitEvent(conflictResume, 'done');
+    assert.match(JSON.stringify(requests.at(-1).body.messages.filter(m => m.role === 'tool')), /审批时的版本/);
+    assert.equal(await readFile(durablePath, 'utf8'), manuallyChanged);
+
     const durableCommandContext = { ...context, sessionId: randomUUID() };
     const durableCommandSteps = steps;
     steps = [
-      ['run_command', { command: 'Write-Output \'{"check":"DURABLE-COMMAND-9","passed":true}\'' }],
+      ['run_command', { command: `@{ check = 'DURABLE-COMMAND-9'; padding = 'x' * 30000; passed = $true } | ConvertTo-Json -Compress` }],
       ['acceptance_write', { criteria: ['检查结果的 passed 字段为 true'] }],
     ];
     const durableCommandRun = randomUUID();
@@ -627,7 +651,8 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
       .find(item => item.runId === durableCommandResume);
     assert.equal(durableCommandReport.commands.length, 1);
     assert.equal(durableCommandReport.commands[0].exitCode, 0);
-    assert.match(durableCommandReport.commands[0].output, /DURABLE-COMMAND-9/);
+    assert.equal(durableCommandReport.commands[0].outputTruncated, true);
+    assert.equal(durableCommandReport.commands[0].logComplete, true);
     const jsonSchema = '{"type":"object","required":["passed"],"properties":{"passed":{"const":true}}}';
     const jsonVerified = await call('verifyJsonCriterion', {
       ...durableCommandContext, runId: durableCommandResume, jsonSchema,

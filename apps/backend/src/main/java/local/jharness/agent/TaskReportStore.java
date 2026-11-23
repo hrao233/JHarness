@@ -521,11 +521,7 @@ public final class TaskReportStore {
             int expectedExitCode) {
         long now = System.currentTimeMillis();
         String verifier = "shell-exit-v1:" + expectedExitCode;
-        if (command.outputTruncated()) {
-            return result(criterion, CriterionStatus.UNKNOWN, command, expectedExitCode,
-                    verifier, now, "命令输出被截断，无法形成完整退出码证据。");
-        }
-        if (command.exitCode() == null || command.outcome() == CommandOutcome.UNKNOWN) {
+        if (command.exitCode() == null || command.outcome() == null || command.outcome() == CommandOutcome.UNKNOWN) {
             return result(criterion, CriterionStatus.UNKNOWN, command, expectedExitCode,
                     verifier, now, "命令退出结果未知。");
         }
@@ -541,32 +537,58 @@ public final class TaskReportStore {
                 verifier, now, "命令返回期望退出码；此结论不覆盖其他语义验收。");
     }
 
-    private static AcceptanceCriterion verifyJson(
+    private AcceptanceCriterion verifyJson(
             AcceptanceCriterion criterion, CommandEvidence command,
             JsonResultSchemaVerifier verifier, String jsonSchema) {
         CriterionStatus status = CriterionStatus.UNKNOWN;
         String reason = "需要一次退出码为 0 且输出完整的成功命令。";
-        String output = command.output();
-        String prefix = "退出码 0\n";
-        // Older receipts lost the truncation flag when the report itself shortened the output.
-        if (!command.outputTruncated() && Integer.valueOf(0).equals(command.exitCode())
-                && command.outcome() == CommandOutcome.SUCCEEDED && output != null
-                && output.length() < MAX_COMMAND_OUTPUT && output.startsWith(prefix)) {
-            var verdict = verifier.verifySuccessfulOutput(output.substring(prefix.length()));
-            switch (verdict.outcome()) {
-                case PASSED -> {
-                    status = CriterionStatus.PASSED;
-                    reason = "命令输出符合 JSON Schema。";
+        if (Integer.valueOf(0).equals(command.exitCode()) && command.outcome() == CommandOutcome.SUCCEEDED) {
+            String output = null;
+            if (command.logComplete()) {
+                try {
+                    output = readArchivedOutput(command);
+                    if (output == null) reason = "完整日志超过 JSON 验收上限 262,144 字符。";
+                } catch (IOException error) {
+                    reason = "无法读取完整的 UTF-8 命令日志。";
                 }
-                case FAILED -> {
-                    status = CriterionStatus.FAILED;
-                    reason = "命令输出无效或不符合 JSON Schema。";
+            } else {
+                // Older receipts may only have the inline output and may lack the truncation flag.
+                String preview = command.output();
+                String prefix = "退出码 0\n";
+                if (!command.outputTruncated() && preview != null && preview.length() < MAX_COMMAND_OUTPUT
+                        && preview.startsWith(prefix)) output = preview.substring(prefix.length());
+            }
+            if (output != null) {
+                var verdict = verifier.verifySuccessfulOutput(output);
+                switch (verdict.outcome()) {
+                    case PASSED -> {
+                        status = CriterionStatus.PASSED;
+                        reason = "命令输出符合 JSON Schema。";
+                    }
+                    case FAILED -> {
+                        status = CriterionStatus.FAILED;
+                        reason = "命令输出无效或不符合 JSON Schema。";
+                    }
+                    default -> reason = "命令未提供可核验的 JSON 输出。";
                 }
-                default -> reason = "命令未提供可核验的 JSON 输出。";
             }
         }
         return new AcceptanceCriterion(criterion.id(), criterion.content(), status, command.id(),
                 0, verifier.id(), System.currentTimeMillis(), reason, jsonSchema);
+    }
+
+    private String readArchivedOutput(CommandEvidence command) throws IOException {
+        Path log = logPath(command.sessionId(), command.runId(), command.id());
+        try (var reader = Files.newBufferedReader(log)) {
+            var raw = new StringBuilder();
+            char[] buffer = new char[4096];
+            int count;
+            while ((count = reader.read(buffer)) != -1) {
+                if (raw.length() + count > JsonResultSchemaVerifier.MAX_OUTPUT_CHARS) return null;
+                raw.append(buffer, 0, count);
+            }
+            return raw.toString();
+        }
     }
 
     private static AcceptanceCriterion result(

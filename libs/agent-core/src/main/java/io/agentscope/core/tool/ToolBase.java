@@ -16,6 +16,7 @@
 package io.agentscope.core.tool;
 
 import io.agentscope.core.message.ToolResultBlock;
+import io.agentscope.core.message.ToolUseBlock;
 import io.agentscope.core.permission.PermissionBehavior;
 import io.agentscope.core.permission.PermissionContextState;
 import io.agentscope.core.permission.PermissionDecision;
@@ -245,6 +246,11 @@ public abstract class ToolBase implements AgentTool {
     public Mono<PermissionDecision> checkPermissions(
             Map<String, Object> toolInput, PermissionContextState context) {
         return Mono.just(PermissionDecision.passthrough(name));
+    }
+
+    /** Capture tool-owned preconditions in the approval request retained across suspension. */
+    public ToolUseBlock prepareConfirmation(ToolUseBlock call) {
+        return call;
     }
 
     /**

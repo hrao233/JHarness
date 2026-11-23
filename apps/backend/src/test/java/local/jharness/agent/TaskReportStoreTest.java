@@ -168,16 +168,24 @@ class TaskReportStoreTest {
 
         var truncatedCommand = reports.recordCommand(
                 sessionId, runId, "large output", now, now + 20, 0, "SUCCEEDED", true, "truncated");
-        var unknown = reports.verifyCriterion(
+        var truncatedExit = reports.verifyCriterion(
                 sessionId,
                 runId,
                 acceptance.criteria().get(1).id(),
                 truncatedCommand.id(),
                 0);
-        assertEquals(TaskReportStore.CriterionStatus.UNKNOWN, unknown.status());
+        assertEquals(TaskReportStore.CriterionStatus.PASSED, truncatedExit.status());
+        var interrupted = reports.recordCommand(
+                sessionId, runId, "interrupted", now, now + 20, null, "UNKNOWN", true, "");
+        var inconsistent = reports.recordCommand(
+                sessionId, runId, "bad receipt", now, now + 20, 0, "FAILED", true, "");
+        for (var incomplete : List.of(interrupted, inconsistent)) {
+            assertEquals(TaskReportStore.CriterionStatus.UNKNOWN, reports.verifyCriterion(sessionId,
+                    runId, truncatedExit.id(), incomplete.id(), 0).status());
+        }
 
         var failedCommand = reports.recordCommand(
-                sessionId, runId, "mvn test", now, now + 30, 1, "FAILED", false, "BUILD FAILURE");
+                sessionId, runId, "mvn test", now, now + 30, 1, "FAILED", true, "BUILD FAILURE");
         var failed = reports.verifyCriterion(
                 sessionId,
                 runId,
@@ -241,6 +249,32 @@ class TaskReportStoreTest {
         assertThrows(IllegalArgumentException.class,
                 () -> reports.verifyJsonCriterion(session, run, criterion, good.id(), "{\"type\":\"bad\"}"));
         assertEquals(passed, new TaskReportStore(temporary).acceptance(session, run).criteria().get(0));
+    }
+
+    @Test
+    void validatesArchivedJsonBeyondThePreviewAndHandlesUnavailableLogs() throws Exception {
+        var reports = new TaskReportStore(temporary);
+        String id = UUID.randomUUID().toString();
+        String criterion = reports.saveAcceptanceCriteria("session", "run", List.of("检查结果"))
+                .criteria().get(0).id();
+        String schema = "{\"required\":[\"ok\"],\"properties\":{\"ok\":{\"const\":true}}}";
+        reports.recordCommand(id, true, List.of(), "session", "run", "check", 1, 2, 0,
+                "SUCCEEDED", true, "preview");
+        Path log = reports.logPath("session", "run", id);
+        String padding = "中".repeat(15_000);
+        String raw = "{\"first\":\"" + padding + "\",\"ok\":true,\"last\":\"" + padding + "\"}";
+        Files.writeString(log, raw);
+        assertEquals(TaskReportStore.CriterionStatus.PASSED,
+                reports.verifyJsonCriterion("session", "run", criterion, id, schema).status());
+        Files.writeString(log, raw.replace("true", "false"));
+        assertEquals(TaskReportStore.CriterionStatus.FAILED,
+                reports.verifyJsonCriterion("session", "run", criterion, id, schema).status());
+        Files.writeString(log, raw + " ".repeat(262_144));
+        assertEquals(TaskReportStore.CriterionStatus.UNKNOWN,
+                reports.verifyJsonCriterion("session", "run", criterion, id, schema).status());
+        Files.delete(log);
+        assertEquals(TaskReportStore.CriterionStatus.UNKNOWN,
+                reports.verifyJsonCriterion("session", "run", criterion, id, schema).status());
     }
 
     private static void writeUnchecked(Path file, String text) {

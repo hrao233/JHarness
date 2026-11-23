@@ -896,7 +896,7 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
               <small>
                 {command.exitCode === null ? '无退出码' : '退出码 ' + command.exitCode}
                 {' · '}{command.durationMs} ms
-                {command.outputTruncated ? ' · 输出已截断' : ''}
+                {command.outputTruncated ? ' · 预览已截断' : ''}
               </small>
               {!!command.testFailures?.length && <div>
                 <strong>失败用例</strong><ul>{command.testFailures.map((failure, index) =>

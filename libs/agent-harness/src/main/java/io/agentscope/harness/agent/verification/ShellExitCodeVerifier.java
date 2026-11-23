@@ -82,9 +82,6 @@ public final class ShellExitCodeVerifier implements DeterministicVerifier {
             return new Verdict(
                     Outcome.FAILED, "Exit code did not match the configured expectation");
         }
-        if (details.outputTruncated()) {
-            return new Verdict(Outcome.UNKNOWN, "Captured output is truncated");
-        }
         return new Verdict(
                 Outcome.PASSED,
                 "Selected shell attempt returned the configured exit code; no broader semantic"

@@ -28,7 +28,7 @@ public final class ProjectTools {
     private static final int SEARCH_FILES = 3000;
     private static final int SEARCH_MATCHES = 40;
     private static final long SEARCH_BYTES = 64L * 1024 * 1024;
-    private static final String EDIT_FAILURE = "无法编辑此文件。请检查项目路径、UTF-8 编码和 64 KiB 大小限制。";
+    private static final String EDIT_FAILURE = "无法编辑此文件。请检查项目路径、UTF-8 编码和 8 MiB 大小限制。";
     private static final String CREATE_FAILURE = "无法创建文件。请确认父目录存在、文件名未被占用，且内容不超过 64 KiB。";
     private final Path root;
     private final ApprovedOperation approval;
@@ -118,14 +118,34 @@ public final class ProjectTools {
         return ToolResultBlock.success(output + (iterator.hasNext() ? "[下一段 start_line=" + number + "]" : "[文件结束]"));
     }
 
-    @Tool(name = "edit_file", description = "Replace one exact text match in an existing UTF-8 project file. Read it first.", concurrencySafe = false)
+    @Tool(name = "edit_file", description = "Replace one exact text match in an existing UTF-8 project file up to 8 MiB. Read the target fragment first.", concurrencySafe = false)
     public ToolResultBlock edit(
             @ToolParam(name = "path", description = "Project-relative file path") String path,
             @ToolParam(name = "old_text", description = "Exact non-empty text that occurs once") String oldText,
             @ToolParam(name = "new_text", description = "Replacement text, which may be empty") String newText) {
+        return edit(path, oldText, newText, null);
+    }
+
+    String editVersion(String path) {
+        try {
+            Path file = resolve(path);
+            return editVersion(file, readText(file));
+        } catch (IOException | IllegalArgumentException e) {
+            return "";
+        }
+    }
+
+    private String editVersion(Path file, String text) {
+        return root.relativize(file) + "\n" + ProjectCheckpointStore.hash(text);
+    }
+
+    ToolResultBlock edit(String path, String oldText, String newText, String expectedVersion) {
         try {
             Path file = resolve(path);
             String original = readText(file);
+            if (expectedVersion != null && !expectedVersion.equals(editVersion(file, original))) {
+                return ToolResultBlock.error("无法确认文件仍是审批时的版本。请重新读取后再编辑。");
+            }
             if (original.contains("\r\n") && !original.replace("\r\n", "").contains("\n")) {
                 oldText = toCrlf(oldText);
                 newText = toCrlf(newText);
@@ -135,7 +155,7 @@ public final class ProjectTools {
                 return ToolResultBlock.error("原文必须在文件里恰好出现一次。请重新读取文件并提供更具体的原文。");
             }
             String edited = original.substring(0, start) + newText + original.substring(start + oldText.length());
-            checkText(edited);
+            checkText(edited, MAX_READ_BYTES);
             if (edited.equals(original)) {
                 return ToolResultBlock.success("文件内容相同，无需修改。");
             }
@@ -177,7 +197,7 @@ public final class ProjectTools {
                 return ToolResultBlock.error("请提供新文件的路径。");
             }
             Path parent = resolve(root.relativize(candidate.getParent()).toString());
-            checkText(content);
+            checkText(content, MAX_FILE_BYTES);
             Path file = parent.resolve(candidate.getFileName());
             if (Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
                 return ToolResultBlock.error("无法创建文件。此路径已存在。");
@@ -202,18 +222,13 @@ public final class ProjectTools {
         }
     }
 
-    private static String readText(Path file) throws IOException {
-        if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS) || Files.size(file) > MAX_FILE_BYTES) {
-            throw new IOException("Expected a small regular file");
-        }
-        String text = Files.readString(file, StandardCharsets.UTF_8);
-        checkText(text);
-        return text;
+    static String readText(Path file) throws IOException {
+        return readUtf8(file, Files.size(file));
     }
 
-    private static void checkText(String text) throws IOException {
-        if (text.indexOf(0) >= 0 || text.getBytes(StandardCharsets.UTF_8).length > MAX_FILE_BYTES) {
-            throw new IOException("Expected UTF-8 text of at most 64 KiB");
+    private static void checkText(String text, int maxBytes) throws IOException {
+        if (text.indexOf(0) >= 0 || text.getBytes(StandardCharsets.UTF_8).length > maxBytes) {
+            throw new IOException("Expected UTF-8 text within the file size limit");
         }
     }
 

@@ -403,14 +403,15 @@ public final class DurableConversation implements AutoCloseable {
             reports = new TaskReportStore(request.workspace());
             var toolkit = new Toolkit();
             request.pluginTools().forEach(toolkit::registerTool);
-            toolkit.registerTool(new ProjectTools(
+            var projectTools = new ProjectTools(
                     request.project(),
                     (operation, path, before, after, denied, action) -> checkpoints.run(
                             sessionId,
                             currentRun.get() == null ? "durable" : currentRun.get(),
                             operation,
                             path,
-                            action)));
+                            action));
+            toolkit.registerTool(projectTools);
             toolkit.registerTool(new ProjectCommand(
                     request.project(),
                     (operation, path, before, after, denied, action) -> action.get(),
@@ -420,7 +421,7 @@ public final class DurableConversation implements AutoCloseable {
             ConversationRuntime.registerArtifactTool(
                     toolkit, request, reports, currentRun::get);
             for (String name : CONFIRMED_TOOLS)
-                toolkit.replaceAgentTool(new ConfirmedTool(toolkit.getTool(name)));
+                toolkit.replaceAgentTool(new ConfirmedTool(toolkit.getTool(name), projectTools));
             var tools = new ToolsConfig();
             tools.setStrictAllow(true);
             var allowed = new ArrayList<>(FILE_TOOLS);
@@ -472,13 +473,17 @@ public final class DurableConversation implements AutoCloseable {
     private static final class ConfirmedTool extends ToolBase {
         private final AgentTool delegate;
 
-        ConfirmedTool(AgentTool delegate) {
+        private final ProjectTools projectTools;
+        private static final String EDIT_VERSION = "jharness.editVersion";
+
+        ConfirmedTool(AgentTool delegate, ProjectTools projectTools) {
             super(ToolBase.builder()
                     .name(delegate.getName())
                     .description(delegate.getDescription())
                     .inputSchema(delegate.getParameters())
                     .concurrencySafe(false));
             this.delegate = delegate;
+            this.projectTools = projectTools;
         }
 
         @Override
@@ -491,8 +496,27 @@ public final class DurableConversation implements AutoCloseable {
         }
 
         @Override
+        public ToolUseBlock prepareConfirmation(ToolUseBlock call) {
+            if (!"edit_file".equals(call.getName())) return call;
+            var metadata = new LinkedHashMap<>(call.getMetadata());
+            metadata.put(EDIT_VERSION, projectTools.editVersion(text(call, "path")));
+            return new ToolUseBlock(call.getId(), call.getName(), call.getInput(), call.getContent(),
+                    metadata, call.getState());
+        }
+
+        @Override
         public Mono<ToolResultBlock> callAsync(ToolCallParam param) {
-            return delegate.callAsync(param);
+            if (!"edit_file".equals(delegate.getName())) return delegate.callAsync(param);
+            var call = param.getToolUseBlock();
+            if (!(call.getMetadata().get(EDIT_VERSION) instanceof String version) || version.isEmpty()) {
+                return Mono.just(ToolResultBlock.error("缺少审批时的文件版本，请重新读取并申请编辑。"));
+            }
+            if (!(param.getInput().get("path") instanceof String path)
+                    || !(param.getInput().get("old_text") instanceof String before)
+                    || !(param.getInput().get("new_text") instanceof String after)) {
+                return Mono.just(ToolResultBlock.error("请提供文件路径、原文和替换文本。"));
+            }
+            return Mono.fromCallable(() -> projectTools.edit(path, before, after, version));
         }
     }
 }

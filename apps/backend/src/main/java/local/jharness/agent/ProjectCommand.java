@@ -25,6 +25,7 @@ public final class ProjectCommand {
     private final Supplier<String> activeRunId;
     private boolean closed;
     private Process running;
+    private Process cancelled;
 
     ProjectCommand(
             Path project,
@@ -104,6 +105,12 @@ public final class ProjectCommand {
                 return evidence(receipt, command, startedAt, null, ToolExecutionDetails.Outcome.UNKNOWN,
                         true, captured.logComplete(), List.of(), ToolResultBlock.error("命令超过两分钟，已停止。\n" + captured.text()));
             }
+            synchronized (this) {
+                if (process == cancelled) {
+                    return evidence(receipt, command, startedAt, null, ToolExecutionDetails.Outcome.UNKNOWN,
+                            true, captured.logComplete(), List.of(), ToolResultBlock.error("命令已取消。"));
+                }
+            }
             int code = process.exitValue();
             String result = "退出码 " + code + "\n" + captured.text();
             if (captured.truncated()) {
@@ -149,6 +156,7 @@ public final class ProjectCommand {
                 if (process != null) {
                     if (process.isAlive()) stopProcess(process);
                     if (running == process) running = null;
+                    if (cancelled == process) cancelled = null;
                     try { process.getInputStream().close(); } catch (IOException ignored) { }
                 }
             }
@@ -157,7 +165,10 @@ public final class ProjectCommand {
 
     synchronized void close() {
         closed = true;
-        if (running != null && running.isAlive()) stopProcess(running);
+        if (running != null && running.isAlive()) {
+            cancelled = running;
+            stopProcess(running);
+        }
     }
 
     private static void stopProcess(Process process) {

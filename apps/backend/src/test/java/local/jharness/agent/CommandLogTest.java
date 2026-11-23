@@ -27,6 +27,31 @@ class CommandLogTest {
     }
 
     @Test @EnabledOnOs(OS.WINDOWS)
+    void cancellingALiveProcessLeavesTheExitCodeUnknown() throws Exception {
+        var reports = new TaskReportStore(temporary.resolve("workspace"));
+        var tool = new ProjectCommand(temporary, (op, path, before, after, denied, action) -> action.get(),
+                reports, () -> "run");
+        var executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try {
+            var execution = executor.submit(() -> tool.run(
+                    RuntimeContext.builder().userId("user").sessionId("session").build(),
+                    "Set-Content started.txt ready; Start-Sleep -Seconds 60"));
+            Path started = temporary.resolve("started.txt");
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
+            while (!Files.exists(started) && System.nanoTime() < deadline) Thread.sleep(50);
+            assertTrue(Files.exists(started));
+            tool.close();
+            execution.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            var receipt = reports.reports("session", List.of()).get(0).commands().get(0);
+            assertNull(receipt.exitCode());
+            assertEquals(TaskReportStore.CommandOutcome.UNKNOWN, receipt.outcome());
+        } finally {
+            tool.close();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test @EnabledOnOs(OS.WINDOWS)
     void failedBuildKeepsTheFirstAndLastOutputAndOnlyFreshTestFailures() throws Exception {
         Path project = Files.createDirectory(temporary.resolve("project"));
         Path dir = Files.createDirectories(project.resolve("target/surefire-reports"));

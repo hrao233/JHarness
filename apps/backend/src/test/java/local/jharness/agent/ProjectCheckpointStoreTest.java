@@ -126,6 +126,56 @@ class ProjectCheckpointStoreTest {
                 () -> store.restoreRun(sessionId, runId));
     }
 
+    @Test
+    void largeEditsRoundTripThroughApprovalAndBothRestorePaths() throws Exception {
+        var root = Files.createDirectory(temporary.resolve("project"));
+        var store = new ProjectCheckpointStore(temporary.resolve("workspace"), root);
+        Path file = root.resolve("large.txt");
+        String before = "\ufeff" + "示例行\r\n".repeat(12_000) + "目标\r\n";
+        String after = before.replace("目标", "已改");
+        write(file, before);
+        var tools = new ProjectTools(root, (op, path, oldText, newText, denied, action) -> {
+            assertEquals("目标\r\n", oldText);
+            assertEquals("已改\r\n", newText);
+            return store.run("session", "run", op, path, action);
+        });
+        for (boolean grouped : java.util.List.of(false, true)) {
+            assertEquals("SUCCESS", tools.edit("large.txt", "目标\n", "已改\n").getState().name());
+            assertEquals(after, Files.readString(file));
+            var id = store.list("session").get(0).id();
+            assertEquals(before, store.get(id).before().text());
+            write(file, after + "手工修改");
+            assertThrows(IllegalStateException.class, () -> store.restore(id));
+            assertThrows(IllegalStateException.class, () -> store.restoreRun("session", "run"));
+            assertEquals(after + "手工修改", Files.readString(file));
+            write(file, after);
+            if (grouped) store.restoreRun("session", "run");
+            else store.restore(id);
+            assertEquals(before, Files.readString(file));
+        }
+        var stale = new ProjectTools(root, (op, path, oldText, newText, denied, action) -> {
+            write(file, "manual" + before);
+            return action.get();
+        });
+        assertEquals("ERROR", stale.edit("large.txt", "目标", "已改").getState().name());
+        assertEquals("manual" + before, Files.readString(file));
+    }
+
+    @Test
+    void enforcesUtf8ByteLimitBeforeAndAfterAnEdit() throws Exception {
+        Path file = temporary.resolve("edge.txt");
+        String original = "a".repeat(8 * 1024 * 1024 - 3) + "尾";
+        write(file, original);
+        var tools = new ProjectTools(temporary, (op, path, before, after, denied, action) -> action.get());
+        assertEquals("ERROR", tools.edit("edge.txt", "尾", "尾!").getState().name());
+        assertEquals("ERROR", tools.edit("edge.txt", "aa", "x").getState().name());
+        assertEquals("SUCCESS", tools.edit("edge.txt", "尾", "首").getState().name());
+        write(file, original + "!");
+        assertEquals("ERROR", tools.edit("edge.txt", "尾", "").getState().name());
+        assertEquals(original + "!", Files.readString(file));
+        assertEquals("ERROR", tools.create("new.txt", "a".repeat(65537)).getState().name());
+    }
+
     private static void write(Path file, String text) {
         try {
             Files.writeString(file, text, StandardCharsets.UTF_8);

@@ -1,5 +1,6 @@
 package local.jharness.agent;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.message.ToolResultBlock;
@@ -95,14 +96,19 @@ public final class ProjectCheckpointStore {
             String error) {}
 
     private static final ObjectMapper JSON = new ObjectMapper();
+    @JsonIgnoreProperties({"text", "hash"})
+    private interface SnapshotHeader {}
+    private static final ObjectMapper HEADERS = JSON.copy().addMixIn(Snapshot.class, SnapshotHeader.class);
     private static final ConcurrentHashMap<Path, Object> LOCKS = new ConcurrentHashMap<>();
     private final Path root;
     private final Path directory;
     private final Path changeSetDirectory;
     private final Object lock;
 
-    private record PlannedFile(
-            String path, List<Checkpoint> checkpoints, Snapshot before, Snapshot after) {}
+    private record PlannedFile(String path, List<Summary> checkpoints) {
+        Summary first() { return checkpoints.get(0); }
+        Summary latest() { return checkpoints.get(checkpoints.size() - 1); }
+    }
 
     public ProjectCheckpointStore(Path workspace, Path project) throws IOException {
         root = project.toRealPath();
@@ -136,8 +142,12 @@ public final class ProjectCheckpointStore {
             save(record);
         }
         ToolResultBlock result;
+        Snapshot after;
         try {
             result = action.get();
+            after = snapshot(file);
+            if ("SUCCESS".equals(result.getState().name()) && !after.exists())
+                throw new IllegalStateException("写入完成后找不到文件，检查点无法用于恢复。");
         } catch (RuntimeException error) {
             save(new Checkpoint(
                     record.id(),
@@ -162,7 +172,7 @@ public final class ProjectCheckpointStore {
                 System.currentTimeMillis(),
                 result.getState().name().equals("SUCCESS") ? Status.SUCCESS : Status.ERROR,
                 record.before(),
-                snapshot(file)));
+                after));
         return result;
     }
 
@@ -173,7 +183,7 @@ public final class ProjectCheckpointStore {
                     .limit(2000)
                     .forEach(path -> {
                         try {
-                            var checkpoint = JSON.readValue(path.toFile(), Checkpoint.class);
+                            var checkpoint = HEADERS.readValue(path.toFile(), Checkpoint.class);
                             if (sessionId == null || sessionId.isBlank()
                                     || sessionId.equals(checkpoint.sessionId()))
                                 result.add(new Summary(
@@ -238,7 +248,10 @@ public final class ProjectCheckpointStore {
             var applied = new ArrayList<PlannedFile>();
             try {
                 for (PlannedFile file : planned) {
-                    applySnapshot(safeRestoreFile(file.path()), file.before());
+                    Path target = safeRestoreFile(file.path());
+                    if (!matches(target, get(file.latest().id()).after()))
+                        throw new IllegalStateException("文件在恢复过程中发生变化。");
+                    applySnapshot(target, get(file.first().id()).before());
                     applied.add(file);
                 }
             } catch (RuntimeException error) {
@@ -260,7 +273,8 @@ public final class ProjectCheckpointStore {
                         error);
             }
             for (PlannedFile file : planned) {
-                for (Checkpoint checkpoint : file.checkpoints()) {
+                for (Summary summary : file.checkpoints()) {
+                    Checkpoint checkpoint = get(summary.id());
                     save(new Checkpoint(
                             checkpoint.id(),
                             checkpoint.sessionId(),
@@ -344,13 +358,12 @@ public final class ProjectCheckpointStore {
     }
 
     private Snapshot snapshot(Path file) {
-        if (!Files.isRegularFile(file)) return new Snapshot(false, "", "");
+        if (Files.notExists(file, LinkOption.NOFOLLOW_LINKS)) return new Snapshot(false, "", "");
         try {
-            if (Files.size(file) > 64 * 1024) return new Snapshot(false, "", "");
-            String text = Files.readString(file, StandardCharsets.UTF_8);
+            String text = ProjectTools.readText(file);
             return new Snapshot(true, text, hash(text));
         } catch (IOException error) {
-            return new Snapshot(false, "", "");
+            throw new IllegalStateException("无法保存文件快照。请检查访问权限、UTF-8 编码及 8 MiB 大小限制。", error);
         }
     }
 
@@ -360,7 +373,7 @@ public final class ProjectCheckpointStore {
             for (Path path : files.filter(item -> item.getFileName().toString().endsWith(".json"))
                     .limit(2000).toList()) {
                 try {
-                    latest = Math.max(latest, JSON.readValue(path.toFile(), Checkpoint.class).createdAt());
+                    latest = Math.max(latest, HEADERS.readValue(path.toFile(), Checkpoint.class).createdAt());
                 } catch (IOException ignored) {
                     // A damaged checkpoint must not block new evidence.
                 }
@@ -380,13 +393,13 @@ public final class ProjectCheckpointStore {
             checkpointCount += file.checkpoints().size();
             Path target = safeRestoreFile(file.path());
             boolean currentExists = Files.exists(target, LinkOption.NOFOLLOW_LINKS);
-            boolean matches = matches(target, file.after());
+            boolean matches = matches(target, get(file.latest().id()).after());
             files.add(new FilePreview(
                     file.path(),
-                    file.checkpoints().get(file.checkpoints().size() - 1).operation(),
+                    file.latest().operation(),
                     file.checkpoints().size(),
-                    file.before().exists(),
-                    file.after().exists(),
+                    file.first().beforeExists(),
+                    file.latest().afterExists(),
                     currentExists,
                     matches));
             if (!matches) conflicts.add(file.path());
@@ -398,34 +411,25 @@ public final class ProjectCheckpointStore {
     }
 
     private List<PlannedFile> planned(String sessionId, String runId) {
-        var grouped = new LinkedHashMap<String, List<Checkpoint>>();
+        var grouped = new LinkedHashMap<String, List<Summary>>();
         for (Summary summary : list(sessionId)) {
             if (!runId.equals(summary.runId()) || !Status.SUCCESS.equals(summary.status())) continue;
-            grouped.computeIfAbsent(summary.path(), ignored -> new ArrayList<>()).add(get(summary.id()));
+            grouped.computeIfAbsent(summary.path(), ignored -> new ArrayList<>()).add(summary);
         }
         var result = new ArrayList<PlannedFile>();
         for (var entry : grouped.entrySet()) {
             var checkpoints = new ArrayList<>(entry.getValue());
-            checkpoints.sort(Comparator.comparingLong(Checkpoint::createdAt)
-                    .thenComparing(Checkpoint::id));
-            Checkpoint first = checkpoints.get(0);
-            Checkpoint latest = checkpoints.get(checkpoints.size() - 1);
-            result.add(new PlannedFile(
-                    entry.getKey(),
-                    List.copyOf(checkpoints),
-                    first.before(),
-                    latest.after()));
+            checkpoints.sort(Comparator.comparingLong(Summary::createdAt).thenComparing(Summary::id));
+            result.add(new PlannedFile(entry.getKey(), List.copyOf(checkpoints)));
         }
         result.sort(Comparator.comparing(PlannedFile::path));
         return List.copyOf(result);
     }
 
     private boolean matches(Path file, Snapshot expected) {
-        if (!expected.exists()) return !Files.exists(file, LinkOption.NOFOLLOW_LINKS);
+        if (!expected.exists()) return Files.notExists(file, LinkOption.NOFOLLOW_LINKS);
         try {
-            if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS) || Files.size(file) > 64 * 1024)
-                return false;
-            String text = Files.readString(file, StandardCharsets.UTF_8);
+            String text = ProjectTools.readText(file);
             return expected.text().equals(text) && expected.hash().equals(hash(text));
         } catch (IOException error) {
             return false;
@@ -464,7 +468,10 @@ public final class ProjectCheckpointStore {
         for (int i = applied.size() - 1; i >= 0; i--) {
             PlannedFile file = applied.get(i);
             try {
-                applySnapshot(safeRestoreFile(file.path()), file.after());
+                Path target = safeRestoreFile(file.path());
+                if (!matches(target, get(file.first().id()).before()))
+                    throw new IllegalStateException("文件在恢复过程中发生变化。");
+                applySnapshot(target, get(file.latest().id()).after());
             } catch (RuntimeException error) {
                 failures.add(file.path());
             }
@@ -585,7 +592,7 @@ public final class ProjectCheckpointStore {
             throw new IllegalArgumentException("任务或会话标识无效。");
     }
 
-    private static String hash(String text) {
+    static String hash(String text) {
         try {
             return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
                     .digest(text.getBytes(StandardCharsets.UTF_8)));

@@ -4053,33 +4053,14 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                 return Mono.just(new PermissionVerdict(use, PermissionBehavior.ALLOW));
             }
             Map<String, Object> input = use.getInput() == null ? Map.of() : use.getInput();
-            if (useEngine) {
-                return permissionEngine
-                        .checkPermission(tb, input)
-                        .map(
-                                decision ->
-                                        new PermissionVerdict(
-                                                use,
-                                                decision == null
-                                                        ? PermissionBehavior.ASK
-                                                        : decision.getBehavior()));
-            }
-            return tb.checkPermissions(input, state.getPermissionContext())
-                    .map(
-                            decision -> {
-                                if (decision == null) {
-                                    return new PermissionVerdict(use, PermissionBehavior.ALLOW);
-                                }
-                                // In the legacy lightweight path only an explicit ASK from the tool
-                                // gates execution; PASSTHROUGH and ALLOW both run, DENY is
-                                // honoured.
-                                return switch (decision.getBehavior()) {
-                                    case ASK -> new PermissionVerdict(use, PermissionBehavior.ASK);
-                                    case DENY ->
-                                            new PermissionVerdict(use, PermissionBehavior.DENY);
-                                    default -> new PermissionVerdict(use, PermissionBehavior.ALLOW);
-                                };
-                            });
+            var decision = useEngine
+                    ? permissionEngine.checkPermission(tb, input)
+                    : tb.checkPermissions(input, state.getPermissionContext());
+            return decision.map(value -> {
+                PermissionBehavior behavior = value.getBehavior();
+                ToolUseBlock proposed = behavior == PermissionBehavior.ASK ? tb.prepareConfirmation(use) : use;
+                return new PermissionVerdict(proposed, behavior);
+            });
         }
 
         private record PermissionVerdict(ToolUseBlock use, PermissionBehavior behavior) {}

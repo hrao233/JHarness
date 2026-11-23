@@ -303,8 +303,8 @@ remains authoritative for task and tool state; deleting report projections does 
 uncertain side effect safe to retry.
 
 Acceptance verification is host-authorized and runs only over an already persisted receipt from the
-same session/run. The verifier requires an explicit expected exit code, consistent producer outcome,
-no truncated output and a non-unknown exit code. Matching the expected code produces `PASSED`;
+same session/run. Exit verification requires an explicit expected code and a known process result
+consistent with the recorded outcome, even when the output preview is truncated. Matching the expected code produces `PASSED`;
 a different known code produces `FAILED`; incomplete or contradictory evidence produces `UNKNOWN`.
 The criterion text remains unchanged, and the report retains the verifier identity, command ID,
 expected code, timestamp and reason. This verifies shell evidence only, never a broader semantic

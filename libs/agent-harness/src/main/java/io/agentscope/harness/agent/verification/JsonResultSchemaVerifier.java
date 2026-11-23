@@ -40,6 +40,7 @@ import java.util.Set;
 
 /** Explicit output-contract check; never infers a schema from a natural-language criterion. */
 public final class JsonResultSchemaVerifier implements DeterministicVerifier {
+    public static final int MAX_OUTPUT_CHARS = 262144;
     private final String id;
     private final Schema schema;
     private static final ObjectMapper JSON =
@@ -125,7 +126,7 @@ public final class JsonResultSchemaVerifier implements DeterministicVerifier {
 
     /** Verify raw output after the caller establishes the producer succeeded and output is complete. */
     public Verdict verifySuccessfulOutput(String output) {
-        if (output == null || output.length() > 262144) {
+        if (output == null || output.length() > MAX_OUTPUT_CHARS) {
             return new Verdict(
                     Outcome.UNKNOWN, "Output is absent or exceeds the bounded schema-check size");
         }

@@ -269,10 +269,10 @@ class VerificationServiceTest {
     }
 
     @Test
-    void truncationIsUnknown() {
+    void truncatedOutputRetainsExitEvidence() {
         shell(0, true);
         assertEquals(
-                Outcome.UNKNOWN,
+                Outcome.PASSED,
                 service.verify(
                                 context,
                                 criterion,

@@ -49,7 +49,7 @@ const formatBytes = value => {
 };
 
 export function NavigationPanel({ panel, close, projects, project, bookmarks, openChat, removeBookmark,
-    copy, addPart, busy, api, errorText, session, onWorktreesChanged, openWorktree, docked, switchTool }) {
+    copy, addPart, busy, api, errorText, session, onWorktreesChanged, openWorktree, docked, switchTool, reports, reportError, refreshReports, rerunning, rerunCommand }) {
   const dialog = useRef(null);
   const [query, setQuery] = useState('');
   const [result, setResult] = useState(null);
@@ -68,7 +68,6 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
   const [checkpoints, setCheckpoints] = useState(null);
   const [checkpointDetail, setCheckpointDetail] = useState(null);
   const [checkpointBusy, setCheckpointBusy] = useState('');
-  const [reports, setReports] = useState(null);
   const [reportBusy, setReportBusy] = useState('');
   const [changeSet, setChangeSet] = useState(null);
   const [changeSetBusy, setChangeSetBusy] = useState('');
@@ -164,20 +163,6 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
   }, [api, errorText, panel, project?.id, session?.id, revision, busy]);
 
   useEffect(() => {
-    if (panel !== 'reports' || !project || !session) return;
-    let live = true;
-    setChangeSet(null);
-    setError('');
-    api.report(project.id, session.id).then(value => {
-      if (live) setReports(value);
-    }).catch(failure => {
-      if (live) setError(errorText(failure));
-    });
-    return () => { live = false; };
-  }, [api, errorText, panel, project?.id, session?.id, revision, busy]);
-
-  useEffect(() => {
-    setReports(null);
     setChangeSet(null);
     setChangeSetNotice('');
     setCriterionDrafts({});
@@ -341,6 +326,7 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
     setError('');
     try {
       setCheckpointDetail(await api.restoreCheckpoint(project.id, checkpoint.id));
+      refreshReports();
       setRevision(value => value + 1);
     } catch (failure) {
       setError(errorText(failure));
@@ -384,6 +370,7 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
     setChangeSetNotice('');
     try {
       await api.restoreChangeSet(project.id, session.id, preview.runId);
+      refreshReports();
       setChangeSet(null);
       setChangeSetNotice({
         runId: preview.runId,
@@ -545,20 +532,24 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
     }
   }
 
-  function updateCriterionDraft(id, patch) {
-    setCriterionDrafts(previous => ({ ...previous, [id]: { ...previous[id], ...patch } }));
+  function updateCriterionDraft(criterion, patch) {
+    setCriterionDrafts(previous => {
+      const prior = previous[criterion.id];
+      const draft = prior?.boundTo === criterion.commandId ? prior : {};
+      return { ...previous, [criterion.id]: { ...draft, ...patch, boundTo: criterion.commandId } };
+    });
   }
 
   async function verifyCriterion(report, criterion, commandId, jsonSchema) {
     if (!project || !session || !commandId) return;
     setCriterionBusy(criterion.id);
-    updateCriterionDraft(criterion.id, { error: '' });
+    updateCriterionDraft(criterion, { error: '' });
     try {
       await api.verifyCriterion(
-        project.id, session.id, report.runId, criterion.id, commandId, jsonSchema);
-      setRevision(value => value + 1);
+        project.id, session.id, report.runId, criterion.id, commandId, jsonSchema, criterion.expectedExitCode ?? 0);
+      refreshReports();
     } catch (failure) {
-      updateCriterionDraft(criterion.id, { error: errorText(failure) });
+      updateCriterionDraft(criterion, { error: errorText(failure) });
     } finally {
       setCriterionBusy('');
     }
@@ -781,11 +772,12 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
     {panel === 'reports' && <>
       <div className="review-head"><span>{session?.title || '当前会话'}的任务报告</span>
         <button type="button" className="secondary" disabled={!!criterionBusy}
-          onClick={() => setRevision(value => value + 1)}>
+          onClick={refreshReports}>
           <RefreshCw size={15}/>刷新
         </button>
       </div>
-      {!reports && !error && <p className="muted">正在读取任务报告…</p>}
+      {reportError && <p className="error-text" role="alert">{reportError}</p>}
+      {!reports && !reportError && !error && <p className="muted">正在读取任务报告…</p>}
       {reports?.length === 0 && <p className="muted">当前会话还没有任务报告。</p>}
       {!!reports?.length && <div className="task-report-list">
         {reports.map((report, index) => <details className="task-report" key={report.runId} open={index === 0}>
@@ -821,43 +813,48 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
                 : criterion.status === 'FAILED' || criterion.status === 'UNKNOWN'
                   ? CircleX : CircleDashed;
               const command = report.commands.find(item => item.id === criterion.commandId);
-              const draft = criterionDrafts[criterion.id];
+              const prior = criterionDrafts[criterion.id];
+              const draft = prior?.boundTo === criterion.commandId ? prior : null;
               const commandId = draft?.commandId ?? criterion.commandId ?? '';
               const method = draft?.method ?? (criterion.jsonSchema ? 'json' : 'exit');
               const jsonSchema = draft?.jsonSchema ?? criterion.jsonSchema ?? '';
-              const locked = !!criterionBusy || busy;
+              const locked = !!criterionBusy || !!rerunning || busy;
               const selected = report.commands.some(item => item.id === commandId);
-              return <div className={'acceptance-row acceptance-' + criterion.status.toLowerCase()}
+              return <div className={'acceptance-row acceptance-' + (criterion.changedFiles?.length ? 'stale' : criterion.status.toLowerCase())}
                 key={criterion.id}>
                 <Icon size={16}/>
                 <span className="acceptance-copy">
                   <strong>{criterion.content}</strong>
-                  <small>{criterion.status === 'PASSED' ? '命令证据已通过'
+                  <small>{criterion.status === 'PASSED' ? (criterion.changedFiles?.length ? '历史命令证据已通过' : '命令证据已通过')
                     : criterion.status === 'FAILED' ? '命令证据未通过'
                       : criterion.status === 'UNKNOWN' ? '证据不足，尚未通过'
                         : '等待确定性证据'}</small>
+                  {!!criterion.changedFiles?.length && <strong className="stale-warning">
+                    这次测试后又修改了：{criterion.changedFiles.join('、')}</strong>}
                   {criterion.reason && <small>{criterion.reason}</small>}
                   {command && <small>
-                    {criterion.jsonSchema ? 'JSON Schema' : '退出码'} · <code>{command.command}</code>
+                    {criterion.jsonSchema ? 'JSON Schema' : '期望脚本退出码 ' + criterion.expectedExitCode} · <code>{command.command}</code>
                   </small>}
                 </span>
                 <div className="acceptance-actions">
+                  {!!criterion.changedFiles?.length && command && <button className="secondary" disabled={locked}
+                    onClick={() => rerunCommand(report, command)}>重新运行</button>}
                   <select aria-label={'为“' + criterion.content + '”选择命令证据'}
                     value={selected ? commandId : ''}
                     disabled={!report.commands.length || locked}
-                    onChange={event => updateCriterionDraft(criterion.id, {
+                    onChange={event => updateCriterionDraft(criterion, {
                       commandId: event.target.value, error: ''
                     })}>
                     <option value="">选择命令</option>
                     {report.commands.map(item => <option key={item.id} value={item.id}>
-                      {item.exitCode === null ? '未知' : '退出码 ' + item.exitCode}
-                      {' · '}{item.command.slice(0, 60)}
+                      {item.exitCode === null ? '未知' : '脚本退出码 ' + item.exitCode}
+                      {item.changedFiles?.length ? ' · 测试后有改动' : ''}{' · '}{item.command.slice(0, 60)}
                     </option>)}
                   </select>
                   <select aria-label={'为“' + criterion.content + '”选择核验方式'}
                     value={method} disabled={!report.commands.length || locked}
-                    onChange={event => updateCriterionDraft(criterion.id, { method: event.target.value, error: '' })}>
-                    <option value="exit">退出码为 0</option>
+                    onChange={event => updateCriterionDraft(criterion, { method: event.target.value, error: '' })}>
+                    <option value="exit">脚本退出码为 {criterion.expectedExitCode ?? 0}</option>
                     <option value="json">JSON Schema</option>
                   </select>
                   {method === 'json' && <label className="acceptance-schema">
@@ -866,7 +863,7 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
                       spellCheck={false} rows={4} maxLength={65536}
                       placeholder={'{"required":["passed"],"properties":{"passed":{"const":true}},"type":"object"}'}
                       value={jsonSchema} disabled={locked}
-                      onChange={event => updateCriterionDraft(criterion.id, {
+                      onChange={event => updateCriterionDraft(criterion, {
                         jsonSchema: event.target.value, error: ''
                       })}/>
                   </label>}
@@ -894,10 +891,15 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
                 </span>
               </div>
               <small>
-                {command.exitCode === null ? '无退出码' : '退出码 ' + command.exitCode}
+                {command.exitCode === null ? '无脚本退出码' : '脚本退出码 ' + command.exitCode}
                 {' · '}{command.durationMs} ms
                 {command.outputTruncated ? ' · 预览已截断' : ''}
               </small>
+              {!!command.changedFiles?.length && <small className="stale-warning">
+                测试后有改动：{command.changedFiles.join('、')}</small>}
+              <button type="button" className="secondary" disabled={busy || !!rerunning || !!criterionBusy}
+                onClick={() => rerunCommand(report, command)}>
+                {rerunning === command.id ? '重新运行中…' : '重新运行'}</button>
               {!!command.testFailures?.length && <div>
                 <strong>失败用例</strong><ul>{command.testFailures.map((failure, index) =>
                   <li key={index}>{failure}</li>)}</ul>

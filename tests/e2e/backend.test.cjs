@@ -447,6 +447,58 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     assert.match(commandResults, /退出码 7/);
     assert.match(commandResults, /完成/);
 
+    // Same-run local replay goes through the real shell and receipt store without model traffic.
+    const replayContext = { ...context, sessionId: randomUUID() };
+    const replayRun = randomUUID();
+    const replay = { ...replayContext, runId: replayRun };
+    const check = "if ((Get-Content replay.txt -Raw) -eq 'v1') { Write-Output 'true' } else { Write-Output 'false' }";
+    await writeFile(path.join(projectPath, 'replay.txt'), 'v1');
+    steps = [
+      ['run_command', { command: check }],
+      ['edit_file', { path: 'replay.txt', old_text: 'v1', new_text: 'v2' }],
+      ['acceptance_write', { criteria: ['脚本成功', '内容匹配'] }]
+    ];
+    await call('chat', { ...replay, ...model, permission: 'full', message: '测试后修改文件' });
+    const replayApproval = await waitEvent(replayRun, 'approval');
+    await assert.rejects(call('rerunCommand', { ...replay, commandId: randomUUID() }), /正在执行/);
+    await call('approve', { runId: replayRun, approvalId: replayApproval.data.id, allow: true });
+    await waitEvent(replayRun, 'done');
+    let [replayReport] = await call('taskReport', replayContext);
+    const oldId = replayReport.commands[0].id;
+    const [exitCriterion, jsonCriterion] = replayReport.acceptance.criteria;
+    await call('verifyCriterion', { ...replay, criterionId: exitCriterion.id, commandId: oldId, expectedExitCode: 0 });
+    await call('verifyJsonCriterion', { ...replay, criterionId: jsonCriterion.id, commandId: oldId, jsonSchema: '{"const":true}' });
+    [replayReport] = await call('taskReport', replayContext);
+    for (const criterion of replayReport.acceptance.criteria) {
+      assert.equal(criterion.status, 'PASSED');
+      assert.deepEqual(criterion.changedFiles, ['replay.txt']);
+    }
+    const modelCount = requests.length;
+    await assert.rejects(call('rerunCommand', { ...replay, commandId: oldId, command: 'echo substituted' }));
+    await assert.rejects(call('rerunCommand', { ...replay, runId: randomUUID(), commandId: oldId }));
+    const concurrent = await Promise.allSettled([0, 1].map(() =>
+      call('rerunCommand', { ...replay, commandId: oldId })));
+    assert.equal(concurrent.filter(result => result.status === 'rejected').length, 1);
+    assert.match(concurrent.find(result => result.status === 'rejected').reason.message, /正在执行/);
+    [replayReport] = concurrent.find(result => result.status === 'fulfilled').value;
+    assert.equal(replayReport.runId, replayRun);
+    assert.equal(replayReport.commands.length, 2);
+    const fresh = replayReport.commands.at(-1);
+    assert.notEqual(fresh.id, oldId);
+    assert.deepEqual(fresh.changedFiles, []);
+    assert.deepEqual(replayReport.commands[0].changedFiles, ['replay.txt']);
+    assert.equal(fresh.command, check);
+    assert.equal((await readFile(await call('commandLog', { ...replay, commandId: fresh.id }), 'utf8')).trim(), 'false');
+    assert.deepEqual(replayReport.acceptance.criteria.map(c => [c.commandId, c.status, c.changedFiles]),
+      [[fresh.id, 'PASSED', []], [fresh.id, 'FAILED', []]]);
+    await writeFile(path.join(projectPath, 'replay.txt'), 'v1');
+    [replayReport] = await call('taskReport', replayContext);
+    assert.deepEqual(replayReport.commands.at(-1).changedFiles, ['replay.txt']);
+    [replayReport] = await call('rerunCommand', { ...replay, commandId: fresh.id });
+    assert.deepEqual(replayReport.acceptance.criteria.map(c => [c.status, c.changedFiles]), [['PASSED', []], ['PASSED', []]]);
+    assert.equal(requests.length, modelCount);
+    assert.equal(events.filter(e => e.runId === replayRun && e.event === 'approval').length, 1);
+
     const memory = randomUUID();
     await writeFile(path.join(projectPath, 'MEMORY.md'), 'UNTRUSTED-PROJECT-MEMORY');
     steps = [

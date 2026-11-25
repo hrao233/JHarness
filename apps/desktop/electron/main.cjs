@@ -129,7 +129,7 @@ function call(method, params = {}) {
     const timer = setTimeout(() => {
       pending.delete(id);
       reject(new Error('Java 后端响应超时。'));
-    }, 35000);
+    }, method === 'rerunCommand' ? 150000 : 35000);
     pending.set(id, { resolve, reject, timer });
     backend.stdin.write(JSON.stringify({ id, method, params }) + '\n');
   });
@@ -535,10 +535,12 @@ function register() {
     call('changeSets', { ...context(projectId, sessionId), runId }));
   ipcMain.handle('jh:report', (_, projectId, sessionId) =>
     call('taskReport', context(projectId, sessionId)));
-  ipcMain.handle('jh:verify-criterion', (_, projectId, sessionId, runId, criterionId, commandId, jsonSchema) => {
+  ipcMain.handle('jh:rerun-command', (_, projectId, sessionId, runId, commandId) =>
+    call('rerunCommand', { ...context(projectId, sessionId), runId, commandId }));
+  ipcMain.handle('jh:verify-criterion', (_, projectId, sessionId, runId, criterionId, commandId, jsonSchema, expectedExitCode = 0) => {
     const evidence = { ...context(projectId, sessionId), runId, criterionId, commandId };
     return jsonSchema == null
-      ? call('verifyCriterion', { ...evidence, expectedExitCode: 0 })
+      ? call('verifyCriterion', { ...evidence, expectedExitCode })
       : call('verifyJsonCriterion', { ...evidence, jsonSchema });
   });
   ipcMain.handle('jh:open-command-log', async (_, projectId, sessionId, runId, commandId) => {

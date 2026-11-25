@@ -51,6 +51,9 @@ public final class Backend {
 
     private final ObjectMapper json = new ObjectMapper();
     private final PrintStream protocol;
+    private final Object executionLock = new Object();
+    private final Map<String, String> executingSessions = new java.util.HashMap<>();
+    private final Map<String, String> rerunningSessions = new java.util.HashMap<>();
     private final Object bookmarkLock = new Object();
     private final Path dataDirectory;
     private final SessionSearchIndex sessionSearch;
@@ -122,12 +125,10 @@ public final class Backend {
                 case "addBookmark" -> addBookmark(params);
                 case "removeBookmark" -> removeBookmark(params);
                 case "importBookmarks" -> importBookmarks(params);
-                case "chat" -> startChat(params);
+                case "chat", "resumeTask", "reconcileTask" -> beginExecution(request.path("method").asText(), params);
                 case "task" -> currentTask(params);
                 case "tasks" -> listTasks(params);
-                case "resumeTask" -> resumeTask(params);
                 case "cancelTask" -> cancelTask(params);
-                case "reconcileTask" -> reconcileTask(params);
                 case "context" -> sessionContext(params);
                 case "forkSession" -> forkSession(params);
                 case "exportSession" -> exportSession(params);
@@ -150,22 +151,13 @@ public final class Backend {
                 case "changeSets" -> checkpointStore(params).changeSets(
                         identifier(params, "sessionId"), identifier(params, "runId"));
                 case "taskReport" -> taskReport(params);
+                case "rerunCommand" -> rerunCommand(params);
                 case "commandLog" -> new TaskReportStore(workspace(params)).commandLog(
                         identifier(params, "sessionId"), identifier(params, "runId"), identifier(params, "commandId"));
                 case "taskArtifact" -> new TaskReportStore(workspace(params)).artifact(
                         identifier(params, "sessionId"), identifier(params, "artifactId"));
-                case "verifyCriterion" -> new TaskReportStore(workspace(params)).verifyCriterion(
-                        identifier(params, "sessionId"),
-                        identifier(params, "runId"),
-                        identifier(params, "criterionId"),
-                        identifier(params, "commandId"),
-                        params.path("expectedExitCode").asInt(0));
-                case "verifyJsonCriterion" -> new TaskReportStore(workspace(params)).verifyJsonCriterion(
-                        identifier(params, "sessionId"),
-                        identifier(params, "runId"),
-                        identifier(params, "criterionId"),
-                        identifier(params, "commandId"),
-                        required(params, "jsonSchema"));
+                case "verifyCriterion", "verifyJsonCriterion" -> verifyAcceptance(params,
+                        "verifyJsonCriterion".equals(request.path("method").asText()));
                 case "steer" -> durableConversations.steer(
                         identifier(params, "runId"), required(params, "message"));
                 case "approvals" -> listApprovals(params);
@@ -335,6 +327,55 @@ public final class Backend {
         return new Bookmark(id, projectId, sessionId, message.id(), message.turn(), message.role(), message.text());
     }
 
+    private String sessionKey(JsonNode params) {
+        return identifier(params, "projectId") + "/" + identifier(params, "sessionId");
+    }
+
+    private boolean beginExecution(String method, JsonNode params) throws Exception {
+        String key = sessionKey(params);
+        String run = identifier(params, "runId");
+        synchronized (executionLock) {
+            if (rerunningSessions.containsKey(key) || rerunningSessions.containsValue(run))
+                throw new IllegalStateException("正在本地重跑命令，请稍后再试。");
+            if (executingSessions.putIfAbsent(run, key) != null) throw new IllegalStateException("任务已启动。");
+        }
+        try {
+            return switch (method) {
+                case "chat" -> startChat(params);
+                case "resumeTask" -> resumeTask(params);
+                default -> reconcileTask(params);
+            };
+        } catch (Exception error) {
+            synchronized (executionLock) { executingSessions.remove(run, key); }
+            throw error;
+        }
+    }
+
+    private List<TaskReportStore.TaskReport> rerunCommand(JsonNode params) throws Exception {
+        String key = sessionKey(params);
+        String session = identifier(params, "sessionId");
+        String run = identifier(params, "runId");
+        String command = identifier(params, "commandId");
+        Path project = Path.of(required(params, "projectPath")).toRealPath();
+        if (!Files.isDirectory(project) || params.has("command"))
+            throw new IllegalArgumentException("请选择项目中已记录的命令。");
+        synchronized (executionLock) {
+            if (executingSessions.containsValue(key) || executingSessions.containsKey(run)
+                    || rerunningSessions.containsKey(key) || rerunningSessions.containsValue(run))
+                throw new IllegalStateException("任务正在执行，请稍后重跑。");
+            rerunningSessions.put(key, run);
+        }
+        try {
+            var head = ConversationRuntime.openSession(workspace(params), context(params)).head();
+            if (head.owner() != null && head.leaseUntil() > System.currentTimeMillis())
+                throw new IllegalStateException("当前会话正在执行。");
+            local.jharness.agent.ProjectCommand.rerun(project, new TaskReportStore(workspace(params)), session, run, command);
+            return taskReport(params);
+        } finally {
+            synchronized (executionLock) { rerunningSessions.remove(key, run); }
+        }
+    }
+
     private boolean startChat(JsonNode params) throws Exception {
         String permission = params.path("permission").asText("assist");
         var request = request(params, permission, true);
@@ -470,10 +511,23 @@ public final class Backend {
                 workspace(params), Path.of(required(params, "projectPath")).toRealPath());
     }
 
+    private TaskReportStore.AcceptanceCriterion verifyAcceptance(JsonNode params, boolean jsonSchema) throws Exception {
+        String session = identifier(params, "sessionId");
+        String run = identifier(params, "runId");
+        String criterion = identifier(params, "criterionId");
+        String command = identifier(params, "commandId");
+        var reports = new TaskReportStore(workspace(params));
+        var result = jsonSchema
+                ? reports.verifyJsonCriterion(session, run, criterion, command, required(params, "jsonSchema"))
+                : reports.verifyCriterion(session, run, criterion, command, params.path("expectedExitCode").asInt(0));
+        return params.hasNonNull("projectPath")
+                ? reports.withCurrentChanges(result, session, run, checkpointStore(params)) : result;
+    }
+
     private List<TaskReportStore.TaskReport> taskReport(JsonNode params) throws Exception {
         String sessionId = identifier(params, "sessionId");
         return new TaskReportStore(workspace(params)).reports(
-                sessionId, checkpointStore(params).list(sessionId));
+                sessionId, checkpointStore(params));
     }
 
     private Map<String, Boolean> answers(JsonNode params) {
@@ -671,6 +725,7 @@ public final class Backend {
     }
 
     private void event(String runId, String type, Object data) {
+        if ("done".equals(type)) synchronized (executionLock) { executingSessions.remove(runId); }
         send(Map.of("event", type, "runId", runId, "data", data));
     }
 

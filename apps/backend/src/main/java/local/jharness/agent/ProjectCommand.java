@@ -18,7 +18,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 
 public final class ProjectCommand {
-    private record Receipt(String session, String run, String id) {}
+    private record Receipt(String session, String run, String id, java.util.Map<String, String> baseline) {}
     private final Path project;
     private final ApprovedOperation approval;
     private final TaskReportStore reports;
@@ -55,11 +55,33 @@ public final class ProjectCommand {
     }
 
     private ToolResultBlock runApproved(RuntimeContext context, String command) {
-        long startedAt = System.currentTimeMillis();
         String run = activeRunId.get();
         if ((run == null || run.isBlank()) && context != null) run = context.getRunId();
-        Receipt receipt = context == null || context.getSessionId() == null || run == null ? null
-                : new Receipt(context.getSessionId(), run, UUID.randomUUID().toString());
+        return execute(context == null || context.getSessionId() == null || run == null ? null : context.getSessionId(), run, UUID.randomUUID().toString(), command);
+    }
+
+    public static TaskReportStore.CommandEvidence rerun(Path project, TaskReportStore reports,
+            String session, String run, String commandId) {
+        var prior = reports.command(session, run, commandId);
+        var executor = new ProjectCommand(project, null, reports, () -> run);
+        String id = UUID.randomUUID().toString();
+        executor.execute(session, run, id, prior.command());
+        var fresh = reports.command(session, run, id);
+        reports.rebind(session, run, commandId, fresh);
+        return fresh;
+    }
+
+    private ToolResultBlock execute(String session, String run, String id, String command) {
+        long startedAt = System.currentTimeMillis();
+        Receipt receipt = null;
+        if (session != null) {
+            try {
+                var baseline = reports.checkpoints(project).coverage(session, run).baseline(run);
+                receipt = new Receipt(session, run, id, baseline);
+            } catch (IOException error) {
+                throw new IllegalStateException("无法读取项目检查点。", error);
+            }
+        }
         Path log = receipt == null ? null : reports.logPath(receipt.session(), receipt.run(), receipt.id());
         Process process = null;
         try {
@@ -79,7 +101,10 @@ public final class ProjectCommand {
                         "v1.0", "powershell.exe").toString();
                 String script = "$ProgressPreference = 'SilentlyContinue'\n"
                         + "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n"
-                        + command;
+                        + "$global:LASTEXITCODE = 0\n"
+                        + command + "\nif (-not $?) {\n"
+                        + "  if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n"
+                        + "  exit 1\n}\n";
                 String encoded = Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_16LE));
                 var builder = new ProcessBuilder(shell, "-NoLogo", "-NoProfile", "-NonInteractive",
                         "-EncodedCommand", encoded)
@@ -112,11 +137,11 @@ public final class ProjectCommand {
                 }
             }
             int code = process.exitValue();
-            String result = "退出码 " + code + "\n" + captured.text();
+            String result = "脚本退出码 " + code + "\n" + captured.text();
             if (captured.truncated()) {
                 result += captured.logComplete() ? "\n完整日志已保存到任务报告。" : "\n完整日志未能保存。";
             }
-            List<String> failures = code != 0 && tests != null ? tests.failures() : List.of();
+            List<String> failures = tests != null ? tests.failures() : List.of();
             if (!failures.isEmpty()) result += "\n本次构建期间更新的 Surefire 报告（最多 10 项）\n" + String.join("\n", failures);
             ToolExecutionDetails.Outcome outcome = code == 0
                     ? ToolExecutionDetails.Outcome.SUCCEEDED
@@ -200,7 +225,7 @@ public final class ProjectCommand {
                                 .map(item -> item instanceof io.agentscope.core.message.TextBlock text
                                         ? text.getText()
                                         : "")
-                                .reduce("", String::concat));
+                                .reduce("", String::concat), receipt.baseline());
             } catch (RuntimeException ignored) {
                 // A reporting failure must not turn an already executed command into a retry.
             }

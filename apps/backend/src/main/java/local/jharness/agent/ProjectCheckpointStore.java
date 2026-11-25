@@ -95,8 +95,8 @@ public final class ProjectCheckpointStore {
             List<String> conflicts,
             String error) {}
 
-    private static final ObjectMapper JSON = new ObjectMapper();
-    @JsonIgnoreProperties({"text", "hash"})
+    private static final ObjectMapper JSON = new ObjectMapper().disable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
+    @JsonIgnoreProperties({"text"})
     private interface SnapshotHeader {}
     private static final ObjectMapper HEADERS = JSON.copy().addMixIn(Snapshot.class, SnapshotHeader.class);
     private static final ConcurrentHashMap<Path, Object> LOCKS = new ConcurrentHashMap<>();
@@ -177,10 +177,13 @@ public final class ProjectCheckpointStore {
     }
 
     public List<Summary> list(String sessionId) {
+        return summaries(sessionId, 200);
+    }
+
+    List<Summary> summaries(String sessionId, int limit) {
         try (var files = Files.list(directory)) {
             var result = new ArrayList<Summary>();
             files.filter(path -> path.getFileName().toString().endsWith(".json"))
-                    .limit(2000)
                     .forEach(path -> {
                         try {
                             var checkpoint = HEADERS.readValue(path.toFile(), Checkpoint.class);
@@ -202,7 +205,7 @@ public final class ProjectCheckpointStore {
                         }
                     });
             result.sort(Comparator.comparingLong(Summary::createdAt).reversed());
-            return List.copyOf(result.stream().limit(200).toList());
+            return List.copyOf(result.stream().limit(limit).toList());
         } catch (IOException error) {
             throw new IllegalStateException("无法读取项目检查点。", error);
         }
@@ -355,6 +358,83 @@ public final class ProjectCheckpointStore {
                 checkpoint.after());
         save(restored);
         return restored;
+    }
+
+    /** Only file fingerprints are loaded here. Snapshot bodies stay on disk. */
+    record FileChange(String run, String path, long at, String expected) {}
+
+    record Coverage(List<FileChange> changes, Map<String, String> disk) {
+        Map<String, String> baseline(String run) {
+            var result = new LinkedHashMap<String, String>();
+            for (var change : changes) {
+                String fingerprint = disk.get(change.path());
+                if (run.equals(change.run()) && fingerprint != null) result.put(change.path(), fingerprint);
+            }
+            return result;
+        }
+
+        List<String> changed(String run, long startedAt, Map<String, String> baseline) {
+            var paths = new java.util.LinkedHashSet<String>();
+            var expected = new LinkedHashMap<String, String>();
+            var tracked = new java.util.LinkedHashSet<String>();
+            for (var change : changes) {
+                if (change.at() >= startedAt) paths.add(change.path());
+                if (run.equals(change.run())) tracked.add(change.path());
+                expected.put(change.path(), change.expected());
+            }
+            for (String path : tracked) {
+                String reference = baseline.getOrDefault(path, expected.get(path));
+                if (disk.containsKey(path) && (reference == null || !reference.equals(disk.get(path)))) paths.add(path);
+            }
+            return List.copyOf(paths);
+        }
+    }
+
+    Coverage coverage(String session, String onlyRun) {
+        var changes = new ArrayList<FileChange>();
+        var restored = new ArrayList<Checkpoint>();
+        synchronized (lock) {
+            try (var files = Files.newDirectoryStream(directory, "*.json")) {
+                for (Path file : files) {
+                    Checkpoint cp;
+                    try { cp = HEADERS.readValue(file.toFile(), Checkpoint.class); }
+                    catch (IOException ignored) { continue; }
+                    if (!session.equals(cp.sessionId()) || (onlyRun != null && !onlyRun.equals(cp.runId()))
+                            || !("edit_file".equals(cp.operation()) || "create_file".equals(cp.operation()))
+                            || (cp.status() != Status.SUCCESS && cp.status() != Status.RESTORED)) continue;
+                    changes.add(new FileChange(cp.runId(), cp.path(), cp.status() == Status.RESTORED
+                            ? cp.createdAt() : Math.max(cp.createdAt(), cp.updatedAt()), fingerprint(cp.after())));
+                    if (cp.status() == Status.RESTORED) restored.add(cp);
+                }
+            } catch (IOException e) { throw new IllegalStateException("无法读取文件检查点。", e); }
+            // A group undo applies the earliest before-image of each path once, even if
+            // several edits of that path are subsequently marked RESTORED in the audit log.
+            restored.sort(Comparator.comparingLong(Checkpoint::createdAt).reversed());
+            var groups = new LinkedHashMap<String, List<ChangeSet>>();
+            for (var cp : restored) {
+                long at = cp.updatedAt();
+                for (var group : groups.computeIfAbsent(cp.runId(), run -> changeSets(session, run))) {
+                    if (group.status() == ChangeSetStatus.RESTORED && group.paths().contains(cp.path())
+                            && group.startedAt() <= at && at <= group.finishedAt()) {
+                        at = group.finishedAt();
+                        break;
+                    }
+                }
+                changes.add(new FileChange(cp.runId(), cp.path(), at, fingerprint(cp.before())));
+            }
+        }
+        changes.sort(Comparator.comparingLong(FileChange::at));
+        var disk = new LinkedHashMap<String, String>();
+        for (var change : changes) {
+            if (disk.containsKey(change.path())) continue;
+            try { disk.put(change.path(), fingerprint(snapshot(safeRestoreFile(change.path())))); }
+            catch (RuntimeException unreadable) { disk.put(change.path(), null); }
+        }
+        return new Coverage(changes, disk);
+    }
+
+    private static String fingerprint(Snapshot value) {
+        return value == null ? null : value.exists() ? value.hash() : "missing";
     }
 
     private Snapshot snapshot(Path file) {

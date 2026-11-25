@@ -18,6 +18,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -34,7 +35,7 @@ public final class TaskReportStore {
     private static final int MAX_COMMAND_OUTPUT = 12_000;
     private static final int MAX_PLAN_STEPS = 40;
     private static final int MAX_STEP_LENGTH = 240;
-    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final ObjectMapper JSON = new ObjectMapper().disable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
     private static final ConcurrentHashMap<Path, Object> LOCKS = new ConcurrentHashMap<>();
 
     public record PlanStep(String content, String status, String priority) {}
@@ -62,7 +63,15 @@ public final class TaskReportStore {
             String verifier,
             long verifiedAt,
             String reason,
-            String jsonSchema) {}
+            String jsonSchema, List<String> changedFiles) {
+        public AcceptanceCriterion {
+            changedFiles = changedFiles == null ? List.of() : List.copyOf(changedFiles);
+        }
+        AcceptanceCriterion withChanges(List<String> files) {
+            return new AcceptanceCriterion(id, content, status, commandId, expectedExitCode, verifier,
+                    verifiedAt, reason, jsonSchema, files);
+        }
+    }
 
     public record Acceptance(
             String sessionId,
@@ -88,7 +97,18 @@ public final class TaskReportStore {
             Integer exitCode,
             CommandOutcome outcome,
             boolean outputTruncated,
-            String output, boolean logComplete, List<String> testFailures) {}
+            String output, boolean logComplete, List<String> testFailures,
+            Map<String, String> fileBaseline, List<String> changedFiles) {
+        public CommandEvidence {
+            testFailures = testFailures == null ? List.of() : List.copyOf(testFailures);
+            changedFiles = changedFiles == null ? List.of() : List.copyOf(changedFiles);
+            fileBaseline = fileBaseline == null ? Map.of() : Map.copyOf(fileBaseline);
+        }
+        CommandEvidence withChanges(List<String> files) {
+            return new CommandEvidence(id, sessionId, runId, command, startedAt, finishedAt, durationMs,
+                    exitCode, outcome, outputTruncated, output, logComplete, testFailures, fileBaseline, files);
+        }
+    }
 
     public record Artifact(
             String id,
@@ -162,7 +182,7 @@ public final class TaskReportStore {
                         "",
                         0,
                         "",
-                        null));
+                        null, List.of()));
             }
             var acceptance = new Acceptance(
                     session,
@@ -186,7 +206,7 @@ public final class TaskReportStore {
             String commandId,
             int expectedExitCode) {
         if (expectedExitCode < 0 || expectedExitCode > 255)
-            throw new IllegalArgumentException("期望退出码必须在 0 到 255 之间。");
+            throw new IllegalArgumentException("期望脚本退出码必须在 0 到 255 之间。");
         return verifyCriterion(sessionId, runId, criterionId, commandId, expectedExitCode, null);
     }
 
@@ -221,11 +241,7 @@ public final class TaskReportStore {
                     .filter(item -> item.id().equals(criterionId))
                     .findFirst()
                     .orElseThrow(() -> new IllegalArgumentException("找不到验收标准。"));
-            CommandEvidence command = commands(session, run).stream()
-                    .filter(item -> commandId.equals(item.id())
-                            && session.equals(item.sessionId()) && run.equals(item.runId()))
-                    .findFirst()
-                    .orElseThrow(() -> new IllegalArgumentException("找不到同一运行中的命令证据。"));
+            CommandEvidence command = command(session, run, commandId);
             AcceptanceCriterion verified = jsonVerifier == null
                     ? verifyExitCode(criterion, command, expectedExitCode)
                     : verifyJson(criterion, command, jsonVerifier, jsonSchema);
@@ -260,6 +276,44 @@ public final class TaskReportStore {
                 finishedAt, exitCode, outcome, outputTruncated, output);
     }
 
+    CommandEvidence command(String session, String run, String id) {
+        Path file = commandDirectory(segment(session, "会话"), segment(run, "任务")).resolve(segment(id, "命令") + ".json");
+        try {
+            var stored = JSON.readValue(file.toFile(), CommandEvidence.class);
+            if (session.equals(stored.sessionId()) && run.equals(stored.runId()) && id.equals(stored.id())) return stored;
+        } catch (IOException ignored) { }
+        throw new IllegalArgumentException("找不到同一运行中的命令证据。");
+    }
+
+    public AcceptanceCriterion withCurrentChanges(AcceptanceCriterion criterion, String session, String run,
+            ProjectCheckpointStore checkpoints) {
+        var evidence = command(session, run, criterion.commandId());
+        return criterion.withChanges(checkpoints.coverage(session, null).changed(run, evidence.startedAt(), evidence.fileBaseline()));
+    }
+
+    void rebind(String session, String run, String oldId, CommandEvidence command) {
+        synchronized (lock) {
+            var prior = readAcceptance(session, run);
+            if (prior == null) return;
+            var updated = new ArrayList<AcceptanceCriterion>();
+            boolean changed = false;
+            for (var item : prior.criteria()) {
+                if (oldId.equals(item.commandId())) {
+                    changed = true;
+                    item = item.jsonSchema() == null ? verifyExitCode(item, command, item.expectedExitCode())
+                            : verifyJson(item, command, JsonResultSchemaVerifier.fromJson(item.jsonSchema()), item.jsonSchema());
+                }
+                updated.add(item);
+            }
+            if (changed) write(acceptanceFile(session, run), new Acceptance(session, run, prior.revision() + 1,
+                    System.currentTimeMillis(), updated));
+        }
+    }
+
+    ProjectCheckpointStore checkpoints(Path project) throws IOException {
+        return new ProjectCheckpointStore(directory.getParent(), project);
+    }
+
     Path logPath(String session, String run, String id) {
         return commandDirectory(segment(session, "会话"), segment(run, "任务")).resolve(segment(id, "命令") + ".txt");
     }
@@ -273,6 +327,13 @@ public final class TaskReportStore {
 
     CommandEvidence recordCommand(String id, boolean logComplete, List<String> failures, String sessionId, String runId, String command,
             long startedAt, long finishedAt, Integer exitCode, String outcome, boolean outputTruncated, String output) {
+        return recordCommand(id, logComplete, failures, sessionId, runId, command, startedAt, finishedAt,
+                exitCode, outcome, outputTruncated, output, Map.of());
+    }
+
+    CommandEvidence recordCommand(String id, boolean logComplete, List<String> failures, String sessionId, String runId,
+            String command, long startedAt, long finishedAt, Integer exitCode, String outcome, boolean outputTruncated,
+            String output, Map<String, String> baseline) {
         String session = segment(sessionId, "会话");
         String run = segment(runId, "任务");
         if (command == null || command.isBlank() || command.length() > 8_000)
@@ -291,7 +352,7 @@ public final class TaskReportStore {
                 outputTruncated || (output != null && output.length() > MAX_COMMAND_OUTPUT),
                 output != null && output.length() > MAX_COMMAND_OUTPUT
                         ? output.substring(0, 5900) + "\n[输出已截断，保留首尾]\n" + output.substring(output.length() - 5900)
-                        : bounded(output, MAX_COMMAND_OUTPUT), logComplete, List.copyOf(failures));
+                        : bounded(output, MAX_COMMAND_OUTPUT), logComplete, List.copyOf(failures), baseline, List.of());
         synchronized (lock) {
             write(commandDirectory(session, run).resolve(evidence.id() + ".json"), evidence);
         }
@@ -372,8 +433,19 @@ public final class TaskReportStore {
         throw new IllegalArgumentException("找不到交付物。");
     }
 
-    public List<TaskReport> reports(
-            String sessionId, List<ProjectCheckpointStore.Summary> checkpoints) {
+    public List<TaskReport> reports(String session, ProjectCheckpointStore checkpoints) {
+        return reports(session, checkpoints.summaries(session, Integer.MAX_VALUE), checkpoints.coverage(session, null));
+    }
+
+    public List<TaskReport> reports(String session, List<ProjectCheckpointStore.Summary> checkpoints) {
+        var changes = checkpoints.stream().filter(c -> session.equals(c.sessionId())
+                && (c.status() == ProjectCheckpointStore.Status.SUCCESS || c.status() == ProjectCheckpointStore.Status.RESTORED))
+                .map(c -> new ProjectCheckpointStore.FileChange(c.runId(), c.path(), c.updatedAt(), "")).toList();
+        return reports(session, checkpoints, new ProjectCheckpointStore.Coverage(changes, Map.of()));
+    }
+
+    private List<TaskReport> reports(
+            String sessionId, List<ProjectCheckpointStore.Summary> checkpoints, ProjectCheckpointStore.Coverage coverage) {
         String session = segment(sessionId, "会话");
         Set<String> runs = new LinkedHashSet<>();
         Path sessionDirectory = directory.resolve(session);
@@ -395,7 +467,15 @@ public final class TaskReportStore {
         for (String run : runs) {
             Plan plan = readPlan(session, run);
             Acceptance acceptance = readAcceptance(session, run);
-            List<CommandEvidence> commands = commands(session, run);
+            List<CommandEvidence> commands = commands(session, run).stream()
+                    .map(c -> c.withChanges(coverage.changed(run, c.startedAt(), c.fileBaseline()))).toList();
+            if (acceptance != null) {
+                var changes = new LinkedHashMap<String, List<String>>();
+                commands.forEach(c -> changes.put(c.id(), c.changedFiles()));
+                acceptance = new Acceptance(session, run, acceptance.revision(), acceptance.updatedAt(),
+                        acceptance.criteria().stream().map(c -> c.withChanges(
+                                changes.getOrDefault(c.commandId(), List.of()))).toList());
+            }
             List<Artifact> artifacts = artifacts(session, run);
             List<ProjectCheckpointStore.Summary> owned = checkpoints.stream()
                     .filter(item -> session.equals(item.sessionId()) && run.equals(item.runId()))
@@ -445,9 +525,10 @@ public final class TaskReportStore {
         var result = new ArrayList<CommandEvidence>();
         try (var files = Files.list(directory)) {
             for (Path file : files.filter(path -> path.getFileName().toString().endsWith(".json"))
-                    .limit(2_000).toList()) {
+                    .toList()) {
                 try {
-                    result.add(JSON.readValue(file.toFile(), CommandEvidence.class));
+                    var command = JSON.readValue(file.toFile(), CommandEvidence.class);
+                    if (session.equals(command.sessionId()) && run.equals(command.runId())) result.add(command);
                 } catch (IOException ignored) {
                     // One damaged receipt must not hide the rest of the report.
                 }
@@ -456,7 +537,7 @@ public final class TaskReportStore {
             throw new IllegalStateException("无法读取命令证据。", error);
         }
         result.sort(Comparator.comparingLong(CommandEvidence::startedAt));
-        return List.copyOf(result.stream().limit(200).toList());
+        return List.copyOf(result);
     }
 
     private List<Artifact> artifacts(String session, String run) {
@@ -523,25 +604,25 @@ public final class TaskReportStore {
         String verifier = "shell-exit-v1:" + expectedExitCode;
         if (command.exitCode() == null || command.outcome() == null || command.outcome() == CommandOutcome.UNKNOWN) {
             return result(criterion, CriterionStatus.UNKNOWN, command, expectedExitCode,
-                    verifier, now, "命令退出结果未知。");
+                    verifier, now, "脚本退出码未知。");
         }
         if ((command.exitCode() == 0) != (command.outcome() == CommandOutcome.SUCCEEDED)) {
             return result(criterion, CriterionStatus.UNKNOWN, command, expectedExitCode,
-                    verifier, now, "退出码与命令结果不一致。");
+                    verifier, now, "脚本退出码与命令结果不一致。");
         }
         if (command.exitCode() != expectedExitCode) {
             return result(criterion, CriterionStatus.FAILED, command, expectedExitCode,
-                    verifier, now, "命令退出码不符合期望。");
+                    verifier, now, "脚本退出码不符合期望。");
         }
         return result(criterion, CriterionStatus.PASSED, command, expectedExitCode,
-                verifier, now, "命令返回期望退出码；此结论不覆盖其他语义验收。");
+                verifier, now, "脚本退出码符合期望。");
     }
 
     private AcceptanceCriterion verifyJson(
             AcceptanceCriterion criterion, CommandEvidence command,
             JsonResultSchemaVerifier verifier, String jsonSchema) {
         CriterionStatus status = CriterionStatus.UNKNOWN;
-        String reason = "需要一次退出码为 0 且输出完整的成功命令。";
+        String reason = "需要一次脚本退出码为 0 且输出完整的成功命令。";
         if (Integer.valueOf(0).equals(command.exitCode()) && command.outcome() == CommandOutcome.SUCCEEDED) {
             String output = null;
             if (command.logComplete()) {
@@ -554,7 +635,7 @@ public final class TaskReportStore {
             } else {
                 // Older receipts may only have the inline output and may lack the truncation flag.
                 String preview = command.output();
-                String prefix = "退出码 0\n";
+                String prefix = preview != null && preview.startsWith("脚本退出码") ? "脚本退出码 0\n" : "退出码 0\n";
                 if (!command.outputTruncated() && preview != null && preview.length() < MAX_COMMAND_OUTPUT
                         && preview.startsWith(prefix)) output = preview.substring(prefix.length());
             }
@@ -574,7 +655,7 @@ public final class TaskReportStore {
             }
         }
         return new AcceptanceCriterion(criterion.id(), criterion.content(), status, command.id(),
-                0, verifier.id(), System.currentTimeMillis(), reason, jsonSchema);
+                0, verifier.id(), System.currentTimeMillis(), reason, jsonSchema, List.of());
     }
 
     private String readArchivedOutput(CommandEvidence command) throws IOException {
@@ -608,7 +689,7 @@ public final class TaskReportStore {
                 verifier,
                 verifiedAt,
                 reason,
-                null);
+                null, List.of());
     }
 
     private static CommandOutcome parseOutcome(String value) {

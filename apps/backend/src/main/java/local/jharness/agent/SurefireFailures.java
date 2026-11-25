@@ -8,7 +8,7 @@ import java.util.*;
 import java.util.regex.Pattern;
 import javax.xml.stream.*;
 
-/** Summarizes newly written Maven test reports when a build fails. */
+/** Summarizes newly written Maven test reports independently of the outer shell exit status. */
 final class SurefireFailures {
     private static final Pattern MAVEN = Pattern.compile("(?i)(?<![\\w-])mvnw?(?:\\.cmd|\\.bat)?(?![\\w.-])");
     private final Map<Path, FileTime> before;

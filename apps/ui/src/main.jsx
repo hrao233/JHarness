@@ -67,6 +67,57 @@ function App() {
   const recent = data.projects.flatMap(p => p.sessions.filter(s => s.updatedAt).map(s => ({ p, s })))
     .sort((a, b) => b.s.updatedAt - a.s.updatedAt);
 
+  const [reportRevision, setReportRevision] = useState(0);
+  const [reportData, setReportData] = useState(null);
+  const [rerunning, setRerunning] = useState(null);
+  const rerunLock = useRef(null);
+  const [completed, setCompleted] = useState(null);
+  const latestUser = items.findLast(item => item.role === 'user');
+  const latestRun = completed?.target === selected ? completed.id : (latestUser?.runId || latestUser?.id);
+  const reports = reportData?.target === selected ? reportData?.value : null;
+  const reportError = reportData?.target === selected ? reportData?.error : '';
+  const latestReport = reports?.find(report => report.runId === latestRun);
+  const lastCommand = latestReport?.commands.at(-1);
+  const uncovered = lastCommand ? lastCommand.changedFiles : latestReport
+    && (latestReport.acceptance?.criteria?.length || reports.some(report => report.commands.length))
+      ? [...new Set(latestReport.checkpoints.filter(cp => ['SUCCESS', 'RESTORED'].includes(cp.status))
+          .map(cp => cp.path))] : [];
+  const refreshReports = () => setReportRevision(value => value + 1);
+
+  useEffect(() => {
+    if (!selected?.session || run || loading || (!latestRun && panel !== 'reports')) return;
+    let active = true;
+    let request = 0;
+    async function load() {
+      const version = ++request;
+      try {
+        const value = await api.report(selected.project, selected.session);
+        if (active && version === request) setReportData({ target: selected, value });
+      } catch (error) {
+        if (active && version === request) setReportData({ target: selected, error: errText(error) });
+      }
+    }
+    void load();
+    window.addEventListener('focus', load);
+    return () => { active = false; window.removeEventListener('focus', load); };
+  }, [selected, run, loading, latestRun, reportRevision, panel === 'reports']);
+
+  async function rerunCommand(report, command) {
+    if (rerunLock.current || running.current || !selected?.session) return;
+    const target = selected;
+    rerunLock.current = command.id;
+    setRerunning(command.id);
+    try {
+      await api.rerunCommand(target.project, target.session, report.runId, command.id);
+    } catch (error) {
+      if (selection.current === target) setNotice(errText(error));
+    } finally {
+      rerunLock.current = null;
+      setRerunning(null);
+      refreshReports();
+    }
+  }
+
   async function refresh() {
     const state = await api.state();
     setData(state);
@@ -153,6 +204,7 @@ function App() {
       const { event, data } = message;
       if (event === 'error') return setNotice(data.message);
       if (event === 'done') {
+        if (selection.current === current.selection) setCompleted({ target: current.selection, id: current.id });
         running.current = null;
         setRun(null);
         setPhase(null);
@@ -341,7 +393,7 @@ function App() {
   async function send(event) {
     event?.preventDefault();
     const text = draft.trim() || (parts.length ? '请查看附加内容。' : '');
-    if (!text || loading || task || taskPending || taskError) return;
+    if (!text || rerunLock.current || loading || task || taskPending || taskError) return;
     if (!model?.hasKey) return setShowSettings(true);
     if (!project) return openProject();
     setNotice('');
@@ -588,6 +640,14 @@ function App() {
           {loading && <p className="muted">正在加载会话…</p>}
       </Conversation>
       <div className="bottom"><div className="composer-wrap">
+        {!run && !task && !taskPending && !taskError && !loading && !!uncovered?.length &&
+          <div className="coverage-notice" role="status">
+            <span>尚未被最近命令覆盖的文件：{uncovered.join('、')}</span>
+            {lastCommand && <button type="button" className="secondary" disabled={!!rerunning}
+              title={lastCommand.command} onClick={() => rerunCommand(latestReport, lastCommand)}>
+              {rerunning === lastCommand.id ? '重新运行中…' : '重新运行最近命令'}</button>}
+            <button type="button" className="secondary" onClick={() => setPanel('reports')}>任务报告</button>
+          </div>}
         {!!approvals.length && <div className="approvals">{approvals.map(item =>
           <ApprovalCard key={item.id} item={item} decide={decide}/>)}</div>}
         {!run && task && <TaskRecovery key={task.turnId} task={task} canceling={cancelingTask}
@@ -598,7 +658,7 @@ function App() {
         {notice && <div className="notice" role="alert"><CircleHelp size={16}/>{notice}
           <button aria-label="关闭提示" onClick={() => setNotice('')}><X size={15}/></button></div>}
         <Composer draft={draft} setDraft={setDraft} project={project} loading={loading}
-          sendBlocked={!!task || taskPending || !!taskError} run={run} send={send} stop={stop}
+          sendBlocked={!!rerunning || !!task || taskPending || !!taskError} run={run} send={send} stop={stop}
           canSteer={!!run && perm === 'durable' && !parts.length} queueTask={queueTask}
           parts={parts} remove={part => setParts(previous => previous.filter(value => value !== part))}
           attach={attach} availableParts={availableParts} loadParts={loadParts} addPart={part => appendParts([part])}
@@ -611,6 +671,8 @@ function App() {
       api={api} close={() => setPanel(null)} onAuto={enabled => setData(previous => ({ ...previous,
         projects: previous.projects.map(p => p.id === project.id ? { ...p, autoMemory: enabled } : p) }))}/>}
     {panel && panel !== 'memory' && <NavigationPanel docked={docked} switchTool={setPanel} key={panel} panel={panel} close={() => setPanel(null)} projects={data.projects}
+      reports={reports} reportError={reportError} refreshReports={refreshReports}
+      rerunning={rerunning} rerunCommand={rerunCommand}
       project={project} session={session} bookmarks={bookmarks} openChat={openChat} removeBookmark={removeBookmark}
       copy={copy} addPart={part => appendParts([part])} busy={!!run} api={api} errorText={errText}
       onWorktreesChanged={worktreesChanged} openWorktree={target => select(target, target.sessions[0])}/>}

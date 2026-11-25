@@ -19,6 +19,97 @@ class TaskReportStoreTest {
     @TempDir Path temporary;
 
     @Test
+    void bothVerifiersProjectWritesRestoresAndExternalChangesOnRead() throws Exception {
+        var project = Files.createDirectory(temporary.resolve("project"));
+        var store = new TaskReportStore(temporary);
+        var checkpoints = new ProjectCheckpointStore(temporary, project);
+        Path file = project.resolve("note");
+        Files.writeString(file, "initial");
+        checkpoints.run("session", "r", "edit_file", "note", () -> {
+            writeUnchecked(file, "first");
+            return ToolResultBlock.success("ok");
+        });
+        var first = checkpoints.list("session").get(0);
+        long boundary = Math.max(first.updatedAt(), first.createdAt());
+        var old = store.recordCommand("session", "r", "verify", boundary, boundary + 10000, 0,
+                "SUCCEEDED", false, "退出码 0\ntrue");
+        var criteria = store.saveAcceptanceCriteria("session", "r", List.of("exit", "json")).criteria();
+        store.verifyCriterion("session", "r", criteria.get(0).id(), old.id(), 0);
+        store.verifyJsonCriterion("session", "r", criteria.get(1).id(), old.id(), "{\"const\":true}");
+        checkpoints.run("session", "another", "create_file", "other", () -> {
+            writeUnchecked(project.resolve("other"), "value");
+            return ToolResultBlock.success("ok");
+        });
+        var report = store.reports("session", checkpoints).stream().filter(r -> r.runId().equals("r")).findFirst().orElseThrow();
+        for (var criterion : report.acceptance().criteria()) {
+            assertEquals(TaskReportStore.CriterionStatus.PASSED, criterion.status());
+            assertEquals(List.of("note", "other"), criterion.changedFiles());
+        }
+        // Legacy evidence has no start-of-command fingerprints.
+        var recent = store.recordCommand("session", "r", "verify", System.currentTimeMillis() + 1,
+                System.currentTimeMillis() + 2, 0, "SUCCEEDED", false, "退出码 0\ntrue");
+        store.verifyCriterion("session", "r", criteria.get(0).id(), recent.id(), 0);
+        store.verifyJsonCriterion("session", "r", criteria.get(1).id(), recent.id(), "{\"const\":true}");
+        Thread.sleep(10);
+        Files.delete(file);
+        assertChanged(store, checkpoints, List.of("note"));
+        Files.writeString(file, "first");
+        assertChanged(store, checkpoints, List.of());
+        checkpoints.restore(first.id());
+        assertChanged(store, checkpoints, List.of("note"));
+    }
+
+    @Test
+    void legacyReceiptsSurviveUnknownFieldsAndGroupedRestore() throws Exception {
+        var project = Files.createDirectory(temporary.resolve("project"));
+        var checkpoints = new ProjectCheckpointStore(temporary, project);
+        var store = new TaskReportStore(temporary);
+        var file = project.resolve("test.txt");
+        for (String content : List.of("a", "b")) {
+            checkpoints.run("session", "r", Files.exists(file) ? "edit_file" : "create_file", "test.txt", () -> {
+                writeUnchecked(file, content);
+                return ToolResultBlock.success("ok");
+            });
+        }
+        var cmd = store.recordCommand("session", "r", "exit 0", System.currentTimeMillis(),
+                System.currentTimeMillis(), 0, "SUCCEEDED", false, "退出码 0");
+        var criterion = store.saveAcceptanceCriteria("session", "r", List.of("exit")).criteria().get(0);
+        store.verifyCriterion("session", "r", criterion.id(), cmd.id(), 0);
+        var json = new com.fasterxml.jackson.databind.ObjectMapper();
+        Path reports = temporary.resolve("task-reports/session/r");
+        Path acceptanceFile = reports.resolve("acceptance.json");
+        var acceptance = (com.fasterxml.jackson.databind.node.ObjectNode) json.readTree(acceptanceFile.toFile());
+        var item = (com.fasterxml.jackson.databind.node.ObjectNode) acceptance.path("criteria").get(0);
+        item.remove(List.of("changedFiles", "jsonSchema"));
+        item.put("futureField", true);
+        json.writeValue(acceptanceFile.toFile(), acceptance);
+        Path receipt = reports.resolve("commands").resolve(cmd.id() + ".json");
+        var command = (com.fasterxml.jackson.databind.node.ObjectNode) json.readTree(receipt.toFile());
+        command.remove(List.of("fileBaseline", "testFailures", "logComplete", "changedFiles"));
+        command.put("futureField", true);
+        json.writeValue(receipt.toFile(), command);
+        for (var summary : checkpoints.list("session")) {
+            Path path = temporary.resolve("checkpoints").resolve(summary.id() + ".json");
+            var cp = (com.fasterxml.jackson.databind.node.ObjectNode) json.readTree(path.toFile());
+            cp.put("futureField", true);
+            json.writeValue(path.toFile(), cp);
+        }
+        checkpoints.restoreRun("session", "r");
+        assertFalse(Files.exists(file));
+        assertChanged(store, checkpoints, List.of("test.txt"));
+        assertEquals(acceptance, json.readTree(acceptanceFile.toFile()));
+        long now = System.currentTimeMillis() + 1;
+        var after = store.recordCommand("session", "r", "exit 0", now, now, 0, "SUCCEEDED", false, "");
+        store.verifyCriterion("session", "r", criterion.id(), after.id(), 0);
+        assertChanged(store, checkpoints, List.of());
+    }
+
+    private void assertChanged(TaskReportStore store, ProjectCheckpointStore checkpoints, List<String> expected) {
+        var report = store.reports("session", checkpoints).stream().filter(r -> r.runId().equals("r")).findFirst().orElseThrow();
+        for (var criterion : report.acceptance().criteria()) assertEquals(expected, criterion.changedFiles());
+    }
+
+    @Test
     void persistsPlanCommandArtifactAndCheckpointInOneTaskReport() throws Exception {
         Path project = Files.createDirectories(temporary.resolve("project"));
         Path workspace = Files.createDirectories(temporary.resolve("workspace"));

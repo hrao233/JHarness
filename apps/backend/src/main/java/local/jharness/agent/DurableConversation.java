@@ -42,10 +42,9 @@ import reactor.core.publisher.Mono;
  * session's command and turn identities back to desktop run IDs.
  */
 public final class DurableConversation implements AutoCloseable {
-    private static final List<String> FILE_TOOLS = List.of(
-            "list_files", "read_file", "search_files", "search_text", "edit_file", "create_file",
-            "run_command");
-    private static final List<String> CONFIRMED_TOOLS = List.of("edit_file", "create_file", "run_command");
+    private static final List<String> CONFIRMED_TOOLS = List.of(
+            "edit_file", "create_file", "run_command", "web_fetch", "web_search",
+            "automation_create", "automation_update", "automation_delete");
     private static final int MAX_TITLE_LENGTH = 96;
 
     public record Approval(String id, String operation, String path, String before, String after) {}
@@ -75,11 +74,13 @@ public final class DurableConversation implements AutoCloseable {
 
     private final Map<String, SessionRuntime> runtimes = new ConcurrentHashMap<>();
     private final Map<String, TaskLease> tasks = new ConcurrentHashMap<>();
+    private final ConversationRuntime browserApprovals;
     private final ConversationRuntime.Listener listener;
     private final Function<Throwable, String> describeError;
 
     public DurableConversation(
-            ConversationRuntime.Listener listener, Function<Throwable, String> describeError) {
+            ConversationRuntime.Listener listener, Function<Throwable, String> describeError, ConversationRuntime browserApprovals) {
+        this.browserApprovals = browserApprovals;
         this.listener = listener;
         this.describeError = describeError;
     }
@@ -304,16 +305,32 @@ public final class DurableConversation implements AutoCloseable {
                 .map(entry -> {
                     var call = JsonUtils.getJsonCodec()
                             .convertValue(entry.getValue().data().get("call"), ToolUseBlock.class);
-                    return new Approval(
-                            entry.getKey(),
-                            call.getName(),
-                            text(call, "path"),
-                            text(call, "old_text"),
-                            call.getName().equals("run_command")
-                                    ? text(call, "command")
-                                    : text(call, call.getName().equals("edit_file") ? "new_text" : "content"));
+                    return approvalFromCall(entry.getKey(), call);
                 })
                 .toList();
+    }
+
+    private static Approval approvalFromCall(String id, ToolUseBlock call) {
+        String name = call.getName();
+        if ("web_fetch".equals(name)) {
+            return new Approval(id, name, "", "", text(call, "url"));
+        }
+        if ("web_search".equals(name)) {
+            return new Approval(id, name, "api.tavily.com", "", text(call, "query"));
+        }
+        if (name.startsWith("automation_")) {
+            String label = text(call, "name");
+            if (label.isEmpty()) label = text(call, "id");
+            return new Approval(id, name, label, "", AutomationTools.describeCallInput(name, call.getInput()));
+        }
+        return new Approval(
+                id,
+                name,
+                text(call, "path"),
+                text(call, "old_text"),
+                name.startsWith("browser_") ? text(call, "after")
+                        : name.equals("run_command") ? text(call, "command")
+                        : text(call, name.equals("edit_file") ? "new_text" : "content"));
     }
 
     private static String terminalStatus(String status) {
@@ -385,8 +402,22 @@ public final class DurableConversation implements AutoCloseable {
         return List.copyOf(result);
     }
 
+    /** An already-dispatched browser operation waits in-process. A restart goes through uncertainCalls. */
+    public Map<String,Object> liveBrowserTask(java.nio.file.Path workspace, String sessionId) {
+        for (var entry : tasks.entrySet()) {
+            var runtime = entry.getValue().runtime();
+            if (!sessionId.equals(runtime.sessionId) || !workspace.equals(runtime.workspace)) continue;
+            var pending = browserApprovals.browserApprovals(entry.getKey());
+            if (!pending.isEmpty()) return Map.of("turnId",entry.getValue().task().turnId(),
+                    "liveRunId",entry.getKey(),"status","suspended","approvals",pending,
+                    "uncertain",false,"uncertainCalls",List.of());
+        }
+        return Map.of();
+    }
+
     private final class SessionRuntime implements AutoCloseable {
         private final String sessionId;
+        private final java.nio.file.Path workspace;
         private final HarnessAgent agent;
         private final AgentSession session;
         private final ProjectCheckpointStore checkpoints;
@@ -398,6 +429,7 @@ public final class DurableConversation implements AutoCloseable {
         private final AtomicBoolean closed = new AtomicBoolean();
 
         private SessionRuntime(ConversationRuntime.Request request) throws Exception {
+            workspace = request.workspace();
             sessionId = request.context().getSessionId();
             checkpoints = new ProjectCheckpointStore(request.workspace(), request.project());
             reports = new TaskReportStore(request.workspace());
@@ -411,6 +443,7 @@ public final class DurableConversation implements AutoCloseable {
                             operation,
                             path,
                             action));
+            browserApprovals.registerBrowser(toolkit,request,reports,currentRun::get);
             toolkit.registerTool(projectTools);
             toolkit.registerTool(new ProjectCommand(
                     request.project(),
@@ -418,24 +451,30 @@ public final class DurableConversation implements AutoCloseable {
                     reports,
                     currentRun::get));
             toolkit.registerTool(new AcceptanceCriteriaTool(reports, currentRun::get));
+            toolkit.registerTool(new ApprovedWeb((operation, path, before, after, denied, action) -> action.get()));
+            if (request.automations() != null) {
+                toolkit.registerTool(new AutomationTools(
+                        request.automations(),
+                        request.workspace().getFileName().toString(),
+                        (operation, path, before, after, denied, action) -> action.get(),
+                        (type, data) -> {
+                            String active = currentRun.get();
+                            if (active != null) listener.event(active, type, data);
+                        }));
+            }
             ConversationRuntime.registerArtifactTool(
                     toolkit, request, reports, currentRun::get);
-            for (String name : CONFIRMED_TOOLS)
-                toolkit.replaceAgentTool(new ConfirmedTool(toolkit.getTool(name), projectTools));
-            var tools = new ToolsConfig();
-            tools.setStrictAllow(true);
-            var allowed = new ArrayList<>(FILE_TOOLS);
-            allowed.add("deliver_artifact");
-            allowed.add("acceptance_write");
-            request.pluginTools().forEach(tool -> allowed.add(tool.getName()));
-            tools.setAllow(allowed);
+            for (String name : CONFIRMED_TOOLS) {
+                var existing = toolkit.getTool(name);
+                if (existing != null) {
+                    toolkit.replaceAgentTool(new ConfirmedTool(existing, projectTools));
+                }
+            }
             events = new ConversationEvents(
-                    ConversationRuntime.MAX_STEPS,
                     (runId, type, data) -> listener.event(runId, type, data),
                     reports,
                     currentRun::set);
             agent = ConversationRuntime.builder(request, toolkit)
-                    .toolsConfig(tools)
                     .middleware(events)
                     .build();
             session = agent.session(request.context());
@@ -444,7 +483,9 @@ public final class DurableConversation implements AutoCloseable {
 
         private void route(AgentEvent event) {
             if (event instanceof AgentResultEvent result
-                    && result.getResult().getTextContent().isBlank()) return;
+                    && result.getResult().getTextContent().isBlank()
+                    && result.getResult().getGenerateReason()
+                            != io.agentscope.core.message.GenerateReason.MIDDLEWARE_STOP_REQUESTED) return;
             String runId = null;
             if (event.getExecution() != null)
                 runId = runByTurn.get(event.getExecution().turnId());
@@ -489,10 +530,15 @@ public final class DurableConversation implements AutoCloseable {
         @Override
         public Mono<PermissionDecision> checkPermissions(
                 Map<String, Object> input, PermissionContextState context) {
-            return Mono.just(PermissionDecision.ask(
-                    delegate.getName().equals("run_command")
-                            ? "批准拟运行的项目命令"
-                            : "批准拟议的项目文件更改"));
+            String name = delegate.getName();
+            String prompt = name.equals("run_command")
+                    ? "批准拟运行的项目命令"
+                    : name.startsWith("web_")
+                            ? "批准拟发起的网络请求"
+                            : name.startsWith("automation_")
+                                    ? "批准拟议的自动任务变更"
+                                    : "批准拟议的项目文件更改";
+            return Mono.just(PermissionDecision.ask(prompt));
         }
 
         @Override

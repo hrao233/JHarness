@@ -47,9 +47,10 @@ const app = path.join(resources, 'app');
 mkdirSync(path.join(app, 'desktop'), { recursive: true });
 mkdirSync(path.join(app, 'cli'), { recursive: true });
 for (const file of ['main.cjs', 'preload.cjs', 'context-parts.cjs',
-  'worktree-manager.cjs', 'data-maintenance.cjs', 'automation-store.cjs']) {
+  'worktree-manager.cjs', 'data-maintenance.cjs', 'automation-store.cjs', 'browser-pane.cjs', 'browser-shell.html']) {
   copyFileSync(path.join(desktop, file), path.join(app, 'desktop', file));
 }
+cpSync(path.dirname(require.resolve('ws/package.json')), path.join(app, 'node_modules', 'ws'), { recursive: true });
 mkdirSync(path.join(app, 'shared'), { recursive: true });
 copyFileSync(path.join(root, 'apps', 'shared', 'settings-store.cjs'),
   path.join(app, 'shared', 'settings-store.cjs'));

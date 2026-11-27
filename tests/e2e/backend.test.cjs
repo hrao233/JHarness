@@ -159,9 +159,11 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
         'create_file', 'run_command', 'deliver_artifact', 'acceptance_write', 'todo_write',
         'memory_save', 'memory_get', 'memory_search',
         'session_search', 'session_list', 'session_history', 'load_skill_through_path', 'web_fetch',
-        'web_search'].includes(tool.function.name))));
+        'web_search', 'browser_inspect', 'browser_task',
+        'automation_list', 'automation_create', 'automation_update', 'automation_delete'].includes(tool.function.name))));
     assert.ok(['todo_write', 'acceptance_write', 'memory_save', 'memory_search', 'memory_get', 'session_search',
-      'session_list', 'session_history', 'search_text', 'load_skill_through_path'].every(name =>
+      'session_list', 'session_history', 'search_text', 'load_skill_through_path', 'browser_task', 'browser_inspect',
+      'automation_list', 'automation_create', 'automation_update', 'automation_delete'].every(name =>
       firstChat.tools.some(tool => tool.function.name === name)), JSON.stringify(firstChat.tools.map(tool => tool.function.name)));
     const exited = once(child, 'exit');
     child.stdin.end();
@@ -880,6 +882,65 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     assert.equal(await readFile(artifact.filePath, 'utf8'), '# REPORT-EVIDENCE');
     steps = reportOriginalSteps;
 
+    // Agent-driven scheduled tasks (automations) shared with the desktop scheduler store.
+    const automationContext = { ...context, sessionId: randomUUID() };
+    const automationOriginalSteps = steps;
+    steps = [
+      ['automation_create', {
+        name: '每日搜索 angle-core 论文',
+        prompt: '检索 angle-core 相关最新论文并整理灵感摘要与 https:// 链接。',
+        schedule_type: 'daily',
+        time_of_day: '09:00',
+        days_of_week: [1, 3, 5]
+      }],
+      ['automation_list', {}]
+    ];
+    const automationRun = randomUUID();
+    await call('chat', { ...automationContext, ...model, runId: automationRun,
+      permission: 'ask', message: '帮我设定每周一三五早上九点搜索 angle-core 论文的定时任务' });
+    const autoApproval = await waitEvent(automationRun, 'approval');
+    assert.equal(autoApproval.data.operation, 'automation_create');
+    assert.equal(autoApproval.data.path, '每日搜索 angle-core 论文');
+    assert.match(autoApproval.data.after, /09:00/);
+    await call('approve', { runId: automationRun, approvalId: autoApproval.data.id, allow: true });
+    await waitEvent(automationRun, 'done');
+    const changedEvent = await waitEvent(automationRun, 'automation-changed');
+    assert.equal(changedEvent.data.action, 'created');
+    assert.equal(changedEvent.data.projectId, context.projectId);
+    const listedAutomations = await call('listAutomations', { projectId: context.projectId });
+    assert.equal(listedAutomations.definitions.length, 1);
+    assert.equal(listedAutomations.definitions[0].name, '每日搜索 angle-core 论文');
+    assert.equal(listedAutomations.definitions[0].scheduleType, 'daily');
+    assert.equal(listedAutomations.definitions[0].timeOfDay, '09:00');
+    const desktopAutomationStore = require('../../apps/desktop/electron/automation-store.cjs')
+      .createStore(path.join(data, 'automations.json'));
+    const claimedFromJava = await desktopAutomationStore.claimDue(listedAutomations.definitions[0].nextRunAt + 1000);
+    assert.equal(claimedFromJava.length, 1);
+    assert.equal(claimedFromJava[0].sessionId, listedAutomations.definitions[0].sessionId);
+    await desktopAutomationStore.finish(claimedFromJava[0].runId, 'completed');
+
+    steps = [
+      ['automation_update', { id: listedAutomations.definitions[0].id, enabled: false }],
+      ['automation_delete', { id: listedAutomations.definitions[0].id }]
+    ];
+    const manageAutoRun = randomUUID();
+    await call('chat', { ...context, sessionId: randomUUID(), ...model, runId: manageAutoRun,
+      permission: 'ask', message: '暂停并删除刚才的定时任务' });
+    const updateApproval = await waitEvent(manageAutoRun, 'approval');
+    assert.equal(updateApproval.data.operation, 'automation_update');
+    await call('approve', { runId: manageAutoRun, approvalId: updateApproval.data.id, allow: true });
+    let deleteApproval;
+    for (let i = 0; i < 150 && !deleteApproval; i++) {
+      deleteApproval = events.find(event => event.runId === manageAutoRun
+        && event.event === 'approval' && event.data.id !== updateApproval.data.id);
+      if (!deleteApproval) await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    assert.equal(deleteApproval?.data.operation, 'automation_delete');
+    await call('approve', { runId: manageAutoRun, approvalId: deleteApproval.data.id, allow: true });
+    await waitEvent(manageAutoRun, 'done');
+    assert.equal((await call('listAutomations', { projectId: context.projectId })).definitions.length, 0);
+    steps = automationOriginalSteps;
+
     const malformed = randomUUID();
     steps = [['create_file', {}, '', '{"path":"Malformed.txt","content":']];
     await call('chat', { ...context, sessionId: randomUUID(), ...model, runId: malformed,
@@ -890,17 +951,25 @@ test('read and edit project files, stream a reply, and reopen the session', { ti
     assert.match((await waitEvent(malformed, 'result')).data.text, /ORCHID-28/);
     await assert.rejects(readFile(path.join(projectPath, 'Malformed.txt')), { code: 'ENOENT' });
 
+    const longRun = randomUUID();
+    const longOriginalSteps = steps;
+    steps = Array.from({ length: 20 }, (_, index) => ['search_text', { query: 'STEP-' + index }, '']);
+    await call('chat', { ...context, sessionId: randomUUID(), ...model, runId: longRun,
+      permission: 'full', message: '测试超过 18 步的正常长链路任务' });
+    await waitEvent(longRun, 'done');
+    assert.equal(events.filter(event => event.runId === longRun && event.event === 'tool-start').length, 20);
+    assert.match((await waitEvent(longRun, 'result')).data.text, /ORCHID-28/);
+    steps = longOriginalSteps;
+
     const limited = randomUUID();
     endless = true;
     await call('chat', { ...context, sessionId: randomUUID(), ...model, runId: limited,
-      permission: 'full', message: '测试循环上限' });
+      permission: 'full', message: '测试重复工具调用熔断' });
     await waitEvent(limited, 'done');
-    assert.equal(events.filter(event => event.runId === limited && event.event === 'tool-start').length, 18);
+    assert.equal(events.filter(event => event.runId === limited && event.event === 'tool-start').length, 8);
     const limitResult = await waitEvent(limited, 'result');
-    assert.equal(limitResult.data.reason, 'MAX_ITERATIONS');
-    assert.match(limitResult.data.text, /FIXTURE-LIMIT-SUMMARY/);
-    assert.ok(events.some(event => event.runId === limited && event.event === 'loop-phase'
-      && event.data.phase === 'summary'));
+    assert.equal(limitResult.data.reason, 'MIDDLEWARE_STOP_REQUESTED');
+    assert.match(limitResult.data.text, /连续 8 次重复/);
     endless = false;
 
     for (const effort of ['default', 'none', 'low', 'high', 'max']) {

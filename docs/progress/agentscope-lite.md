@@ -220,6 +220,12 @@ payloads and existing downstream imports stay compatible.
 - Added active-run deduplication and crash recovery of queued/running automation
   records. A pending definition is claimed before launch; suspended tasks remain
   available in the task center.
+- Connected project-scoped automation tools (`automation_list`, `automation_create`,
+  `automation_update`, `automation_delete`) to normal and durable conversations with
+  approval cards, daily/weekday schedules, SQLite-locked cross-process synchronization,
+  and full durable-session tool parity (`memory_*`, `session_*`, `web_fetch`/`web_search`).
+- Enabled clicking HTTP(S) links in conversation messages to open directly in the
+  built-in browser pane or detached browser window, verified in the packaged GUI smoke.
 - Added `acceptance_write` and host-authorized shell-exit verification. Criteria
   begin as `PENDING`; only a user-selected command receipt from the same run can
   produce `PASSED`, `FAILED` or `UNKNOWN`. The report retains command identity,

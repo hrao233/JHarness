@@ -1,9 +1,9 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { mkdtemp, rm } = require('node:fs/promises');
+const { mkdtemp, readFile, rm, writeFile } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const path = require('node:path');
-const { createStore } = require('../electron/automation-store.cjs');
+const { createStore, nextDailyRun } = require('../electron/automation-store.cjs');
 
 test('persists automation definitions, deduplicates schedules and tracks runs', async () => {
   const temporary = await mkdtemp(path.join(tmpdir(), 'jharness-automation-'));
@@ -67,6 +67,52 @@ test('persists automation definitions, deduplicates schedules and tracks runs', 
     assert.equal((await store.list()).runs.some(run =>
       ['queued', 'running'].includes(run.status)), false);
     await assert.rejects(store.remove('missing'), /找不到/);
+
+    // Daily schedule calculation, claiming, and external cross-process file writes.
+    const baseMorning = new Date(2026, 10, 27, 8, 30, 0, 0).getTime();
+    const sameDayNine = nextDailyRun(baseMorning, '09:00', []);
+    assert.equal(sameDayNine, new Date(2026, 10, 27, 9, 0, 0, 0).getTime());
+    const afterNine = nextDailyRun(new Date(2026, 10, 27, 9, 5, 0, 0).getTime(), '09:00', []);
+    assert.equal(afterNine, new Date(2026, 10, 28, 9, 0, 0, 0).getTime());
+
+    const daily = await store.create({
+      name: 'Daily angle-core papers',
+      prompt: 'Search angle-core papers and include links.',
+      projectId: 'project-1',
+      sessionId: 'session-daily',
+      scheduleType: 'daily',
+      timeOfDay: '09:00',
+      daysOfWeek: [1, 3, 5]
+    });
+    assert.equal(daily.scheduleType, 'daily');
+    assert.equal(daily.timeOfDay, '09:00');
+    assert.deepEqual(daily.daysOfWeek, [1, 3, 5]);
+    const claimedDaily = await store.claimDue(daily.nextRunAt + 1000);
+    assert.ok(claimedDaily.some(run => run.automationId === daily.id));
+    await store.finish(claimedDaily.find(run => run.automationId === daily.id).runId, 'completed');
+    const updatedDaily = (await store.list()).definitions.find(item => item.id === daily.id);
+    assert.ok(updatedDaily.nextRunAt > daily.nextRunAt);
+
+    // Simulate Java backend appending a new definition directly to automations.json.
+    const rawDisk = JSON.parse(await readFile(file, 'utf8'));
+    rawDisk.definitions.unshift({
+      id: 'java-created-1',
+      name: 'Backend scheduled task',
+      prompt: 'Created from conversation tool',
+      projectId: 'project-1',
+      sessionId: 'session-java',
+      scheduleType: 'interval',
+      intervalMinutes: 60,
+      timeOfDay: '',
+      daysOfWeek: [],
+      runAt: 0,
+      nextRunAt: Date.now() + 60_000,
+      enabled: true,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    });
+    await writeFile(file, JSON.stringify(rawDisk, null, 2) + '\n', 'utf8');
+    assert.ok((await store.list()).definitions.some(item => item.id === 'java-created-1'));
   } finally {
     await rm(temporary, { recursive: true, force: true, maxRetries: 5 });
   }

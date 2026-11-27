@@ -262,10 +262,9 @@ async function run(options, dataDirectory) {
       process.stderr.write('[tool] ' + data.status + '\n');
     } else if (event === 'error') {
       process.stderr.write(errorLine(data.message) + '\n');
-      finishError(new Error(data.message || '任务失败。'));
-    } else if (event === 'done') {
-      finished({ status: data.status || 'done', selected, runId });
     }
+    if (event === 'error') finishError(new Error(data.message || '任务失败。'));
+    if (event === 'done') finished({ status: data.status || 'done', selected, runId });
     if (event === 'approval') {
       if (prompts) {
         void prompts.question(

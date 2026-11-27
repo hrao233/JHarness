@@ -5,13 +5,16 @@ import { BookOpen, Brain, CircleCheck, CircleDashed, CircleX, ClipboardList, Dow
   Trash2, X }
   from 'lucide-react';
 
+import { BrowserPanel } from './BrowserPanel.jsx';
+
 const titles = {
+  browser: '内置浏览器',
   library: '资料库', plugins: 'Skills 与插件', search: '搜索会话', tasks: '任务中心',
   memory: '项目记忆', reports: '任务报告', automations: '自动任务', worktrees: '隔离工作树',
   context: '上下文', checkpoints: '检查点', maintenance: '数据与运维', review: '代码审查'
 };
 
-export const inspectorTools = ['context', 'reports', 'review', 'checkpoints'];
+export const inspectorTools = ['context', 'reports', 'review', 'checkpoints', 'browser'];
 
 export function Navigation({ openPanel, project }) {
   const more = useRef(null);
@@ -49,7 +52,7 @@ const formatBytes = value => {
 };
 
 export function NavigationPanel({ panel, close, projects, project, bookmarks, openChat, removeBookmark,
-    copy, addPart, busy, api, errorText, session, onWorktreesChanged, openWorktree, docked, switchTool, reports, reportError, refreshReports, rerunning, rerunCommand }) {
+    copy, addPart, busy, api, errorText, session, onWorktreesChanged, openWorktree, docked, settingsOpen, switchTool, reports, reportError, refreshReports, rerunning, rerunCommand }) {
   const dialog = useRef(null);
   const [query, setQuery] = useState('');
   const [result, setResult] = useState(null);
@@ -89,11 +92,19 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
   const [automationPrompt, setAutomationPrompt] = useState('');
   const [automationSchedule, setAutomationSchedule] = useState('interval');
   const [automationInterval, setAutomationInterval] = useState('60');
+  const [automationTime, setAutomationTime] = useState('09:00');
   const [automationRunAt, setAutomationRunAt] = useState('');
+  const dragRef = useRef(null);
   useEffect(() => {
     const element = dialog.current;
-    if (docked) element.show();
-    else element.showModal();
+    if (docked) {
+      element.style.left = '';
+      element.style.top = '';
+      element.style.margin = '';
+      element.style.width = '';
+      element.style.height = '';
+      element.show();
+    } else element.showModal();
     return () => element.close();
   }, [docked]);
   useEffect(() => {
@@ -217,7 +228,10 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
     setError('');
     void load();
     const timer = setInterval(load, 3000);
-    return () => { live = false; clearInterval(timer); };
+    const off = api.onEvent?.(message => {
+      if (['automation-changed', 'done', 'error'].includes(message.event)) void load();
+    });
+    return () => { live = false; clearInterval(timer); off?.(); };
   }, [api, errorText, panel, project?.id, revision]);
 
   const needle = query.trim().toLowerCase();
@@ -503,6 +517,7 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
         prompt: automationPrompt,
         scheduleType: automationSchedule,
         intervalMinutes: Number(automationInterval),
+        timeOfDay: automationTime,
         runAt: automationRunAt ? new Date(automationRunAt).getTime() : 0
       });
       setAutomationName('');
@@ -555,9 +570,33 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
     }
   }
 
+  const floatingBrowser = panel === 'browser' && !docked;
   return <dialog ref={dialog} className={'dialog nav-dialog nav-' + panel + (docked ? ' docked' : '')} aria-label={titles[panel]}
     onCancel={event => { event.preventDefault(); close(); }}>
-    <div className="dialog-head">{inspectorTools.includes(panel)
+    <div className={'dialog-head' + (floatingBrowser ? ' browser-drag-head' : '')}
+      title={floatingBrowser ? '按住标题栏可拖动位置' : undefined}
+      onPointerDown={floatingBrowser ? event => {
+        if (event.button !== 0 || event.target.closest('button, select, input')) return;
+        event.preventDefault();
+        const box = dialog.current.getBoundingClientRect();
+        dragRef.current = { dx: event.clientX - box.left, dy: event.clientY - box.top };
+        event.currentTarget.setPointerCapture(event.pointerId);
+      } : undefined}
+      onPointerMove={floatingBrowser ? event => {
+        if (!dragRef.current || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
+        const el = dialog.current;
+        const box = el.getBoundingClientRect();
+        const x = Math.max(4, Math.min(window.innerWidth - box.width - 4, event.clientX - dragRef.current.dx));
+        const y = Math.max(4, Math.min(window.innerHeight - box.height - 4, event.clientY - dragRef.current.dy));
+        el.style.margin = '0';
+        el.style.left = Math.round(x) + 'px';
+        el.style.top = Math.round(y) + 'px';
+        window.dispatchEvent(new Event('resize'));
+      } : undefined}
+      onPointerUp={floatingBrowser ? event => {
+        dragRef.current = null;
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+      } : undefined}>{inspectorTools.includes(panel)
         ? <select className="inspector-select" aria-label="工作区工具" value={panel}
             onChange={event => switchTool(event.target.value)}>
             {inspectorTools.map(id => <option key={id} value={id}
@@ -566,6 +605,31 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
         : <h2>{titles[panel]}</h2>}
       <button onClick={close} aria-label="关闭"><X size={18}/></button></div>
     {error && <p className="error-text" role="alert">{error}</p>}
+    {panel === 'browser' && project && <BrowserPanel key={project.id + '/' + session?.id} api={api}
+      project={project.id} docked={docked} settingsOpen={settingsOpen}/>}
+    {floatingBrowser && <div className="browser-corner-grip" title="拖动调整窗口大小"
+      onPointerDown={event => {
+        event.preventDefault();
+        const box = dialog.current.getBoundingClientRect();
+        dialog.current.style.margin = '0';
+        dialog.current.style.left = Math.round(box.left) + 'px';
+        dialog.current.style.top = Math.round(box.top) + 'px';
+        dragRef.current = { resize: true, left: box.left, top: box.top };
+        event.currentTarget.setPointerCapture(event.pointerId);
+      }}
+      onPointerMove={event => {
+        if (!dragRef.current?.resize || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
+        const el = dialog.current;
+        const w = Math.max(360, Math.min(window.innerWidth - dragRef.current.left - 6, event.clientX - dragRef.current.left));
+        const h = Math.max(280, Math.min(window.innerHeight - dragRef.current.top - 6, event.clientY - dragRef.current.top));
+        el.style.width = Math.round(w) + 'px';
+        el.style.height = Math.round(h) + 'px';
+        window.dispatchEvent(new Event('resize'));
+      }}
+      onPointerUp={event => {
+        dragRef.current = null;
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+      }}/>}
     {panel === 'search' && <>
       <input type="search" autoFocus maxLength={160} aria-label="搜索项目、会话标题或消息正文" placeholder="搜索项目、会话标题或消息正文"
         value={query} onChange={event => setQuery(event.target.value)}/>
@@ -693,15 +757,21 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
           <select aria-label="触发方式" value={automationSchedule}
             onChange={event => setAutomationSchedule(event.target.value)}>
             <option value="interval">固定间隔</option>
+            <option value="daily">每天定时</option>
             <option value="once">执行一次</option>
           </select>
           {automationSchedule === 'interval'
             ? <label>每 <input type="number" min="1" max="10080" value={automationInterval}
               aria-label="间隔分钟" onChange={event => setAutomationInterval(event.target.value)}/> 分钟</label>
-            : <input type="datetime-local" value={automationRunAt} aria-label="执行时间"
-              onChange={event => setAutomationRunAt(event.target.value)}/>}
+            : automationSchedule === 'daily'
+              ? <label>每天 <input type="time" value={automationTime}
+                aria-label="每日执行时间" onChange={event => setAutomationTime(event.target.value)}/></label>
+              : <input type="datetime-local" value={automationRunAt} aria-label="执行时间"
+                onChange={event => setAutomationRunAt(event.target.value)}/>}
           <button type="submit" className="primary"
-            disabled={!!automationBusy || !automationName.trim() || !automationPrompt.trim()}>
+            disabled={!!automationBusy || !automationName.trim() || !automationPrompt.trim()
+              || (automationSchedule === 'daily' && !automationTime)
+              || (automationSchedule === 'once' && !automationRunAt)}>
             <Plus size={15}/>创建
           </button>
         </div>
@@ -718,8 +788,14 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
                 <small>{definition.enabled
                   ? (definition.scheduleType === 'once'
                     ? '执行一次 · ' + new Date(definition.nextRunAt).toLocaleString()
-                    : '每 ' + definition.intervalMinutes + ' 分钟 · 下次 ' +
-                      new Date(definition.nextRunAt).toLocaleString())
+                    : definition.scheduleType === 'daily'
+                      ? (definition.daysOfWeek?.length
+                        ? '每' + definition.daysOfWeek.map(day => ['', '周一', '周二', '周三', '周四', '周五', '周六', '周日'][day])
+                            .filter(Boolean).join('、')
+                        : '每天') + ' ' + definition.timeOfDay + ' · 下次 '
+                          + new Date(definition.nextRunAt).toLocaleString()
+                      : '每 ' + definition.intervalMinutes + ' 分钟 · 下次 ' +
+                        new Date(definition.nextRunAt).toLocaleString())
                   : '已暂停'}</small></span>
               <span className={'task-state ' + (definition.enabled ? 'state-completed' : 'state-cancelled')}>
                 {definition.enabled ? '已启用' : '已暂停'}
@@ -736,6 +812,10 @@ export function NavigationPanel({ panel, close, projects, project, bookmarks, op
               <button type="button" className="secondary" disabled={!!automationBusy}
                 onClick={() => automationAction('run', definition.id)}>
                 <Play size={14}/>立即运行
+              </button>
+              <button type="button" className="secondary" disabled={busy}
+                onClick={() => { close(); void openChat(definition.projectId, definition.sessionId); }}>
+                <ExternalLink size={14}/>打开会话
               </button>
               <button type="button" className="secondary" disabled={!!automationBusy}
                 onClick={() => {

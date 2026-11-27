@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>JHarness · 内置浏览器</title>
+<style>
+  :root { color: #222630; background: #f6f7fa; font: 13px/1.4 "Segoe UI", "Microsoft YaHei", sans-serif; color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { margin: 0; overflow: hidden; user-select: none; background: #f6f7fa; }
+  .toolbar {
+    height: 48px; display: flex; align-items: center; gap: 6px; padding: 0 10px;
+    background: #f6f7fa; border-bottom: 1px solid #e4e7ed;
+  }
+  button, input { font: inherit; color: inherit; }
+  button {
+    display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+    height: 30px; min-width: 30px; padding: 0 7px; border: 0; border-radius: 7px;
+    background: transparent; cursor: pointer; white-space: nowrap; color: #343b48;
+  }
+  button:hover:not(:disabled) { background: #e6eaf2; }
+  button:disabled { opacity: 0.42; cursor: default; }
+  button:focus-visible, input:focus-visible { outline: 2px solid #6385dc; outline-offset: 1px; }
+  .nav-btn { width: 30px; padding: 0; font-size: 15px; }
+  form { display: flex; flex: 1; min-width: 0; align-items: center; gap: 6px; }
+  .address-wrap {
+    flex: 1; min-width: 0; display: flex; align-items: center;
+    background: #ffffff; border: 1px solid #d8dde6; border-radius: 8px; padding: 0 4px 0 10px; height: 32px;
+  }
+  .address-wrap:focus-within { border-color: #6385dc; box-shadow: 0 0 0 2px #6385dc24; }
+  input {
+    flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; height: 100%;
+    user-select: text;
+  }
+  .go-btn { height: 24px; min-width: 26px; padding: 0 6px; border-radius: 5px; color: #4c566a; }
+  .badge {
+    font-size: 12px; color: #5b6472; padding: 2px 8px; border-radius: 999px;
+    background: #eaedf3; white-space: nowrap;
+  }
+  .badge.busy { background: #e5effd; color: #2453b5; }
+  .badge.takeover { background: #fff3dc; color: #945308; }
+  .action-pill { background: #ffffff; border: 1px solid #dce0e8; font-size: 12px; height: 28px; padding: 0 9px; }
+  .error-toast {
+    position: fixed; top: 4px; right: 12px; max-width: 360px; padding: 5px 10px;
+    border-radius: 7px; background: #fcf1ed; border: 1px solid #ead7d0; color: #9c3023;
+    font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+  <div class="toolbar">
+    <button id="back" type="button" class="nav-btn" aria-label="后退" title="后退 (Alt+←)">&#8592;</button>
+    <button id="forward" type="button" class="nav-btn" aria-label="前进" title="前进 (Alt+→)">&#8594;</button>
+    <button id="reload" type="button" class="nav-btn" aria-label="刷新网页" title="刷新 (F5 / Ctrl+R)">&#8635;</button>
+    <form id="nav-form">
+      <div class="address-wrap">
+        <input id="address" aria-label="网页地址" type="text" inputmode="url" autocomplete="off" spellcheck="false"
+          placeholder="输入网址（如 baidu.com、localhost:3000）或搜索词">
+        <button id="go" type="submit" class="go-btn" aria-label="打开网页" title="打开网址或搜索">&#9166;</button>
+      </div>
+    </form>
+    <span id="status" class="badge" role="status">空闲</span>
+    <button id="takeover" type="button" class="action-pill" hidden>人工接管</button>
+    <button id="fullscreen" type="button" class="action-pill" aria-label="全屏浏览" title="全屏浏览（F11 / Esc 退出）">全屏</button>
+    <button id="dock" type="button" class="action-pill" aria-label="返回面板" title="收回至主窗口右侧面板">返回面板</button>
+  </div>
+  <div id="error" class="error-toast" hidden></div>
+  <script>
+    const api = window.jharness;
+    const project = new URLSearchParams(location.search).get('project');
+    const backBtn = document.getElementById('back');
+    const forwardBtn = document.getElementById('forward');
+    const reloadBtn = document.getElementById('reload');
+    const form = document.getElementById('nav-form');
+    const addressInput = document.getElementById('address');
+    const goBtn = document.getElementById('go');
+    const statusEl = document.getElementById('status');
+    const takeoverBtn = document.getElementById('takeover');
+    const fullscreenBtn = document.getElementById('fullscreen');
+    const dockBtn = document.getElementById('dock');
+    const errorEl = document.getElementById('error');
+
+    let editing = false;
+    let currentState = {};
+    let pendingAddress = '';
+    let pendingUntil = 0;
+    let errorTimer;
+
+    function navigationAddress(raw) {
+      const value = String(raw || '').trim();
+      if (!value) return '';
+      if (/^[a-z][a-z\d+.-]*:/i.test(value) && !/^[^/:?#\s]+:\d{1,5}(?:[/?#]|$)/.test(value)) {
+        if (/^https?:/i.test(value)) {
+          try { return new URL(value.replace(/ /g, '%20')).href; } catch { return value; }
+        }
+        return value;
+      }
+      if (value.startsWith('//')) {
+        try { return new URL('https:' + value).href; } catch { return 'https:' + value; }
+      }
+      if (/\s/.test(value)) return 'https://www.bing.com/search?q=' + encodeURIComponent(value);
+      const slash = value.search(/[/?#]/);
+      const authority = slash < 0 ? value : value.slice(0, slash);
+      const suffix = slash < 0 ? '' : value.slice(slash);
+      const local = /^(?:localhost|127(?:\.\d{1,3}){3}|\[::1\]|0\.0\.0\.0|10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}|[^.:/?#]+\.(?:local|localhost|test))(?::\d{1,5})?$/i.test(authority);
+      if (local) {
+        const host = authority.replace(/^0\.0\.0\.0(?=:|$)/, '127.0.0.1');
+        try { return new URL('http://' + host + suffix).href; } catch { return 'http://' + host + suffix; }
+      }
+      const ipv4 = /^\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?$/.test(authority);
+      const ipv6 = /^\[[0-9a-f:]+\](?::\d{1,5})?$/i.test(authority);
+      const hasPort = /^[^/:?#]+:\d{1,5}$/.test(authority);
+      const hostOnly = authority.replace(/:\d{1,5}$/, '');
+      const domain = !ipv4 && !ipv6 && /^[^\s/:?#.]+\.[^\s/:?#]+$/.test(hostOnly) && !/\.\d+$/.test(hostOnly);
+      if (ipv4 || ipv6 || domain || hasPort) {
+        const scheme = hasPort && !authority.endsWith(':443') ? 'http://' : 'https://';
+        try { return new URL(scheme + value).href; } catch { return scheme + value; }
+      }
+      return 'https://www.bing.com/search?q=' + encodeURIComponent(value);
+    }
+
+    function showError(msg) {
+      clearTimeout(errorTimer);
+      if (!msg) { errorEl.hidden = true; return; }
+      errorEl.textContent = String(msg).replace(/^Error invoking remote method '[^']+': Error: /, '');
+      errorEl.hidden = false;
+      errorTimer = setTimeout(() => { errorEl.hidden = true; }, 4000);
+    }
+
+    function render(next) {
+      currentState = next || {};
+      backBtn.disabled = !currentState.canGoBack || currentState.active;
+      forwardBtn.disabled = !currentState.canGoForward || currentState.active;
+      reloadBtn.disabled = !!currentState.active;
+      addressInput.disabled = !!currentState.active;
+      goBtn.disabled = !!currentState.active;
+      if (pendingAddress && (Date.now() > pendingUntil || (currentState.url && currentState.url !== 'about:blank'))) {
+        pendingAddress = '';
+      }
+      if (!editing && !pendingAddress) {
+        addressInput.value = currentState.url === 'about:blank' ? '' : (currentState.url || '');
+      }
+      if (currentState.takeover) {
+        statusEl.textContent = '等待人工接管';
+        statusEl.className = 'badge takeover';
+      } else if (currentState.active) {
+        statusEl.textContent = '助手操作中';
+        statusEl.className = 'badge busy';
+      } else {
+        statusEl.textContent = currentState.loading ? '正在加载…' : '空闲';
+        statusEl.className = 'badge';
+      }
+      takeoverBtn.hidden = !currentState.active;
+      takeoverBtn.textContent = currentState.takeover ? '交还助手' : '人工接管';
+      fullscreenBtn.textContent = currentState.fullscreen ? '退出全屏' : '全屏';
+      fullscreenBtn.setAttribute('aria-label', currentState.fullscreen ? '退出全屏' : '全屏浏览');
+    }
+
+    async function control(action, rawUrl = '') {
+      showError('');
+      try {
+        let target = rawUrl;
+        if (action === 'navigate') {
+          target = navigationAddress(rawUrl);
+          if (!target) return;
+          pendingAddress = target;
+          pendingUntil = Date.now() + 2500;
+          addressInput.value = target;
+        }
+        await api.browserControl(project, action, target);
+        editing = false;
+        addressInput.blur();
+        render(await api.browserState(project));
+      } catch (e) {
+        pendingAddress = '';
+        showError(e.message || e);
+      }
+    }
+
+    addressInput.addEventListener('focus', () => { editing = true; addressInput.select(); });
+    addressInput.addEventListener('blur', () => { editing = false; });
+    addressInput.addEventListener('keydown', e => {
+      if (e.key === 'Escape') {
+        editing = false;
+        addressInput.value = currentState.url === 'about:blank' ? '' : (currentState.url || '');
+        addressInput.blur();
+      }
+    });
+    form.addEventListener('submit', e => { e.preventDefault(); void control('navigate', addressInput.value); });
+    backBtn.addEventListener('click', () => void control('back'));
+    forwardBtn.addEventListener('click', () => void control('forward'));
+    reloadBtn.addEventListener('click', () => void control('reload'));
+    takeoverBtn.addEventListener('click', () => void control(currentState.takeover ? 'release' : 'takeover'));
+    fullscreenBtn.addEventListener('click', async () => {
+      try {
+        await api.browserPresent(project, currentState.fullscreen ? 'window' : 'fullscreen');
+        render(await api.browserState(project));
+      } catch (e) { showError(e.message || e); }
+    });
+    dockBtn.addEventListener('click', async () => {
+      try { await api.browserPresent(project, 'dock'); } catch (e) { showError(e.message || e); }
+    });
+
+    async function poll() {
+      if (project) {
+        try { render(await api.browserState(project)); } catch {}
+      }
+      setTimeout(poll, 600);
+    }
+    void poll();
+  </script>
+</body>
+</html>

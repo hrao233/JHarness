@@ -16,8 +16,11 @@ test('backend jar and packaged directory stay within size budgets', async () => 
   const jarBytes = (await stat(jar)).size;
   assert.ok(jarBytes <= 24 * 1024 * 1024, `backend jar is ${jarBytes} bytes`);
 
-  const release = path.join(root, 'release', 'win-unpacked');
+  const release = path.resolve(process.env.JHARNESS_RELEASE_DIR || path.join(root, 'release', 'win-unpacked'));
+  if (process.env.JHARNESS_RELEASE_DIR) assert.ok(existsSync(release), 'selected release directory is missing');
   if (existsSync(release)) {
+    assert.ok(existsSync(path.join(release, 'resources', 'app', 'desktop', 'browser-pane.cjs')),
+      'packaged app must include the isolated browser pane');
     assert.equal(
       existsSync(path.join(release, 'resources', 'app', 'desktop', 'worktree-manager.cjs')),
       true,

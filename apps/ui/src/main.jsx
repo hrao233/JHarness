@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { ChevronDown, ChevronRight, CircleHelp, FolderOpen, FolderPlus, MessageSquare, Plus, X, PanelLeft, PanelRight, Settings, SquarePen, Terminal, FileText } from 'lucide-react';
+import { Globe, ChevronDown, ChevronRight, CircleHelp, FolderOpen, FolderPlus, MessageSquare, Plus, X, PanelLeft, PanelRight, Settings, SquarePen, Terminal, FileText } from 'lucide-react';
 import { ApprovalCard, Composer, InterruptedApprovals, TaskRecovery, effortLabels } from './Composer.jsx';
 import { Conversation } from './Conversation.jsx';
 import { Navigation, NavigationPanel, inspectorTools } from './Navigation.jsx';
@@ -35,6 +35,7 @@ function App() {
   const [sessionView, setSessionView] = useState('project');
   const [collapsed, setCollapsed] = useState({});
   const [run, setRun] = useState(null);
+  const [browserBusy, setBrowserBusy] = useState(false);
   const [phase, setPhase] = useState(null);
   const [notice, setNotice] = useState('');
   const [showSettings, setShowSettings] = useState(false);
@@ -199,14 +200,35 @@ function App() {
     }).catch(error => setNotice(errText(error)));
     api.bookmarks().then(setBookmarks).catch(error => setNotice(errText(error)));
     return api.onEvent(message => {
+      if (message.event === 'browser-dock-request') {
+        if (selection.current?.project === message.data?.projectId) setPanel('browser');
+        return;
+      }
+      if (message.event === 'automation-changed') {
+        void refresh();
+        return;
+      }
       const current = running.current;
-      if (message.runId !== current?.id) return;
+      if (message.runId !== current?.id) {
+        const target = selection.current;
+        if (!current && target?.session && ['approval', 'approval-end', 'done'].includes(message.event)) {
+          void loadTask(target);
+          if (message.event === 'done') {
+            void refresh();
+            api.history(target.project, target.session).then(history => {
+              if (selection.current === target && !running.current) setItems(history);
+            }).catch(() => {});
+          }
+        }
+        return;
+      }
       const { event, data } = message;
       if (event === 'error') return setNotice(data.message);
       if (event === 'done') {
         if (selection.current === current.selection) setCompleted({ target: current.selection, id: current.id });
         running.current = null;
         setRun(null);
+        setBrowserBusy(false);
         setPhase(null);
         setApprovals([]);
         if (data.status && selection.current === current.selection) void loadTask(current.selection);
@@ -226,6 +248,14 @@ function App() {
         return;
       }
       if (selection.current !== current.selection) return;
+      if (event === 'browser') {
+        setBrowserBusy(data.phase !== 'done');
+        const id = current.id + ':browser';
+        const item = { id, role: 'browser', ...data };
+        setItems(previous => previous.some(value => value.id === id)
+          ? previous.map(value => value.id === id ? item : value) : [...previous, item]);
+        return;
+      }
       if (event === 'loop-phase') {
         current.step = data.phase === 'summary' ? 'summary' : data.step;
         return setPhase(data);
@@ -382,10 +412,24 @@ function App() {
     if (anchor && selection.current?.session === sessionId) setJump(anchor);
   }
 
-  async function decide(id, allow) {
-    if (!run) return;
+  async function openBrowserLink(url) {
+    if (!project) return;
+    setNotice('');
     try {
-      if (!await api.approve(run, id, allow)) setNotice('这项审批已结束。');
+      const state = await api.browserState(project.id);
+      if (!state.detached) setPanel('browser');
+      await api.openBrowser(project.id, url);
+    } catch (error) {
+      setPanel('browser');
+      setNotice(errText(error));
+    }
+  }
+
+  async function decide(id, allow) {
+    const targetRun = run || task?.liveRunId;
+    if (!targetRun) return;
+    try {
+      if (!await api.approve(targetRun, id, allow)) setNotice('这项审批已结束。');
       setApprovals(previous => previous.filter(item => item.id !== id));
     } catch (error) { setNotice(errText(error)); }
   }
@@ -616,6 +660,8 @@ function App() {
         <button className="shell-icon" title="新建会话 (Ctrl+N)" disabled={!!run} onClick={() => newSession(project)}><SquarePen size={17}/></button></>}
         <span title={project?.directory}>{project?.name || '工作台'}</span>
         <ChevronRight size={15}/><strong>{session?.title || '新会话'}</strong></div>
+        <button className={'shell-icon browser-shortcut' + (browserBusy ? ' active' : '')} disabled={!project}
+          aria-label="内置浏览器" title="内置浏览器" onClick={() => setPanel(panel === 'browser' ? null : 'browser')}><Globe size={18}/></button>
         <button className="shell-icon" disabled={!project} aria-label="工作区工具" title="工作区工具"
           aria-expanded={inspectorTools.includes(panel)}
           onClick={() => setPanel(inspectorTools.includes(panel) ? null : session ? 'context' : 'review')}>
@@ -623,11 +669,12 @@ function App() {
       </header>
       <Conversation key={session?.id || project?.id || 'empty'} items={items} sessionId={session?.id}
         status={run && !approvals.length ? (phase
-          ? '第 ' + phase.step + ' / ' + phase.limit + ' 步 · '
+          ? '第 ' + phase.step + ' 步 · '
             + ({ acting: '执行工具', reasoning: '请求模型', summary: '整理本轮结果' }[phase.phase] || '执行中')
           : '正在准备…') : null}
         copy={copy} quote={run || loading ? null : quote} saved={bookmarks} onSave={saveBookmark}
         onFork={run || loading ? null : forkMessage}
+        openLink={project ? openBrowserLink : null}
         run={run} jump={jump} scroll={scroll}>
           {!items.length && !loading && <div className="welcome">
             <div className="welcome-icon"><Terminal size={30} strokeWidth={1.8}/></div>
@@ -649,8 +696,10 @@ function App() {
             <button type="button" className="secondary" onClick={() => setPanel('reports')}>任务报告</button>
           </div>}
         {!!approvals.length && <div className="approvals">{approvals.map(item =>
-          <ApprovalCard key={item.id} item={item} decide={decide}/>)}</div>}
-        {!run && task && <TaskRecovery key={task.turnId} task={task} canceling={cancelingTask}
+          <ApprovalCard key={item.id} item={item} openBrowser={() => setPanel('browser')} decide={decide}/>)}</div>}
+        {!run && task?.liveRunId && task.approvals.map(item => <ApprovalCard key={item.id} item={item}
+          openBrowser={() => setPanel('browser')} decide={decide}/>)}
+        {!run && task && !task.liveRunId && <TaskRecovery key={task.turnId} task={task} canceling={cancelingTask}
           blocked={taskPending || !!taskError || cancelingTask} resume={resumeTask} cancel={cancelTask}/>}
         {taskError && <div className="notice" role="alert">无法读取任务状态。{taskError}
           <button type="button" onClick={() => loadTask(selection.current)}>重试</button></div>}
@@ -670,7 +719,7 @@ function App() {
     {panel === 'memory' && project && <MemoryPanel project={project} busy={!!run} errorText={errText}
       api={api} close={() => setPanel(null)} onAuto={enabled => setData(previous => ({ ...previous,
         projects: previous.projects.map(p => p.id === project.id ? { ...p, autoMemory: enabled } : p) }))}/>}
-    {panel && panel !== 'memory' && <NavigationPanel docked={docked} switchTool={setPanel} key={panel} panel={panel} close={() => setPanel(null)} projects={data.projects}
+    {panel && panel !== 'memory' && <NavigationPanel settingsOpen={showSettings} docked={docked} switchTool={setPanel} key={panel} panel={panel} close={() => setPanel(null)} projects={data.projects}
       reports={reports} reportError={reportError} refreshReports={refreshReports}
       rerunning={rerunning} rerunCommand={rerunCommand}
       project={project} session={session} bookmarks={bookmarks} openChat={openChat} removeBookmark={removeBookmark}

@@ -5,12 +5,14 @@ import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.AgentResultEvent;
 import io.agentscope.core.event.ExceedMaxItersEvent;
+import io.agentscope.core.event.RequestStopEvent;
 import io.agentscope.core.event.TextBlockDeltaEvent;
 import io.agentscope.core.event.ToolCallDeltaEvent;
 import io.agentscope.core.event.ToolCallStartEvent;
 import io.agentscope.core.event.ToolResultEndEvent;
 import io.agentscope.core.event.ToolResultStartEvent;
 import io.agentscope.core.event.ToolResultTextDeltaEvent;
+import io.agentscope.core.message.GenerateReason;
 import io.agentscope.core.middleware.ActingInput;
 import io.agentscope.core.middleware.MiddlewareBase;
 import io.agentscope.core.middleware.ReasoningInput;
@@ -18,6 +20,7 @@ import io.agentscope.core.message.ToolUseBlock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -25,18 +28,23 @@ import reactor.core.publisher.Flux;
 
 /** Adapts execution phases and streamed events from one Harness call to the desktop protocol. */
 final class ConversationEvents implements MiddlewareBase {
-    private final int limit;
+    static final int MAX_REPEAT_TOOL_CALLS = 8;
+
     private final ConversationRuntime.Listener emit;
     private final TaskReportStore reports;
     private final Consumer<String> activeRun;
+    private String currentRunId;
     private int step;
+    private List<ToolSignature> lastToolSignature;
+    private int consecutiveRepeats;
+    private String stopReason;
+
+    private record ToolSignature(String name, Map<String, Object> input) {}
 
     ConversationEvents(
-            int limit,
             ConversationRuntime.Listener emit,
             TaskReportStore reports,
             Consumer<String> activeRun) {
-        this.limit = limit;
         this.emit = emit;
         this.reports = reports;
         this.activeRun = activeRun;
@@ -52,8 +60,9 @@ final class ConversationEvents implements MiddlewareBase {
             Function<ReasoningInput, Flux<AgentEvent>> next) {
         return Flux.defer(() -> {
             String runId = context.getRunId();
+            syncRun(runId);
             activeRun.accept(runId);
-            phase(runId, ++step, limit, "reasoning");
+            phase(runId, ++step, "reasoning");
             return next.apply(input);
         });
     }
@@ -63,16 +72,22 @@ final class ConversationEvents implements MiddlewareBase {
             Function<ActingInput, Flux<AgentEvent>> next) {
         return Flux.defer(() -> {
             String runId = context.getRunId();
+            syncRun(runId);
             activeRun.accept(runId);
             recordPlan(context, input.toolCalls());
-            phase(runId, Math.max(1, step), limit, "acting");
+            phase(runId, Math.max(1, step), "acting");
+            String repeatStop = checkRepeatedToolLoop(input.toolCalls());
+            if (repeatStop != null) {
+                stopReason = repeatStop;
+                return Flux.concat(next.apply(input), Flux.just(new RequestStopEvent(repeatStop)));
+            }
             return next.apply(input);
         });
     }
 
     void publish(String runId, AgentEvent event) {
         if (event instanceof ExceedMaxItersEvent e) {
-            phase(runId, e.getCurrentIter(), e.getMaxIters(), "summary");
+            phase(runId, e.getCurrentIter(), "summary");
         } else if (event instanceof TextBlockDeltaEvent e) {
             emit.event(runId, "text", Map.of("delta", e.getDelta(), "replyId", e.getReplyId()));
         } else if (event instanceof ToolCallStartEvent e) {
@@ -93,10 +108,49 @@ final class ConversationEvents implements MiddlewareBase {
         } else if (event instanceof AgentResultEvent e) {
             var result = e.getResult();
             var reason = result.getGenerateReason();
+            String text = result.getTextContent();
+            if ((text == null || text.isBlank())
+                    && reason == GenerateReason.MIDDLEWARE_STOP_REQUESTED
+                    && stopReason != null) {
+                text = stopReason;
+            }
             emit.event(runId, "result",
-                    Map.of("id", result.getId(), "text", result.getTextContent(),
+                    Map.of("id", result.getId(), "text", text == null ? "" : text,
                             "reason", reason == null ? "" : reason.name()));
         }
+    }
+
+    private void syncRun(String runId) {
+        if (!Objects.equals(currentRunId, runId)) {
+            currentRunId = runId;
+            step = 0;
+            lastToolSignature = null;
+            consecutiveRepeats = 0;
+            stopReason = null;
+        }
+    }
+
+    private String checkRepeatedToolLoop(List<ToolUseBlock> calls) {
+        if (calls == null || calls.isEmpty()) {
+            lastToolSignature = null;
+            consecutiveRepeats = 0;
+            return null;
+        }
+        var signature = calls.stream()
+                .map(call -> new ToolSignature(
+                        call.getName(),
+                        call.getInput() == null ? Map.of() : call.getInput()))
+                .toList();
+        if (signature.equals(lastToolSignature)) {
+            consecutiveRepeats++;
+        } else {
+            lastToolSignature = signature;
+            consecutiveRepeats = 1;
+        }
+        if (consecutiveRepeats >= MAX_REPEAT_TOOL_CALLS) {
+            return "检测到连续 " + MAX_REPEAT_TOOL_CALLS + " 次重复执行相同的工具调用，已自动中止循环。";
+        }
+        return null;
     }
 
     private void recordPlan(RuntimeContext context, List<ToolUseBlock> calls) {
@@ -126,7 +180,7 @@ final class ConversationEvents implements MiddlewareBase {
         return value instanceof String text ? text : "";
     }
 
-    private void phase(String runId, int current, int max, String phase) {
-        emit.event(runId, "loop-phase", Map.of("step", current, "phase", phase, "limit", max));
+    private void phase(String runId, int current, String phase) {
+        emit.event(runId, "loop-phase", Map.of("step", current, "phase", phase));
     }
 }

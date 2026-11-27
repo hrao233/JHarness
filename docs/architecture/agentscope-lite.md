@@ -24,6 +24,12 @@ The target is a lightweight, locally focused Java harness with:
 The migration must not mix source extraction, repository restructuring and
 behavioral rewrites in one change.
 
+### Built-in browser boundary
+
+The backend package `local.jharness.browser` owns page-scoped CDP over JDK HTTP/WebSocket, DOM references, origin decisions, screenshot archival and the isolated 20-iteration ReAct agent. The parent receives text and host-observed facts. A child model request can include the latest screenshot. Tool results in the parent log contain artifact references. Both conversation runtimes use the same browser tools. An interrupted durable dispatch is subject to the existing uncertain-call reconciliation.
+
+Electron binds a token-protected, single-client loopback WebSocket to a sandboxed project WebContentsView. Its command allowlist targets only the child debugger. The main renderer coordinates bounds and modal visibility. CLI starts a dedicated local Edge/Chrome page with an ephemeral debugging port and a project profile under `browser-profiles`. Tests can supply a local page endpoint via `JHARNESS_BROWSER_WS_URL` or a discovery port via `JHARNESS_BROWSER_PORT`.
+
 ## 2. Initial Desktop Delivery Scope
 
 JHarness is a Windows desktop project assistant. The first release of

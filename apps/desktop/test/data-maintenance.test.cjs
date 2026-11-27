@@ -13,6 +13,10 @@ test('creates, verifies and restores a full desktop data backup', async () => {
   await mkdir(path.join(data, 'workspaces', 'project-a', 'session-a'), { recursive: true });
   await mkdir(path.join(data, 'worktrees'), { recursive: true });
   await mkdir(destination);
+  for (const dir of ['Partitions', 'workspaces/browser-profiles']) {
+    await mkdir(path.join(data, dir), { recursive: true });
+    await writeFile(path.join(data, dir, 'Cookies'), 'private');
+  }
   const settings = {
     models: [],
     projects: [{ id: 'project-a', sessions: [{ id: 'session-a' }, { id: 'session-b' }] }]
@@ -32,6 +36,8 @@ test('creates, verifies and restores a full desktop data backup', async () => {
     assert.equal(backup.entries.includes('settings.json'), true);
     assert.equal(backup.entries.includes('worktrees'), false);
     assert.equal(existsSync(path.join(backup.path, 'worktrees', 'ignored.txt')), false);
+    for (const dir of ['Partitions', 'workspaces/browser-profiles'])
+      assert.equal(existsSync(path.join(backup.path, dir)), false);
     const inspected = await maintenance.inspectBackup(backup.path);
     assert.equal(inspected.projects, undefined);
     assert.equal(inspected.entries.includes('workspaces'), true);
@@ -42,6 +48,7 @@ test('creates, verifies and restores a full desktop data backup', async () => {
       '{"event":"mutated"}\n');
     const restored = await maintenance.restoreBackup(data, backup.path);
     assert.equal(restored.restored, true);
+    assert.equal(await readFile(path.join(data, 'workspaces/browser-profiles/Cookies'), 'utf8'), 'private');
     assert.equal(existsSync(restored.safetyBackup), true);
     assert.deepEqual(JSON.parse(await readFile(path.join(data, 'settings.json'), 'utf8')), settings);
     assert.equal(await readFile(

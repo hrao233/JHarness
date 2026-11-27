@@ -15,6 +15,9 @@ const git = promisify(execFile);
 
 let win;
 let backend;
+const browserPanes = require('./browser-pane.cjs').createBrowserPanes(() => win,
+  (projectId, url) => call('configureBrowserBridge', { projectId, url }),
+  message => { if (win && !win.isDestroyed()) win.webContents.send('jh:event', message); });
 const activeRuns = new Set();
 let dataDirectory;
 let quitting = false;
@@ -89,6 +92,7 @@ function startBackend(directory) {
     let message;
     try { message = JSON.parse(line); } catch { return; }
     if (message.event) {
+      browserPanes.event(message);
       void observeAutomationEvent(message);
       if (message.event === 'done') activeRuns.delete(message.runId);
       if (win && !win.isDestroyed()) win.webContents.send('jh:event', message);
@@ -122,7 +126,9 @@ function startBackend(directory) {
   backend.once('exit', fail);
 }
 
-function call(method, params = {}) {
+async function call(method, params = {}) {
+  if (['chat', 'resumeTask', 'reconcileTask', 'browserNavigate', 'browserControl'].includes(method))
+    await browserPanes.ensure(params.projectId);
   if (!backend?.stdin.writable) return Promise.reject(new Error('Java 后端未运行。'));
   const id = randomUUID();
   return new Promise((resolve, reject) => {
@@ -234,9 +240,36 @@ function automationStatus(status) {
   return 'completed';
 }
 
+async function syncAutomationSessions() {
+  if (!automationStore) return;
+  const { definitions } = await automationStore.list();
+  if (!definitions.length) return;
+  changeSettings(state => {
+    for (const definition of definitions) {
+      const project = state.projects.find(item => item.id === definition.projectId);
+      if (!project) continue;
+      const expectedTitle = '自动任务 · ' + String(definition.name || '未命名').slice(0, 40);
+      const existing = project.sessions.find(item => item.id === definition.sessionId);
+      if (!existing) {
+        project.sessions.unshift({
+          id: definition.sessionId,
+          title: expectedTitle,
+          permission: 'durable',
+          automation: true,
+          updatedAt: definition.updatedAt || definition.createdAt || Date.now()
+        });
+      } else if (existing.automation && existing.title !== expectedTitle) {
+        existing.title = expectedTitle;
+      }
+    }
+  });
+}
+
 async function observeAutomationEvent(message) {
   if (!automationStore) return;
-  if (message.event === 'error') {
+  if (message.event === 'automation-changed') {
+    await syncAutomationSessions();
+  } else if (message.event === 'error') {
     await automationStore.finish(message.runId, 'failed', message.data?.message || '任务失败。');
   } else if (message.event === 'done') {
     await automationStore.finish(message.runId, automationStatus(message.data?.status));
@@ -244,6 +277,7 @@ async function observeAutomationEvent(message) {
 }
 
 async function launchAutomationRun(run) {
+  await syncAutomationSessions();
   const project = settings().projects.find(item => item.id === run.projectId);
   const session = project?.sessions.find(item => item.id === run.sessionId);
   if (!project || !session) throw new Error('自动任务对应的项目或会话已被删除。');
@@ -293,12 +327,53 @@ async function tickAutomations() {
 async function initializeAutomations() {
   automationStore = createAutomationStore(path.join(app.getPath('userData'), 'automations.json'));
   await automationStore.recoverRunning();
+  await syncAutomationSessions();
   clearInterval(automationTimer);
   automationTimer = setInterval(() => { void tickAutomations(); }, 15000);
   void tickAutomations();
 }
 
 function register() {
+  function browserProject(event, projectId) {
+    const trusted = (win && !win.isDestroyed() && event.sender === win.webContents)
+      || browserPanes.ownsSender(event.sender, projectId);
+    if (!trusted || !settings().projects.some(p => p.id === projectId))
+      throw new Error('无效的浏览器项目');
+  }
+  ipcMain.handle('jh:browser-layout', (event, projectId, bounds) => {
+    browserProject(event, projectId);
+    browserPanes.layout(projectId, bounds);
+  });
+  ipcMain.handle('jh:browser-present', (event, projectId, mode) => {
+    browserProject(event, projectId);
+    browserPanes.present(projectId, mode);
+  });
+  ipcMain.handle('jh:browser-state', async (event, projectId) => {
+    browserProject(event, projectId);
+    return { ...await call('browserState', { projectId }), ...await browserPanes.state(projectId) };
+  });
+  ipcMain.handle('jh:browser-control', async (event, projectId, action, url) => {
+    browserProject(event, projectId);
+    const result = await call('browserControl', { projectId, action, url });
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('jh:event', { event: 'browser-state-changed', data: { projectId } });
+    }
+    return result;
+  });
+  ipcMain.handle('jh:browser-open', async (event, projectId, url) => {
+    browserProject(event, projectId);
+    const current = await browserPanes.state(projectId);
+    await call('browserControl', { projectId, action: 'navigate', url });
+    if (current.detached) {
+      browserPanes.present(projectId, current.fullscreen ? 'fullscreen' : 'window');
+    } else if (win && !win.isDestroyed()) {
+      win.webContents.send('jh:event', { event: 'browser-dock-request', data: { projectId } });
+    }
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('jh:event', { event: 'browser-state-changed', data: { projectId } });
+    }
+    return true;
+  });
   ipcMain.handle('jh:state', () => publicSettings());
   ipcMain.handle('jh:memory', (_, projectId, operation, input = {}) => {
     const project = settings().projects.find(item => item.id === projectId);
@@ -467,6 +542,8 @@ function register() {
         sessionId: session.id,
         scheduleType: input.scheduleType,
         intervalMinutes: input.intervalMinutes,
+        timeOfDay: input.timeOfDay,
+        daysOfWeek: input.daysOfWeek,
         runAt: Number(input.runAt)
       });
     } catch (error) {
@@ -885,6 +962,27 @@ async function smokeInterruptedApproval() {
     () => checkpointDialog.innerText.includes('当前会话还没有文件检查点'),
     'Checkpoint empty state did not load');
   result.checkpoints = checkpointDialog.innerText;
+  checkpointDialog.querySelector('.dialog-head button').click();
+  await chooseTool('browser');
+  const pane = await waitFor(() => document.querySelector('dialog.nav-browser input[aria-label="网页地址"]'),
+    'Browser address bar did not render');
+  result.browser = pane.getAttribute('aria-label');
+  const projectId = (await window.jharness.state()).projects[0].id;
+  async function waitVisibility(expected) {
+    for (let i = 0; i < 80; i++) {
+      if ((await window.jharness.browserState(projectId)).visible === expected) return;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    throw new Error('Browser native visibility did not follow modal state');
+  }
+  if (document.querySelector('dialog.nav-browser.docked')) {
+    await waitVisibility(true);
+    document.querySelector('button[aria-label="设置"]').click();
+    await waitFor(() => document.querySelector('dialog:modal'), 'Settings did not cover browser');
+    await waitVisibility(false);
+    document.querySelector('dialog:modal button[aria-label="关闭"]').click();
+    await waitVisibility(true);
+  }
   return result;
 }
 
@@ -949,7 +1047,7 @@ async function smokeConversationStage(stage, fixture) {
   async function waitFor(check, message) {
     const deadline = Date.now() + 15000;
     while (Date.now() < deadline) {
-      const value = check();
+      const value = await check();
       if (value) return value;
       await new Promise(resolve => setTimeout(resolve, 50));
     }
@@ -1020,6 +1118,22 @@ async function smokeConversationStage(stage, fixture) {
     button(approval(), '批准这一次').click();
     await waitFor(() => reply(fixture.reply) && send() && !approval(),
       'The approved task did not finish in the conversation');
+    if (fixture.paperUrl) {
+      const link = await waitFor(() => reply(fixture.reply)?.querySelector('a.chat-link'),
+        'Assistant markdown link did not render');
+      if (link.href !== fixture.paperUrl) throw new Error('Unexpected link href: ' + link.href);
+      link.click();
+      const browserDialog = await waitFor(() => document.querySelector('dialog.nav-browser[open]'),
+        'Clicking conversation link did not open built-in browser');
+      const projectId = (await window.jharness.state()).projects[0].id;
+      await waitFor(async () => {
+        const state = await window.jharness.browserState(projectId);
+        return state.url === fixture.paperUrl && state.title === 'Paper Inspiration';
+      }, 'Built-in browser did not load clicked conversation link');
+      browserDialog.querySelector('.dialog-head button[aria-label="关闭"]').click();
+      await waitFor(() => !document.querySelector('dialog.nav-browser[open]'),
+        'Built-in browser panel did not close');
+    }
   }
 
   await waitFor(() => document.querySelector('.user-msg')?.innerText === fixture.prompt && reply(fixture.reply),
@@ -1146,6 +1260,7 @@ else {
         }, testApproval || testConversation || reopenConversation ? 0 : 1200);
       });
     }
+    win.once('closed', () => browserPanes.close());
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     win.webContents.on('will-navigate', event => event.preventDefault());
     const ui = app.isPackaged
@@ -1164,6 +1279,7 @@ app.on('before-quit', event => {
   event.preventDefault();
   quitting = true;
   clearInterval(automationTimer);
+  browserPanes.close();
   const child = backend;
   for (const runId of activeRuns) call('stop', { runId }).catch(() => {});
   child.stdin.end();

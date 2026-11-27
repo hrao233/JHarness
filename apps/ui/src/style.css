@@ -115,6 +115,8 @@ h1{margin:0;font-weight:650;letter-spacing:-.045em;font-size:30px}
 .assistant-msg code{font-family:Consolas,monospace;font-size:.92em;background:#f1f3f7;padding:2px 4px;border-radius:4px}
 .assistant-msg table{border-collapse:collapse}
 .assistant-msg th,.assistant-msg td{border:1px solid var(--line);padding:5px 9px}
+.chat-link{color:var(--accent);text-decoration:underline;text-underline-offset:2px;cursor:pointer}
+.chat-link:hover{color:#254fb6}
 .tool{border:1px solid var(--line);border-radius:8px;color:#525b50;padding:6px 10px;font-size:13px}
 .tool summary{cursor:pointer;display:list-item}
 .tool svg{vertical-align:text-bottom;margin:0 6px 0 4px}
@@ -228,6 +230,39 @@ h1{margin:0;font-weight:650;letter-spacing:-.045em;font-size:30px}
 .confirm-full-access:hover{background:#f7ceca}
 .error-text{color:#9c3023}
 .success-text{color:#2f6247}
+.app.with-inspector:has(.nav-browser.docked) { grid-template-columns:var(--side-track) minmax(0,1fr) auto }
+.dialog.nav-browser[open] { display:flex; flex-direction:column; overflow:hidden }
+.dialog.nav-browser.docked { width:clamp(320px,var(--browser-width,min(46vw,640px)),calc(100vw - var(--side-track) - 250px)); padding-bottom:8px }
+.dialog.nav-browser:not(.docked) { width:min(900px,calc(100vw - 24px)); max-width:none; height:calc(100dvh - 28px); max-height:none; padding:12px }
+.nav-browser .dialog-head { flex:none; margin-bottom:8px }
+.browser-drag-head { cursor:move; user-select:none }
+.browser-corner-grip { position:absolute; right:0; bottom:0; width:16px; height:16px; cursor:nwse-resize; touch-action:none; background:linear-gradient(135deg,transparent 50%,#b8c0ce 50%,#b8c0ce 62%,transparent 62%,transparent 75%,#b8c0ce 75%) }
+.browser-panel { display:flex; flex:1; flex-direction:column; gap:7px; min-width:0; min-height:0 }
+.browser-panel details pre { max-height:16vh; overflow:auto; white-space:pre-wrap }
+.browser-grip { position:absolute; inset:0 auto 0 0; z-index:2; width:8px; cursor:col-resize; touch-action:none }
+.browser-grip::after { content:''; position:absolute; left:2px; top:50%; transform:translateY(-50%); width:3px; height:36px; border-radius:3px; background:#cfd5e2; opacity:.75; transition:background .15s,opacity .15s }
+.browser-grip:hover,.browser-grip:focus-visible { background:#4875ed26 }
+.browser-grip:hover::after,.browser-grip:focus-visible::after { background:#3964d9; opacity:1 }
+.browser-display { display:flex; gap:4px; margin-left:auto; flex:none }
+.browser-display button { display:flex; align-items:center; gap:4px; white-space:nowrap; padding:4px 7px; border:1px solid var(--line); border-radius:6px; background:#f8f9fc; font-size:12px }
+.browser-display button:hover { background:#e8ecf4 }
+.browser-bar,.browser-status { display:flex; gap:5px; align-items:center }
+.browser-bar input { min-width:0; flex:1 }
+.browser-bar button,.browser-status button { padding:5px; border-radius:5px }
+.browser-status { justify-content:space-between; font-size:13px; min-width:0; gap:8px }
+.browser-status-label { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#4f5866 }
+.browser-takeover-btn { padding:3px 8px; font-size:12px; flex:none }
+.browser-viewport { position:relative; flex:1; min-width:0; min-height:0; display:grid; place-items:center; background:#f3f5f6; color:var(--muted); overflow:hidden; border-radius:6px }
+.browser-viewport img { width:100%; height:100%; object-fit:contain }
+.browser-detached-card { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; text-align:center; padding:18px }
+.browser-detached-card small { color:var(--muted); max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+.browser-detached-actions { display:flex; gap:8px; flex-wrap:wrap; justify-content:center; margin-top:4px }
+@keyframes browser-spin { to { transform:rotate(360deg) } }
+.browser-bar .spin { animation:browser-spin .9s linear infinite }
+.browser-step { display:grid; gap:3px; font-size:13px; overflow-wrap:anywhere }
+.browser-step small { color:var(--muted) }
+.browser-shortcut { position:relative }
+.browser-shortcut.active::after { content:''; position:absolute; right:2px; top:2px; width:7px; height:7px; background:#149766; border-radius:50% }
 .nav-dialog{width:min(550px,calc(100vw - 30px));max-height:85vh}
 .memory-dialog{width:min(660px,calc(100vw - 30px))}
 .memory-dialog textarea,.memory-ledger{width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;background:#fafbf9}

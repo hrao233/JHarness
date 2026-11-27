@@ -331,24 +331,37 @@ export function TaskRecovery({ task, blocked, canceling, resume, cancel }) {
   </section>;
 }
 
-export function ApprovalCard({ item, decide, dismiss, disabled, dismissing, children }) {
+export function ApprovalCard({ item, decide, openBrowser, dismiss, disabled, dismissing, children }) {
+  const takeover = item.operation === 'browser_takeover';
+  const origin = item.operation === 'browser_origin';
   const command = item.operation === 'run_command';
   const plugin = item.operation === 'install_plugin';
   const web = item.operation === 'web_fetch' || item.operation === 'web_search';
+  const automation = item.operation === 'automation_create'
+    || item.operation === 'automation_update'
+    || item.operation === 'automation_delete';
   const interruption = item.interruptedFrom === 'PENDING' ? '等待批准时中断。'
     : item.interruptedFrom === 'APPROVED' ? '已记录批准，执行结果待核对。' : '此记录已中断，执行结果待核对。';
   return <div className="approval-card" role={!dismiss && children === undefined ? 'alert' : undefined}>
     <div className="approval-title"><ShieldAlert size={18}/><strong>{command ? '运行 PowerShell 命令'
+      : takeover ? '人工接管浏览器' : origin ? '访问外部站点'
       : plugin ? '安装并启用工具插件'
+      : automation ? (item.operation === 'automation_create' ? '创建定时自动任务'
+        : item.operation === 'automation_update' ? '更新定时自动任务' : '删除定时自动任务')
       : web ? (item.operation === 'web_search' ? '搜索网页' : '读取网页')
       : item.operation === 'create_file' ? '创建文件' : '编辑文件'}</strong>
       {item.path && <code>{item.path}</code>}</div>
     {dismiss && <p className="muted">{interruption}清除记录只会将其从此处移除。</p>}
-    {command || web || plugin ? <>
+    {takeover && openBrowser && <button type="button" onClick={openBrowser}>打开内置浏览器</button>}
+    {command || web || plugin || automation || origin || takeover ? <>
       {!dismiss && <div>{command ? '命令以当前 Windows 用户权限运行，可以访问项目目录之外的资源。'
+        : origin ? '批准后，本会话可继续读取和操作此来源的网页。'
+        : takeover ? '请在内置浏览器完成以下操作，再继续任务。'
         : plugin ? '批准后仅在当前项目启用此版本。插件副本以当前 Windows 用户权限运行。'
+        : automation ? '批准后将在当前项目更新自动任务配置；已启用任务会在桌面应用运行期间按计划触发。'
         : '批准后，下面的地址或搜索内容将用于发起网络请求。'}</div>}
-      <pre className="approval-command" tabIndex={0} aria-label={command ? 'PowerShell 命令' : plugin ? '插件启动配置' : '网络请求'}>{item.after}</pre>
+      <pre className="approval-command" tabIndex={0}
+        aria-label={command ? 'PowerShell 命令' : plugin ? '插件启动配置' : automation ? '自动任务配置' : '网络请求'}>{item.after}</pre>
     </> : <details><summary>查看变更内容</summary>
       {!!item.before && <pre className="before">{item.before}</pre>}
       <pre className="after">{item.after || '（移除选中的原文）'}</pre>
@@ -357,8 +370,8 @@ export function ApprovalCard({ item, decide, dismiss, disabled, dismissing, chil
       <button type="button" className="secondary" disabled={disabled} onClick={() => dismiss(item.id)}>
         {dismissing ? '正在清除…' : '清除记录'}
       </button> : <>
-      <button className="secondary" onClick={() => decide(item.id, false)}>拒绝</button>
-      <button className="primary" onClick={() => decide(item.id, true)}>批准这一次</button>
+      <button className="secondary" onClick={() => decide(item.id, false)}>{takeover ? '中止浏览器任务' : '拒绝'}</button>
+      <button className="primary" onClick={() => decide(item.id, true)}>{takeover ? '我已完成操作，继续任务' : origin ? '批准访问此来源' : '批准这一次'}</button>
     </>)}</div>}
   </div>;
 }

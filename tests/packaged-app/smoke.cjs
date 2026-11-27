@@ -96,6 +96,7 @@ async function verifyInterruptedApproval(data) {
   assert.match(smoke.worktrees, /隔离工作树/);
   assert.match(smoke.automations, /当前项目还没有自动任务/);
   assert.match(smoke.maintenance, /本地数据与恢复/);
+  assert.equal(smoke.browser, '网页地址');
   assert.match(smoke.checkpoints, /当前会话还没有文件检查点/);
   const records = JSON.parse(await readFile(approvalsFile, 'utf8'));
   assert.deepEqual(records, [{ ...record, status: 'DISMISSED', interruptedFrom: 'PENDING' }]);
@@ -191,6 +192,11 @@ async function verifyDesktopConversation(data) {
   let fixtureError;
   const server = createServer(async (request, response) => {
     try {
+      if (request.method === 'GET' && request.url === '/paper') {
+        response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        response.end('<!doctype html><title>Paper Inspiration</title><p>angle-core paper</p>');
+        return;
+      }
       let raw = '';
       for await (const chunk of request) raw += chunk;
       const body = JSON.parse(raw);
@@ -228,7 +234,7 @@ async function verifyDesktopConversation(data) {
         assert.equal(result?.tool_call_id, 'desktop-smoke-file');
         assert.equal(await readFile(target, 'utf8'), fixture.content);
         stages.push('approved');
-        stream({ role: 'assistant', content: fixture.reply }, 'stop');
+        stream({ role: 'assistant', content: fixture.replyMarkdown || fixture.reply }, 'stop');
       }
       response.end('data: [DONE]\n\n');
     } catch (error) {
@@ -240,6 +246,9 @@ async function verifyDesktopConversation(data) {
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   fixture.endpoint = 'http://127.0.0.1:' + server.address().port + '/v1';
+  fixture.paperUrl = 'http://127.0.0.1:' + server.address().port + '/paper';
+  fixture.replyMarkdown = '已按批准内容创建文件。[参考论文](' + fixture.paperUrl + ')';
+  fixture.reply = '已按批准内容创建文件。参考论文';
 
   try {
     const live = await run(data, 'conversation', { fixture, releaseStream });

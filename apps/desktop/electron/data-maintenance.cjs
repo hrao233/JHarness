@@ -7,9 +7,14 @@ const FORMAT = 'jharness-backup-v1';
 const MAX_FILES = 50_000;
 const MAX_BYTES = 2 * 1024 * 1024 * 1024;
 
+const browserData = new Set(['partitions', 'browser-profiles', 'cache', 'code cache', 'gpucache',
+  'dawncache', 'network', 'session storage', 'local storage', 'blob_storage']);
+
 function excluded(name) {
+  if (browserData.has(name.toLowerCase())) return true;
   return name === 'worktrees'
     || name === 'settings-lock.sqlite'
+    || name.startsWith('settings-lock.sqlite-')
     || name === 'session-search.sqlite'
     || name.startsWith('session-search.sqlite-')
     || name.endsWith('.tmp');
@@ -75,6 +80,7 @@ async function createBackup(dataDirectory, destinationRoot) {
     for (const entry of entries) {
       await fs.cp(path.join(source, entry), path.join(output, entry), {
         recursive: true,
+        filter: file => !excluded(path.basename(file)),
         errorOnExist: false,
         force: true
       });
@@ -153,6 +159,18 @@ async function inspectBackup(directory) {
   };
 }
 
+// Keep live Chromium files in place, including profiles nested under workspaces.
+async function clearRestorable(file) {
+  if (browserData.has(path.basename(file).toLowerCase())) return;
+  const stat = await fs.lstat(file).catch(error => {
+    if (error.code !== 'ENOENT') throw error;
+  });
+  if (!stat) return;
+  if (!stat.isDirectory()) return fs.rm(file, { force: true });
+  for (const child of await fs.readdir(file)) await clearRestorable(path.join(file, child));
+  if (!(await fs.readdir(file)).length) await fs.rmdir(file);
+}
+
 async function restoreBackup(dataDirectory, backupDirectory) {
   const target = await fs.realpath(dataDirectory);
   const source = await inspectBackup(backupDirectory);
@@ -162,9 +180,11 @@ async function restoreBackup(dataDirectory, backupDirectory) {
   for (const entry of source.entries) {
     const destination = path.join(target, entry);
     if (!within(target, destination)) throw new Error('恢复条目越界。');
-    await fs.rm(destination, { recursive: true, force: true });
+    if (excluded(entry)) continue;
+    await clearRestorable(destination);
     await fs.cp(path.join(source.path, entry), destination, {
       recursive: true,
+      filter: file => !excluded(path.basename(file)),
       errorOnExist: false,
       force: true
     });

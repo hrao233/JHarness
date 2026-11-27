@@ -1,6 +1,11 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('jharness', {
+  browserLayout: (project, bounds) => ipcRenderer.invoke('jh:browser-layout', project, bounds),
+  browserPresent: (project, mode) => ipcRenderer.invoke('jh:browser-present', project, mode),
+  browserState: project => ipcRenderer.invoke('jh:browser-state', project),
+  browserControl: (project, action, url = '') => ipcRenderer.invoke('jh:browser-control', project, action, url),
+  openBrowser: (project, url) => ipcRenderer.invoke('jh:browser-open', project, url),
   state: () => ipcRenderer.invoke('jh:state'),
   openProject: () => ipcRenderer.invoke('jh:project'),
   newSession: (project, preferredId) => ipcRenderer.invoke('jh:session', project, preferredId),

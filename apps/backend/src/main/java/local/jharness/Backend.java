@@ -36,6 +36,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Executors;
+import local.jharness.agent.AutomationStore;
 import local.jharness.agent.ConversationRuntime;
 import local.jharness.agent.DurableApprovalStore;
 import local.jharness.agent.DurableConversation;
@@ -59,9 +60,11 @@ public final class Backend {
     private final SessionSearchIndex sessionSearch;
     private final ExternalPluginManager externalPlugins;
     private final Map<String, ExternalPluginManager> projectPlugins = new java.util.concurrent.ConcurrentHashMap<>();
+    private final local.jharness.browser.BrowserHostRegistry browsers;
+    private final AutomationStore automations;
     private final ConversationRuntime conversations = new ConversationRuntime(this::event, Backend::describe);
     private final DurableConversation durableConversations =
-            new DurableConversation(this::event, Backend::describe);
+            new DurableConversation(this::event, Backend::describe, conversations);
 
     private record ChatMessage(String id, String role, String text, String timestamp, int turn) {}
     private record Bookmark(String id, String projectId, String sessionId, String messageId,
@@ -71,6 +74,8 @@ public final class Backend {
     private Backend(PrintStream protocol, Path dataDirectory) {
         this.protocol = protocol;
         this.dataDirectory = dataDirectory;
+        this.browsers = new local.jharness.browser.BrowserHostRegistry(dataDirectory);
+        this.automations = new AutomationStore(AutomationStore.resolveDefaultFile(dataDirectory));
         this.sessionSearch = new SessionSearchIndex(dataDirectory.resolve("session-search.sqlite"));
         this.externalPlugins = new ExternalPluginManager(dataDirectory);
     }
@@ -91,6 +96,7 @@ public final class Backend {
                 var request = json.readTree(line);
                 if (request.path("method").asText().equals("stop")) {
                     String runId = request.path("params").path("runId").asText();
+                    browsers.stop(runId);
                     conversations.stop(runId);
                     durableConversations.stop(runId);
                     send(Map.of("id", request.path("id").asText(), "result", true));
@@ -101,6 +107,7 @@ public final class Backend {
         } finally {
             conversations.close();
             durableConversations.close();
+            browsers.close();
             projectPlugins.values().forEach(ExternalPluginManager::close);
             externalPlugins.close();
             workers.shutdownNow();
@@ -112,6 +119,14 @@ public final class Backend {
         JsonNode params = request.path("params");
         try {
             Object result = switch (request.path("method").asText()) {
+                case "configureBrowserBridge" -> {
+                    browsers.configure(identifier(params,"projectId"), required(params,"url"));
+                    yield true;
+                }
+                case "browserState" -> browsers.state(identifier(params,"projectId"));
+                case "browserNavigate", "browserControl" -> browsers.control(identifier(params,"projectId"),
+                        request.path("method").asText().equals("browserNavigate") ? "navigate" : required(params,"action"),
+                        params.path("url").asText());
                 case "ping" -> Map.of("version", "0.1.0");
                 case "testModel" -> testModel(params);
                 case "history" -> history(params);
@@ -164,6 +179,7 @@ public final class Backend {
                 case "dismissApproval" -> dismissApproval(params);
                 case "approve" -> conversations.approve(identifier(params, "runId"),
                         identifier(params, "approvalId"), params.path("allow").asBoolean(false));
+                case "listAutomations" -> automations.list(params.path("projectId").asText(""));
                 default -> throw new IllegalArgumentException("未知操作。");
             };
             send(Map.of("id", id, "result", result));
@@ -391,8 +407,10 @@ public final class Backend {
     }
 
     private Object currentTask(JsonNode params) throws Exception {
-        return DurableConversation.task(
-                ConversationRuntime.openSession(workspace(params), context(params)));
+        var workspace = workspace(params);
+        var live = durableConversations.liveBrowserTask(workspace,identifier(params,"sessionId"));
+        return live.isEmpty() ? DurableConversation.task(
+                ConversationRuntime.openSession(workspace, context(params))) : live;
     }
 
     private List<Map<String, Object>> listTasks(JsonNode params) throws Exception {
@@ -404,7 +422,9 @@ public final class Backend {
                     .userId(USER_ID)
                     .sessionId(sessionId)
                     .build();
-            var log = ConversationRuntime.openSession(workspace(session), sessionContext);
+            var workspace = workspace(session);
+            var live = durableConversations.liveBrowserTask(workspace, sessionId);
+            var log = ConversationRuntime.openSession(workspace, sessionContext);
             for (var task : DurableConversation.taskList(log)) {
                 if (!task.actionable()) continue;
                 var value = new LinkedHashMap<String, Object>();
@@ -419,6 +439,7 @@ public final class Backend {
                 value.put("approvals", task.approvals());
                 value.put("uncertain", task.uncertain());
                 value.put("uncertainCalls", task.uncertainCalls());
+                if (task.turnId().equals(live.get("turnId"))) value.putAll(live);
                 result.add(value);
             }
         }
@@ -565,7 +586,9 @@ public final class Backend {
         var names = tools.stream().map(tool -> tool.getName()).collect(java.util.stream.Collectors.toSet());
         tools.addAll(externalPlugins.tools(localIds, names));
         return new ConversationRuntime.Request(workspace(params), project, runtimeContext, message,
-                task, model, auxiliary, autoMemory, permission, List.copyOf(tools), local);
+                task, model, auxiliary, autoMemory, permission, List.copyOf(tools), local, browsers,
+                !params.path("provider").asText().equals("deepseek") || params.path("model").asText().equals("deepseek-flash"),
+                automations);
     }
 
     private List<DurableApprovalStore.ApprovalRecord> listApprovals(JsonNode params) throws Exception {
@@ -725,6 +748,7 @@ public final class Backend {
     }
 
     private void event(String runId, String type, Object data) {
+        if ("done".equals(type)) browsers.finished(runId);
         if ("done".equals(type)) synchronized (executionLock) { executingSessions.remove(runId); }
         send(Map.of("event", type, "runId", runId, "data", data));
     }
